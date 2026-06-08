@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- ====================================================================
+       EDIT THIS ONE LINE: point it at your Nuclear Option install folder
+       (the folder that contains NuclearOption.exe).
+       BepInEx 5 (mono) is installed into this same folder.
+       ==================================================================== -->
+  <PropertyGroup>
+    <GamePath>E:\SlowGames\steamapps\common\Nuclear Option</GamePath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>NuclearOption-MouseAim</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <!-- Game/Unity/BepInEx assemblies already live in the game folder; don't copy them. -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <GameManaged>$(GamePath)\NuclearOption_Data\Managed</GameManaged>
+    <BepInExCore>$(GamePath)\BepInEx\core</BepInExCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(BepInExCore)\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- HarmonyX — ships with BepInEx 5 in BepInEx\core. -->
+    <Reference Include="0Harmony">
+      <HintPath>$(BepInExCore)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManaged)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManaged)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- OnGUI overlay (step 2) -->
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- FlightHud.virtualJoystickPos is a UnityEngine.UI.Image (hide it on engage, step 3) -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Rigidbody / gForce (optional HUD telemetry) -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(GameManaged)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- UnityEngine.Input (legacy "Mouse X/Y" axes) for high-res raw mouse delta -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameManaged)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Rewired: reading the game's "Pan View"/"Tilt View"/"Pitch"/"Roll"/"Yaw" axes (step 2+) -->
+    <Reference Include="Rewired_Core">
+      <HintPath>$(GameManaged)\Rewired_Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Aircraft/Player derive from Mirage's NetworkBehaviour. -->
+    <Reference Include="Mirage">
+      <HintPath>$(GameManaged)\Mirage.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
