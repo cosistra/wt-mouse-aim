@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -20,7 +21,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.12.0";
+        public const string PluginVersion = "0.13.0";
 
         internal static ManualLogSource Log;
 
@@ -39,7 +40,7 @@ namespace NuclearOptionMouseAim
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(PilotPlayerStatePatch));
             harmony.PatchAll(typeof(CockpitCameraPatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (point-and-chase + screen-lock persistence + any-camera chase — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (point-and-chase + Win32 raw mouse + any-camera chase — tune live via F1).");
         }
 
         private void Update()
@@ -169,9 +170,9 @@ namespace NuclearOptionMouseAim
             DebugLogging     = cf.Bind("HUD", "DebugLogging", false,
                 "Dump mouse delta, marker-vs-nose angle, camera-vs-nose angle and chase outputs to the BepInEx log/console (~twice a second). For diagnosing aim issues; leave off normally.");
 
-            MouseSensitivity = cf.Bind("Aim", "MouseSensitivity", 0.03f, new ConfigDescription(
-                "Degrees the aim circle moves per unit of mouse motion (Unity's raw Mouse X/Y axis, roughly pixel-scale). ~0.03 is a sane start; drag the slider for feel. Higher = the circle races with small hand movements; lower = finer, calmer aiming.",
-                new AcceptableValueRange<float>(0.002f, 1.0f)));
+            MouseSensitivity = cf.Bind("Aim", "MouseSensitivity", 0.30f, new ConfigDescription(
+                "Degrees the aim circle moves per unit of mouse motion. The raw Win32 delta is normalised to Unity's legacy axis scale (x0.1) so this number is read-backend independent. ~0.3 is a sane start; drag the slider for feel. Higher = the circle races with small hand movements; lower = finer, calmer aiming.",
+                new AcceptableValueRange<float>(0.01f, 2.0f)));
             MouseSmoothing   = cf.Bind("Aim", "MouseSmoothing", 0.20f, new ConfigDescription(
                 "Smooths raw mouse motion to kill jitter/stepping. 0 = raw (most responsive, can feel jumpy); ~0.2 = light; 0.5+ = very smooth but laggy.",
                 new AcceptableValueRange<float>(0f, 0.9f)));
@@ -248,8 +249,22 @@ namespace NuclearOptionMouseAim
         private static int _lastAircraftId = -1;
         private static Vector2 _smoothedDelta;             // one-pole-smoothed mouse delta
         private static bool _captured;                     // we are reading the mouse for aiming this frame
-        private static bool _captureFresh;                 // true on the frame aiming begins (drop the lock-warp jump)
+        private static bool _captureFresh;                 // true on the frame aiming begins (drop the recenter-warp jump)
         private static bool _managing;                     // we are currently driving the cursor regime at all
+
+        // Win32 raw mouse: GetCursorPos gives a true hardware delta from frame 1, immune to Unity's
+        // focus-gated legacy "Mouse X/Y" axis (which stays dead until the window gets a focus event,
+        // i.e. an alt-tab). We recenter the OS cursor to the primary-screen centre each captured frame
+        // so big sweeps never clamp at the desktop edge.
+        [StructLayout(LayoutKind.Sequential)] private struct POINT { public int X; public int Y; }
+        [DllImport("user32.dll")] private static extern bool GetCursorPos(out POINT p);
+        [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")] private static extern int GetSystemMetrics(int n);
+        private const int SM_CXSCREEN = 0, SM_CYSCREEN = 1;
+        // Unity's legacy "Mouse X" axis ≈ hardwarePixels x 0.1 (its default InputManager sensitivity).
+        // Multiplying the raw Win32 pixel delta by the same factor keeps MouseSensitivity meaning the
+        // same thing whether we read via Win32 or the Unity axis.
+        private const float PixelToAxis = 0.1f;
 
         public static Vector3 AimForward => _aimForward;
         public static Vector3 MouseAimPos(Aircraft ac) => ac.transform.position + _aimForward * Cfg.AimDistance.Value;
@@ -334,32 +349,50 @@ namespace NuclearOptionMouseAim
             }
         }
 
-        // Mouse delta straight from Unity's legacy axis. Under lockState=Locked (the game's own flying
-        // state) this reports per-frame movement reliably from the first frame — the focus-gating that
-        // killed it before only happens when the cursor is NOT locked. "Mouse Y" is already +up, so no
-        // flip. We skip the first aiming frame because entering Locked warps the cursor to centre, which
-        // can register as one spurious delta.
+        // Raw hardware mouse delta via Win32 — works from frame 1 with no alt-tab, unlike Unity's
+        // focus-gated legacy axis. Read the OS cursor, take its delta from the primary-screen centre,
+        // then warp it back to centre so the next frame measures from the same origin and big sweeps
+        // never clamp at the desktop edge. Screen Y is +down, so we flip it to +up. The factor brings
+        // the pixel delta onto Unity's legacy-axis scale so MouseSensitivity is read-backend independent.
         private static Vector2 ReadMouseDelta()
         {
-            if (_captureFresh)
+            int cx = GetSystemMetrics(SM_CXSCREEN) / 2;
+            int cy = GetSystemMetrics(SM_CYSCREEN) / 2;
+            if (!GetCursorPos(out POINT p))
             {
-                _captureFresh = false;
+                SetCursorPos(cx, cy);
                 return Vector2.zero;
             }
-            return new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y"));
+            float dx = p.X - cx;
+            float dy = p.Y - cy;
+            SetCursorPos(cx, cy);                 // recenter for the next frame
+            if (_captureFresh)
+            {
+                _captureFresh = false;            // first captured frame is just the warp-to-centre; ignore it
+                return Vector2.zero;
+            }
+            return new Vector2(dx, -dy) * PixelToAxis;
         }
 
-        // Single cursor regime that matches the game's own: hidden + lockState=Locked whenever flying
-        // (so BOTH our cockpit aim read and the game's free-look — cockpit and 3rd-person orbit, which
-        // only look when the cursor is hidden — work), and a normal visible pointer for menus/pause.
-        // `aim` only tracks whether WE are reading the mouse for the marker this frame (cockpit, not
-        // free-looking); it no longer changes the lock state, so there's nothing left to fight.
-        private static void ApplyCursorRegime(bool hidden, bool aim)
+        // Three cursor regimes, scoped so each one cooperates with what reads the mouse:
+        //   aimCapture (cockpit mouse-aim) — WE own the cursor: unlocked + hidden, and our Win32
+        //              recenter produces the raw delta. lockState=None is essential: Locked would let
+        //              Unity warp the cursor to centre too and zero our GetCursorPos delta.
+        //   flyHidden  (3rd-person/orbit, or Free Look held) — the game's own flying regime: hidden +
+        //              Locked. Orbit free-look only reads the look axes while the cursor is hidden, so
+        //              this is what keeps 3p free-look alive. We do NOT touch Win32 here.
+        //   visible    (menu/pause/UI) — a normal pointer.
+        private static void ApplyCursorRegime(bool flyHidden, bool aimCapture)
         {
             _managing = true;
-            if (aim && !_captured) _captureFresh = true; // drop the lock-warp jump on the frame aiming starts
-            _captured = aim;
-            if (hidden)
+            if (aimCapture && !_captured) _captureFresh = true; // drop the recenter-warp jump as aiming starts
+            _captured = aimCapture;
+            if (aimCapture)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = false;
+            }
+            else if (flyHidden)
             {
                 Cursor.lockState = CursorLockMode.Locked;
                 Cursor.visible = false;
