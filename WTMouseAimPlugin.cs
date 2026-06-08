@@ -21,7 +21,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.13.0";
+        public const string PluginVersion = "0.19.0";
 
         internal static ManualLogSource Log;
 
@@ -40,7 +40,7 @@ namespace NuclearOptionMouseAim
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(PilotPlayerStatePatch));
             harmony.PatchAll(typeof(CockpitCameraPatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (point-and-chase + Win32 raw mouse + any-camera chase — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point + proportional chase w/ rate damping + Win32 raw mouse — tune live via F1).");
         }
 
         private void Update()
@@ -190,8 +190,8 @@ namespace NuclearOptionMouseAim
             PitchYawSensitivity = cf.Bind("Control", "PitchYawSensitivity", 3.0f, new ConfigDescription(
                 "How hard the instructor pulls the nose toward the circle. Higher = snappier and closes faster, but can overshoot and wobble (raise ChaseDamping to compensate); lower = gentler, easier fine aiming. ~3 is balanced.",
                 new AcceptableValueRange<float>(0.5f, 8f)));
-            ChaseDamping        = cf.Bind("Control", "ChaseDamping", 0.0f, new ConfigDescription(
-                "Calms the inputs as the nose nears the circle so it eases in instead of overshooting — opposes the nose's own turn rate. 0 = off (default; snappy). Raise toward ~0.3 ONLY if the plane death-wobbles/oscillates around the aim direction.",
+            ChaseDamping        = cf.Bind("Control", "ChaseDamping", 0.25f, new ConfigDescription(
+                "Calms the inputs as the nose nears the circle so it eases in instead of overshooting — opposes the nose's own turn rate (the anti-wobble term). ~0.25 is a smooth default. 0 = off (snappy, but the rudder can hunt side-to-side); raise toward ~0.4 if it still oscillates around the aim direction, lower if it feels sluggish to close.",
                 new AcceptableValueRange<float>(0f, 1f)));
             AggressiveTurnAngle = cf.Bind("Control", "AggressiveTurnAngle", 10.0f, new ConfigDescription(
                 "Nose-off-target angle (deg) at which the plane fully commits to banking. Below it the bank rolls in proportionally (precise fine aiming); above it it's a full bank-to-turn. LOWER = banks sooner and turns harder; higher = stays wings-level longer and leans on the weak rudder (can feel like a deadzone).",
@@ -237,18 +237,21 @@ namespace NuclearOptionMouseAim
     }
 
     // ---------------------------------------------------------------------------------------------
-    // The aim rig. The marker is a WORLD-LOCKED unit direction (not an airframe-relative offset):
-    // mouse delta nudges it (screen-relative, since the cockpit cam rolls with the plane we use the
-    // aircraft axes), and each frame it is clamped to within MaxAimAngle of the current nose. Because
-    // it is world-locked, the plane can fly its nose ONTO it and the offset shrinks to zero — that is
-    // what makes the controller a point-and-chase instructor instead of a rate joystick. Re-seeds to
-    // the boresight whenever we (re)acquire an aircraft or leave cockpit.
+    // The aim rig. The marker is a WORLD-LOCKED follow point (spec §2): the mouse rotates a world-space
+    // aim direction and the chase flies the nose ONTO that point. The point stays exactly where you put
+    // it in the world — the plane follows it and the offset eases to zero as the nose arrives. This is
+    // point-and-chase, NOT a joystick: the marker never rides the airframe (that was the v0.14 mistake),
+    // and nothing here ever snaps it back to the nose. The only things that move it are the mouse nudge
+    // and the cone clamp. Re-seeds to the boresight whenever we (re)acquire an aircraft.
     internal static class AimRig
     {
         private static Vector3 _aimForward = Vector3.zero; // world-space unit direction (the marker)
         private static int _lastAircraftId = -1;
         private static Vector2 _smoothedDelta;             // one-pole-smoothed mouse delta
         private static bool _captured;                     // we are reading the mouse for aiming this frame
+        private static Vector3 _prevNoseDbg = Vector3.zero; // last Update's nose dir (diagnostic: plane-driven marker decay)
+        private static Vector3 _prevAimDbg  = Vector3.zero; // last Update's marker dir (diagnostic: total marker rotation)
+        private static float   _lastAimLog;                 // throttle the [aim] trace to ~5/sec
         private static bool _captureFresh;                 // true on the frame aiming begins (drop the recenter-warp jump)
         private static bool _managing;                     // we are currently driving the cursor regime at all
 
@@ -310,11 +313,11 @@ namespace NuclearOptionMouseAim
                 _smoothedDelta = Vector2.zero;
             }
 
-            // The marker is WORLD-LOCKED (exactly v0.10): once placed in world space it stays put while
-            // the plane flies its nose onto it and the offset converges to zero — the point-and-chase
-            // instructor feel. The only thing that moves it is the mouse nudge below and the cone clamp.
-            // Nudge the marker by mouse delta only while we own the cursor for aiming; otherwise it stays
-            // parked in the world (frozen during menus/map/pause/free-look/external cam).
+            // The marker is WORLD-LOCKED: once placed in world space it stays exactly where you put it
+            // while the plane flies its nose onto it (point-and-chase). Nothing here pulls it back toward
+            // the nose; only the mouse nudge below and the cone clamp move it. Nudge it by the mouse delta
+            // only while we own the cursor for aiming; otherwise it stays parked in the world (frozen
+            // during menus/map/pause/free-look/external cam).
             Vector2 raw = Vector2.zero;
             if (aimCapture)
             {
@@ -335,18 +338,44 @@ namespace NuclearOptionMouseAim
                 _smoothedDelta = Vector2.zero; // drop stale delta so it doesn't lurch on resume
             }
 
-            // Clamp to the cone around the CURRENT nose. If inside the cone this is a no-op (marker
-            // stays world-locked); at the edge it "sticks" = a sustained max-rate turn command.
-            _aimForward = Vector3.RotateTowards(t.forward, _aimForward, Cfg.MaxAimAngle.Value * Mathf.Deg2Rad, 0f).normalized;
+            // Clamp the marker into the cone around the CURRENT nose — but ONLY when it actually exceeds
+            // the cone. Vector3.RotateTowards has a near-parallel degeneracy: when the marker is a hair off
+            // the nose (under ~0.3deg) its rotation axis collapses and it snaps the marker ONTO the nose
+            // instead of leaving it alone, then re-eats every tiny mouse nudge. That glued the marker to
+            // the boresight ("snaps to 0, impossible to ease off") — the opposite of a max-angle clamp.
+            // Guarding on offset > MaxAimAngle makes it a true limiter: inside the cone it's a genuine
+            // no-op (marker perfectly free near centre), and it only pulls back when you over-command.
+            Vector3 preClamp = _aimForward;
+            if (Vector3.Angle(t.forward, _aimForward) > Cfg.MaxAimAngle.Value)
+                _aimForward = Vector3.RotateTowards(t.forward, _aimForward, Cfg.MaxAimAngle.Value * Mathf.Deg2Rad, 0f).normalized;
 
-            if (Cfg.DebugLogging.Value && Time.frameCount % 30 == 0)
+            // Per-frame diagnostics. The "snaps to 0 / can't leave centre" question is: does the marker
+            // sit still while the nose eats it (plane-driven decay), or does the marker itself fail to move?
+            //   markerOff  : current nose->marker angle (the residual we're steering on)
+            //   markerMoved: how far the marker rotated in WORLD since last Update (mouse + clamp)
+            //   noseMoved  : how far the NOSE rotated in world since last Update (plane chasing in) — if this
+            //                tracks markerOff shrinking, the plane is eating the offset (one-frame arrival)
+            //   clamp      : how much the cone clamp pulled the marker back toward the nose this frame
+            if (Cfg.DebugLogging.Value && Time.time - _lastAimLog >= 0.2f)
             {
-                TryGetContext(out _, out var dcam);
-                float camOff = dcam != null ? Vector3.Angle(dcam.transform.forward, t.forward) : -1f;
-                WTMouseAimPlugin.Log.LogInfo(
-                    $"[aim] raw=({raw.x:0.00},{raw.y:0.00}) sm=({_smoothedDelta.x:0.00},{_smoothedDelta.y:0.00}) " +
-                    $"markerOff={Vector3.Angle(t.forward, _aimForward):0.00}deg camOff={camOff:0.00}deg cap={_captured}");
+                float markerOff   = Vector3.Angle(t.forward, _aimForward);
+                float markerMoved = _prevAimDbg  == Vector3.zero ? 0f : Vector3.Angle(_aimForward, _prevAimDbg);
+                float noseMoved   = _prevNoseDbg == Vector3.zero ? 0f : Vector3.Angle(t.forward, _prevNoseDbg);
+                float clamp       = Vector3.Angle(preClamp, _aimForward);
+                bool  active      = raw.sqrMagnitude > 1e-6f || markerOff > 0.02f || markerMoved > 0.01f || noseMoved > 0.01f;
+                if (active)
+                {
+                    _lastAimLog = Time.time;
+                    TryGetContext(out _, out var dcam);
+                    float camOff = dcam != null ? Vector3.Angle(dcam.transform.forward, t.forward) : -1f;
+                    WTMouseAimPlugin.Log.LogInfo(
+                        $"[aim] t={Time.time:0.000} f={Time.frameCount} raw=({raw.x:0.000},{raw.y:0.000}) " +
+                        $"markerOff={markerOff:0.000}deg markerMoved={markerMoved:0.000} noseMoved={noseMoved:0.000} " +
+                        $"clamp={clamp:0.000} camOff={camOff:0.00} cap={_captured}");
+                }
             }
+            _prevAimDbg  = _aimForward;
+            _prevNoseDbg = t.forward;
         }
 
         // Raw hardware mouse delta via Win32 — works from frame 1 with no alt-tab, unlike Unity's
@@ -507,6 +536,7 @@ namespace NuclearOptionMouseAim
         private static float _disRamp;    // 1->0 disengage blend
         private static Vector3 _prevFwd;  // last frame's nose direction (for rotation-rate damping)
         private static bool  _prevFwdValid;
+        private static float _lastChaseLog; // throttle the [chase] trace to ~5/sec
 
         public static bool IsFlying => _active;
 
@@ -568,20 +598,29 @@ namespace NuclearOptionMouseAim
                 // Nose rotation rate (world delta of the forward axis), split into the body up/right
                 // components: how fast the nose is currently pitching up and yawing right. This is the
                 // PLANE'S own motion (independent of the mouse), so damping on it never fights a flick.
-                float pitchRate = 0f, yawRate = 0f;
+                float pitchRate = 0f, yawRate = 0f, noseTurnDeg = 0f;
                 if (_prevFwdValid && dt > 1e-5f)
                 {
                     Vector3 noseRate = (t.forward - _prevFwd) / dt;
                     pitchRate = Vector3.Dot(noseRate, t.up);    // +: nose swinging up
                     yawRate   = Vector3.Dot(noseRate, t.right); // +: nose swinging right
+                    noseTurnDeg = Vector3.Angle(t.forward, _prevFwd); // total nose rotation this FixedUpdate
                 }
                 _prevFwd = t.forward;
                 _prevFwdValid = true;
 
-                // PITCH/YAW: proportional pull toward the marker, MINUS a damping term on the nose's own
-                // turn rate so the inputs fade out as it closes instead of overshooting (the cure for the
-                // wobble). In this game nose-up = NEGATIVE ci.pitch, so for an above-nose marker -local.y
-                // already gives a pull-up command; +pitchRate*damp opposes the climb as the nose arrives.
+                // PITCH/YAW: straight PROPORTIONAL pull toward the marker, MINUS a damping term on the
+                // nose's own turn rate so the inputs fade out as it closes instead of overshooting (the
+                // cure for the side-to-side wobble). In this game nose-up = NEGATIVE ci.pitch, so for an
+                // above-nose marker -local.y already gives a pull-up command; +pitchRate*damp opposes the
+                // climb as the nose arrives. The command tapers linearly to 0 as the offset closes, so the
+                // nose decelerates into the marker instead of saturating full-deflection right up to the
+                // crossing (which, with zero damping, was the limit-cycle hunt). Convergent (command(0)=0):
+                // the nose still arrives and zeroes out — NOT a joystick.
+                //
+                // (v0.18's FineShape sqrt "fine assist" was removed in v0.19: it boosted small offsets so
+                // hard that even a 6deg offset saturated the rudder, which is exactly what made it hunt.
+                // Proportional + rate damping handles fine aiming cleanly without the over-gain.)
                 float damp = Cfg.ChaseDamping.Value;
                 float tgtP = Mathf.Clamp((-local.y * sens + pitchRate * damp) * Cfg.PitchGain.Value, -1f, 1f);
                 float tgtY = Mathf.Clamp(( local.x * sens - yawRate   * damp) * Cfg.YawGain.Value,   -1f, 1f);
@@ -598,20 +637,34 @@ namespace NuclearOptionMouseAim
                 float rollBlend = Mathf.Clamp01(off / Mathf.Max(1f, Cfg.AggressiveTurnAngle.Value));
                 float tgtR = Mathf.Clamp(Mathf.Lerp(wingsLevelRoll, aggressiveRoll, rollBlend) * Cfg.RollGain.Value, -1f, 1f);
 
-                float slew = Cfg.OutputSlew.Value * dt; // anti-jerk rate limit
+                // Slew-rate-limit the outputs (anti-jerk against mouse jitter / a fresh flick). Symmetric
+                // on all three axes — the v0.16 asymmetric "EaseSlew" experiment was reverted; the
+                // near-center feel is fixed by FineShape above, not by letting the output fall freely.
+                float slew = Cfg.OutputSlew.Value * dt;
                 _outP = Mathf.MoveTowards(_outP, tgtP, slew);
-                _outR = Mathf.MoveTowards(_outR, tgtR, slew);
                 _outY = Mathf.MoveTowards(_outY, tgtY, slew);
+                _outR = Mathf.MoveTowards(_outR, tgtR, slew);
 
                 ci.pitch = Mathf.Clamp(_outP, -1f, 1f);
                 ci.roll  = Mathf.Clamp(_outR, -1f, 1f);
                 ci.yaw   = Mathf.Clamp(_outY, -1f, 1f);
                 _disRamp = 1f; // primed for the next disengage
 
-                if (Cfg.DebugLogging.Value && Time.frameCount % 30 == 0)
+                // Chase trace, throttled to ~5/sec (no longer per-frame — the snap diagnosis is done).
+                //   off      : nose->marker angle before this frame's command takes effect
+                //   noseTurn : how far the nose actually rotated THIS FixedUpdate
+                //   raw      : body-frame marker offset components (x = right, y = up)
+                //   tgt/out  : commanded vs slewed pitch/roll/yaw — if tgt Y pins at +/-1.00, the rudder
+                //              is saturating (the over-gain that caused the side-to-side hunt)
+                if (Cfg.DebugLogging.Value && Time.time - _lastChaseLog >= 0.2f &&
+                    (off > 0.02f || Mathf.Abs(_outP) > 0.005f || Mathf.Abs(_outY) > 0.005f || Mathf.Abs(_outR) > 0.005f))
+                {
+                    _lastChaseLog = Time.time;
                     WTMouseAimPlugin.Log.LogInfo(
-                        $"[chase] off={off:0.00}deg local=({local.x:0.000},{local.y:0.000}) " +
+                        $"[chase] t={Time.time:0.000} f={Time.frameCount} off={off:0.000}deg noseTurn={noseTurnDeg:0.000}deg " +
+                        $"raw=({local.x:0.000},{local.y:0.000}) " +
                         $"tgt P/R/Y=({tgtP:0.00},{tgtR:0.00},{tgtY:0.00}) out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00})");
+                }
             }
             else if (_disRamp > 0f)
             {
