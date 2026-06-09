@@ -3,6 +3,7 @@ using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using Rewired;
 using UnityEngine;
 
 namespace NuclearOptionMouseAim
@@ -21,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.19.0";
+        public const string PluginVersion = "0.21.1";
 
         internal static ManualLogSource Log;
 
@@ -40,7 +41,8 @@ namespace NuclearOptionMouseAim
             var harmony = new Harmony(PluginGuid);
             harmony.PatchAll(typeof(PilotPlayerStatePatch));
             harmony.PatchAll(typeof(CockpitCameraPatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point + proportional chase w/ rate damping + Win32 raw mouse — tune live via F1).");
+            harmony.PatchAll(typeof(CameraOrbitPatch));
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point + proportional chase w/ rate damping + per-axis manual override + Win32 raw mouse + 3rd-person mouse-aim w/ orbiting camera + RMB freeze — tune live via F1).");
         }
 
         private void Update()
@@ -54,10 +56,13 @@ namespace NuclearOptionMouseAim
                 return;
             if (!AimRig.TryGetContext(out var ac, out var cam))
                 return;
+            if (ac.disabled) // plane destroyed/disabled — nothing to aim, so draw nothing
+                return;
 
             Transform t = ac.transform;
             float dist = Cfg.AimDistance.Value;
             float off = Vector3.Angle(t.forward, AimRig.AimForward); // deg the nose is off the marker
+            bool inOrbit = CameraStateManager.cameraMode == CameraMode.orbit;
 
             // Boresight = where the nose points; aim = the world-locked marker direction.
             bool boreVis = WorldToGui(cam, t.position + t.forward * dist, out var boreScreen);
@@ -77,7 +82,10 @@ namespace NuclearOptionMouseAim
                 }
             }
 
-            if (boreVis && off >= 5f) // hide the boresight once the nose is basically on the marker
+            // Boresight cross (where the nose actually points). In cockpit we hide it once the nose is on
+            // the marker (declutter — it sits under the reticle anyway). In 3rd-person the airframe is
+            // off-centre from the reticle, so the cross is genuinely useful: always show it there.
+            if (boreVis && (inOrbit || off >= 5f))
                 Cross(boreScreen, 10f, 2f, new Color(0.6f, 0.9f, 1f, 0.9f)); // boresight: pale blue +
             if (aimVis)
                 CircleOutline(aimScreen, 13f, new Color(1f, 0.95f, 0.4f, 0.55f)); // aim marker: faint yellow ring
@@ -91,6 +99,22 @@ namespace NuclearOptionMouseAim
             GUI.Label(new Rect(12f, 12f, 560f, 22f),
                 $"WT MouseAim  off={off:0.0}°  cone={half:0}°  [{ctrl}]");
             GUI.color = prev;
+
+            // G-LOC warning: while the pilot is blacked/redded out from sustained G the game zeroes all
+            // stick input (PilotPlayerState: pilotStrength < 0.2), so the mod can't fly either. Surface it
+            // discreetly in amber, centred near the top, so the loss of control is explained rather than
+            // feeling like a mod bug.
+            if (ChaseController.PilotStrength < 0.2f)
+            {
+                var pc = GUI.color;
+                GUI.color = new Color(1f, 0.55f, 0.1f, 0.9f); // amber/orange warning
+                // Default GUI.Label is left-aligned (centering needs GUIStyle, which lives in a Unity
+                // module we don't reference), so place a fixed-width rect at screen centre by hand.
+                const float w = 240f;
+                GUI.Label(new Rect((Screen.width - w) * 0.5f, Screen.height * 0.16f, w, 24f),
+                    "OVER-G — PILOT UNCONSCIOUS");
+                GUI.color = pc;
+            }
         }
 
         // --- IMGUI primitives (origin top-left, y-down) ---
@@ -155,6 +179,10 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> YawGain;             // yaw/rudder output scale (negative flips)
         public static ConfigEntry<float> OutputSlew;          // max stick units/sec (anti-jerk rate limit)
         public static ConfigEntry<float> AuthorityRamp;       // engage/disengage blend speed (1/sec)
+        public static ConfigEntry<bool>  ManualOverride;      // let the stick/keyboard/pedals override the chase per-axis
+        public static ConfigEntry<float> ManualReturnTime;    // sec for an axis to ease back to mouse-aim after release
+        public static ConfigEntry<float> ManualDeadzone;      // how far a manual axis must move before it counts as input
+        public static ConfigEntry<bool>  RightClickFreeze;    // hold RMB to freeze the reticle + free-look (both views)
 
         // --- Cockpit camera follow.
         public static ConfigEntry<bool>  CameraFollow;        // smoothly look toward the marker
@@ -211,6 +239,16 @@ namespace NuclearOptionMouseAim
             AuthorityRamp       = cf.Bind("Control", "AuthorityRamp", 5.0f, new ConfigDescription(
                 "How fast control blends back to the game when the mod disengages (per second). Higher = snappier handoff.",
                 new AcceptableValueRange<float>(1f, 15f)));
+            ManualOverride      = cf.Bind("Control", "ManualOverride", true,
+                "Let your stick / keyboard / rudder pedals take over PER AXIS while mouse-aim flies. Push roll and you get roll (the mod stops leveling the wings); push rudder and you get rudder — the mouse keeps aiming whatever axis you're NOT touching. Release and that axis eases back to mouse-aim. Off = the mod fully owns the stick (manual inputs ignored while flying).");
+            ManualReturnTime    = cf.Bind("Control", "ManualReturnTime", 0.25f, new ConfigDescription(
+                "How long (seconds) a released axis takes to ease back to mouse-aim after you let go of it. Lower = snaps back to the mouse fast; higher = hands the axis back gently. Manual takeover itself is always instant.",
+                new AcceptableValueRange<float>(0.05f, 1f)));
+            ManualDeadzone      = cf.Bind("Control", "ManualDeadzone", 0.05f, new ConfigDescription(
+                "How far a manual axis must move before it counts as you taking over (ignores stick noise / a centred gamepad). Raise if the mod hands you control from a twitchy stick at rest; keyboard is digital so this barely matters there.",
+                new AcceptableValueRange<float>(0f, 0.3f)));
+            RightClickFreeze    = cf.Bind("Control", "RightClickFreeze", true,
+                "Hold RIGHT MOUSE to freeze the aim reticle (cockpit AND 3rd-person): the plane keeps flying to the frozen point while the mouse looks the camera around, then the view eases back to the aim when you release. War Thunder–style free-look. Off = only the game's bound Free Look freezes the reticle.");
 
             CameraFollow          = cf.Bind("Camera", "CameraFollow", true,
                 "Smoothly turn the cockpit view toward the aim circle, so you look where you're steering.");
@@ -274,12 +312,12 @@ namespace NuclearOptionMouseAim
 
         public static void Update()
         {
-            bool ok = TryGetContext(out var ac, out _);
-            bool context = Cfg.Enabled.Value && ok;
+            bool ok = TryGetContext(out var ac, out var cam);
+            bool context = Cfg.Enabled.Value && ok && !ac.disabled; // dead plane => release cursor, stop aiming
 
-            var pi = GameManager.playerInput;
-            bool freeLook = pi != null && pi.GetButton("Free Look");
+            bool frozen    = AimFrozen();
             bool inCockpit = CameraStateManager.cameraMode == CameraMode.cockpit;
+            bool inOrbit   = CameraStateManager.cameraMode == CameraMode.orbit;
 
             if (!context)
             {
@@ -290,18 +328,18 @@ namespace NuclearOptionMouseAim
             }
 
             // Choose a cursor regime that COOPERATES with the game's CursorManager (see ApplyCursorRegime):
-            //   aimCapture — cockpit mouse-aim: hidden + lockState=None + Win32 recentre (raw delta from
-            //                frame 1, no alt-tab needed).
-            //   flyHidden  — flying but not aim-capturing (external/orbit, or Free Look held): hidden +
-            //                lockState=Locked, the game's own flying regime. 3rd-person orbit free-look
-            //                ONLY reads the look axes when the cursor is hidden (CameraOrbitState gates on
-            //                !Cursor.visible), so leaving it visible — our old release behaviour — was
-            //                exactly why free-look died in 3p.
+            //   aimCapture — mouse-aim (cockpit OR orbit), not frozen: hidden + lockState=None + Win32
+            //                recentre (raw delta from frame 1, no alt-tab needed).
+            //   flyHidden  — flying but not aim-capturing (frozen / free-look): hidden + lockState=Locked,
+            //                the game's own flying regime. 3rd-person orbit free-look ONLY reads the look
+            //                axes when the cursor is hidden (CameraOrbitState gates on !Cursor.visible), so
+            //                leaving it visible — our old release behaviour — was exactly why free-look
+            //                died in 3p. This is also what lets the RMB/Free-Look freeze orbit the camera.
             //   visible    — a menu/pause/UI wants the pointer.
             bool flying     = Cfg.WriteControl.Value;  // context is already true here
             bool menuWants  = Guards.MenusOpen() || CursorManager.GetFlags() != CursorFlags.None;
             bool flyHidden  = flying && !menuWants;
-            bool aimCapture = flyHidden && !freeLook && inCockpit;
+            bool aimCapture = flyHidden && !frozen && (inCockpit || inOrbit);
             ApplyCursorRegime(flyHidden, aimCapture);
 
             Transform t = ac.transform;
@@ -328,9 +366,15 @@ namespace NuclearOptionMouseAim
                 float sens = Cfg.MouseSensitivity.Value;
                 float pan  = _smoothedDelta.x;
                 float tilt = _smoothedDelta.y * (Cfg.InvertPitch.Value ? -1f : 1f);
-                // Rotate about the aircraft up/right (== screen up/right in cockpit; rolls with the plane).
-                _aimForward = Quaternion.AngleAxis(pan * sens, t.up)
-                            * Quaternion.AngleAxis(-tilt * sens, t.right)
+                // Pick the rotation frame by view. Cockpit: the airframe up/right (== screen, since the
+                // cockpit view rolls with the plane). Orbit: the main camera's up/right, so "mouse up = up
+                // on screen" regardless of airframe roll/tilt (MouseFlight's screen-relative aim,
+                // MouseFlightController.cs:136-137). The camera lags our target (CameraOrbitPatch smooths
+                // it), so rotating around the lagged camera axes is the same stable feedback loop.
+                Vector3 upAxis    = (inOrbit && cam != null) ? cam.transform.up    : t.up;
+                Vector3 rightAxis = (inOrbit && cam != null) ? cam.transform.right : t.right;
+                _aimForward = Quaternion.AngleAxis(pan * sens, upAxis)
+                            * Quaternion.AngleAxis(-tilt * sens, rightAxis)
                             * _aimForward;
             }
             else
@@ -445,6 +489,18 @@ namespace NuclearOptionMouseAim
             CursorManager.Refresh();
         }
 
+        // Is the aim reticle currently frozen? True while the player holds the game's bound "Free Look"
+        // OR (when RightClickFreeze is on) the right mouse button. While frozen the marker stops following
+        // the mouse and stays parked in the world — the plane keeps flying to it while the camera free-
+        // looks around (War Thunder–style). Same test drives both camera patches, so cockpit and orbit
+        // agree on when to hand the view back to the game's free-look.
+        public static bool AimFrozen()
+        {
+            var pi = GameManager.playerInput;
+            bool freeLook = pi != null && pi.GetButton("Free Look");
+            return freeLook || (Cfg.RightClickFreeze.Value && Input.GetMouseButton(1));
+        }
+
         // True when we have a local aircraft and a main camera — in ANY camera mode. (The marker keeps
         // flying and is drawn in external/orbit views too; only the mouse-driven nudge is cockpit-only,
         // gated separately in Update.)
@@ -538,11 +594,43 @@ namespace NuclearOptionMouseAim
         private static bool  _prevFwdValid;
         private static float _lastChaseLog; // throttle the [chase] trace to ~5/sec
 
+        // Per-axis manual override-on-touch state. _eng* is 0 (mouse-aim owns the axis) .. 1 (you own it);
+        // _mApply* freezes the manual value at release so the axis eases back to chase, not to zero.
+        private static float _engP, _engR, _engY;
+        private static float _mApplyP, _mApplyR, _mApplyY;
+        private static Player _rewired;   // cached Rewired player 0 (same one PilotPlayerState reads)
+
         public static bool IsFlying => _active;
+
+        // Latest pilot G-tolerance (PilotPlayerState.pilotStrength), 1 = fine, <0.2 = blacked/redded out
+        // and the game has zeroed all stick input. Surfaced for the overlay's G-LOC warning. Seeded to 1
+        // so we never flash the warning before the first read.
+        public static float PilotStrength { get; private set; } = 1f;
+
+        // The player's manual stick/keyboard/pedal source. Null until Rewired is ready.
+        private static Player RewiredPlayer()
+        {
+            if (_rewired == null && ReInput.isReady)
+                _rewired = ReInput.players.GetPlayer(0);
+            return _rewired;
+        }
+
+        // Override-on-touch for one axis: push past the deadzone and you INSTANTLY take that axis
+        // (engagement->1, manual value frozen); release and engagement eases 1->0 over ManualReturnTime so
+        // the axis hands smoothly back to the still-running chase output. Returns the blended command.
+        private static float BlendManual(float manual, float chase, ref float eng, ref float applied,
+                                         float dz, float ret, float dt)
+        {
+            manual = Mathf.Clamp(manual, -1f, 1f);
+            if (Mathf.Abs(manual) > dz) { applied = manual; eng = 1f; }   // instant grab
+            else eng = Mathf.MoveTowards(eng, 0f, dt / Mathf.Max(0.01f, ret)); // ease back to mouse-aim
+            return Mathf.Lerp(chase, applied, eng);
+        }
 
         // Called from the prefix. Returns true if WE own the stick (native should be skipped).
         public static bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
         {
+            PilotStrength = pilotStrength; // surface for the overlay's G-LOC warning (runs every FixedUpdate)
             // NOTE: deliberately NOT gated on Guards.MenusOpen(). While a menu/map is up the sim keeps
             // running, and we want the instructor to keep flying the plane toward the frozen marker
             // (where you last aimed) instead of disengaging and flying straight. The mouse is frozen
@@ -637,17 +725,37 @@ namespace NuclearOptionMouseAim
                 float rollBlend = Mathf.Clamp01(off / Mathf.Max(1f, Cfg.AggressiveTurnAngle.Value));
                 float tgtR = Mathf.Clamp(Mathf.Lerp(wingsLevelRoll, aggressiveRoll, rollBlend) * Cfg.RollGain.Value, -1f, 1f);
 
-                // Slew-rate-limit the outputs (anti-jerk against mouse jitter / a fresh flick). Symmetric
-                // on all three axes — the v0.16 asymmetric "EaseSlew" experiment was reverted; the
-                // near-center feel is fixed by FineShape above, not by letting the output fall freely.
+                // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
+                // Symmetric on all three axes. _out* stay PURE chase values — manual override blends on
+                // TOP of them below, so when you release a manual axis it hands back to the live chase.
                 float slew = Cfg.OutputSlew.Value * dt;
                 _outP = Mathf.MoveTowards(_outP, tgtP, slew);
                 _outY = Mathf.MoveTowards(_outY, tgtY, slew);
                 _outR = Mathf.MoveTowards(_outR, tgtR, slew);
 
-                ci.pitch = Mathf.Clamp(_outP, -1f, 1f);
-                ci.roll  = Mathf.Clamp(_outR, -1f, 1f);
-                ci.yaw   = Mathf.Clamp(_outY, -1f, 1f);
+                // Manual override-on-touch (per axis) — ALL THREE AXES IDENTICAL, roll included: when you
+                // push an axis past the deadzone your input takes it over instantly; when you're not
+                // touching it, the instructor flies it. Pitch/yaw hand back to their proportional pull;
+                // roll hands back to the instructor's bank-to-turn (which levels the wings on-target). The
+                // chase keeps running underneath (_out*), so the handback is seamless on every axis.
+                float pOut = _outP, rOut = _outR, yOut = _outY;
+                if (Cfg.ManualOverride.Value)
+                {
+                    var pl = RewiredPlayer();
+                    if (pl != null)
+                    {
+                        float dz  = Cfg.ManualDeadzone.Value;
+                        float ret = Cfg.ManualReturnTime.Value;
+                        pOut = BlendManual(pl.GetAxis("Pitch"), _outP, ref _engP, ref _mApplyP, dz, ret, dt);
+                        rOut = BlendManual(pl.GetAxis("Roll"),  _outR, ref _engR, ref _mApplyR, dz, ret, dt);
+                        yOut = BlendManual(pl.GetAxis("Yaw"),   _outY, ref _engY, ref _mApplyY, dz, ret, dt);
+                    }
+                }
+                else { _engP = _engR = _engY = 0f; }
+
+                ci.pitch = Mathf.Clamp(pOut, -1f, 1f);
+                ci.roll  = Mathf.Clamp(rOut, -1f, 1f);
+                ci.yaw   = Mathf.Clamp(yOut, -1f, 1f);
                 _disRamp = 1f; // primed for the next disengage
 
                 // Chase trace, throttled to ~5/sec (no longer per-frame — the snap diagnosis is done).
@@ -663,7 +771,8 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogInfo(
                         $"[chase] t={Time.time:0.000} f={Time.frameCount} off={off:0.000}deg noseTurn={noseTurnDeg:0.000}deg " +
                         $"raw=({local.x:0.000},{local.y:0.000}) " +
-                        $"tgt P/R/Y=({tgtP:0.00},{tgtR:0.00},{tgtY:0.00}) out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00})");
+                        $"tgt P/R/Y=({tgtP:0.00},{tgtR:0.00},{tgtY:0.00}) out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) " +
+                        $"man P/R/Y=({_engP:0.0},{_engR:0.0},{_engY:0.0})->({ci.pitch:0.00},{ci.roll:0.00},{ci.yaw:0.00})");
                 }
             }
             else if (_disRamp > 0f)
@@ -707,9 +816,8 @@ namespace NuclearOptionMouseAim
             if (PlayerSettings.useTrackIR)
             { _overriding = false; return; } // don't fight head-tracking
 
-            var pi = GameManager.playerInput;
-            if (pi != null && pi.GetButton("Free Look"))
-            { _overriding = false; return; } // let native free-look look around
+            if (AimRig.AimFrozen())
+            { _overriding = false; return; } // frozen (Free Look / RMB): let native free-look look around
 
             // NOTE: we deliberately KEEP steering the view toward the (now frozen) marker while a
             // menu/map/pause is up. The aim direction doesn't change there, but the camera should stay
@@ -742,5 +850,51 @@ namespace NuclearOptionMouseAim
         }
 
         private static float Norm(float deg) => (deg > 180f) ? deg - 360f : deg;
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // 3rd-person (orbit) camera follow — MouseFlight-style, but built by REUSING the game's own orbit
+    // camera unchanged. Native CameraOrbitState parks the camera behind the plane along its smoothed
+    // velocity (the pivot is parented to the plane's rigidbody, so it follows with zero translational lag),
+    // applies the player's orbit-look offsets panView (yaw around the plane) + tiltView (pitch), smooths
+    // them, runs terrain-collision pull-in, then looks AT the plane. Our earlier version overrode the final
+    // transform in world space and Lerped it — which is exactly what made the camera lag at speed and then
+    // jump forward to catch up. So instead we do NOT move the camera at all: we just feed the native
+    // panView/tiltView the angles that point its orbit along the aim direction, and let all of native's
+    // positioning / following / smoothing / collision do the work. Result: identical feel to the stock 3p
+    // camera (and a clean handoff when freezing, since we simply stop writing the offsets). Prefix so the
+    // values are in place before native CameraMotion reads them this frame.
+    [HarmonyPatch(typeof(CameraOrbitState), "UpdateState")]
+    internal static class CameraOrbitPatch
+    {
+        private static void Prefix(CameraOrbitState __instance)
+        {
+            if (!Cfg.Enabled.Value || !Cfg.CameraFollow.Value) return;
+            if (CameraStateManager.cameraMode != CameraMode.orbit) return;
+            if (AimRig.AimFrozen()) return;                         // frozen: hand orbit-look back to the player
+            if (!AimRig.TryGetContext(out var ac, out _)) return;
+            if (ac.disabled) return;                                // dead: leave the native camera alone
+
+            Vector3 aim = AimRig.AimForward;
+
+            // Native pivot base looks along followVector (smoothed flat velocity). panView yaws it from that
+            // heading to the aim's heading (around world up); tiltView pitches it to the aim's elevation.
+            // Native then orbits the (plane-parented) camera by exactly these and smooths via its own pivot
+            // Lerp — so a flick eases in instead of snapping, with no positional lag.
+            var tr = Traverse.Create(__instance);
+            Vector3 follow = tr.Field("followVector").GetValue<Vector3>();
+            Vector3 followH = new Vector3(follow.x, 0f, follow.z);
+            Vector3 aimH    = new Vector3(aim.x,   0f, aim.z);
+            if (followH.sqrMagnitude < 1e-6f || aimH.sqrMagnitude < 1e-6f) return; // degenerate: leave native
+
+            // panView: signed yaw from velocity heading to aim heading (matches native Rotate(0,panView,0,World)).
+            float pan = Vector3.SignedAngle(followH.normalized, aimH.normalized, Vector3.up);
+            // tiltView: native Rotate(tiltView,0,0,Self) pitches the view DOWN for +tilt, so aiming UP needs
+            // a negative tilt. Clamp short of the poles to avoid a gimbal flip straight up/down.
+            float tilt = Mathf.Clamp(-Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg, -85f, 85f);
+
+            tr.Field("panView").SetValue(pan);
+            tr.Field("tiltView").SetValue(tilt);
+        }
     }
 }
