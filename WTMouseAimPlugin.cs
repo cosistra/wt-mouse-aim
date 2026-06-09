@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.21.1";
+        public const string PluginVersion = "0.21.3";
 
         internal static ManualLogSource Log;
 
@@ -98,6 +98,10 @@ namespace NuclearOptionMouseAim
                         : "native";
             GUI.Label(new Rect(12f, 12f, 560f, 22f),
                 $"WT MouseAim  off={off:0.0}°  cone={half:0}°  [{ctrl}]");
+            // Instructor's live stick command (what the mod is telling the plane, before manual override).
+            GUI.Label(new Rect(12f, 30f, 560f, 22f),
+                $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
+                $"yaw={ChaseController.LastYaw:+0.00;-0.00;0.00}  roll={ChaseController.LastRoll:+0.00;-0.00;0.00}");
             GUI.color = prev;
 
             // G-LOC warning: while the pilot is blacked/redded out from sustained G the game zeroes all
@@ -173,6 +177,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<bool>  WriteControl;        // actually drive the stick (off = overlay only)
         public static ConfigEntry<float> PitchYawSensitivity; // base chase gain on the body-frame aim direction
         public static ConfigEntry<float> ChaseDamping;        // derivative damping on the nose's rotation rate
+        public static ConfigEntry<float> RollDamping;         // derivative damping on the roll rate (anti bank-wobble)
         public static ConfigEntry<float> AggressiveTurnAngle; // deg off-target at which we commit to a hard bank
         public static ConfigEntry<float> RollGain;            // roll output scale (negative flips roll direction)
         public static ConfigEntry<float> PitchGain;           // pitch output scale (negative flips)
@@ -188,6 +193,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<bool>  CameraFollow;        // smoothly look toward the marker
         public static ConfigEntry<float> CameraFollowAmount;  // 0..1 fraction of the marker offset to look toward
         public static ConfigEntry<float> CameraFollowSmoothing;// seconds-ish smoothing (higher = lazier)
+        public static ConfigEntry<float> CameraPitchOffset;   // 3p: deg to lift the view off its downward tilt
 
         public static void Bind(ConfigFile cf)
         {
@@ -220,6 +226,9 @@ namespace NuclearOptionMouseAim
                 new AcceptableValueRange<float>(0.5f, 8f)));
             ChaseDamping        = cf.Bind("Control", "ChaseDamping", 0.25f, new ConfigDescription(
                 "Calms the inputs as the nose nears the circle so it eases in instead of overshooting — opposes the nose's own turn rate (the anti-wobble term). ~0.25 is a smooth default. 0 = off (snappy, but the rudder can hunt side-to-side); raise toward ~0.4 if it still oscillates around the aim direction, lower if it feels sluggish to close.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            RollDamping         = cf.Bind("Control", "RollDamping", 0.3f, new ConfigDescription(
+                "Anti-wobble damping for the ROLL axis specifically — the bank-angle counterpart of ChaseDamping. In a hard bank-to-turn (45deg+ off-target) the wings can rock back and forth while the nose pulls around; this eases the roll command off as the bank builds so it settles instead of hunting. Raise toward ~0.5 if it still rocks at high bank; 0 = off. Only opposes the rolling MOTION, so it won't fight a held bank.",
                 new AcceptableValueRange<float>(0f, 1f)));
             AggressiveTurnAngle = cf.Bind("Control", "AggressiveTurnAngle", 10.0f, new ConfigDescription(
                 "Nose-off-target angle (deg) at which the plane fully commits to banking. Below it the bank rolls in proportionally (precise fine aiming); above it it's a full bank-to-turn. LOWER = banks sooner and turns harder; higher = stays wings-level longer and leans on the weak rudder (can feel like a deadzone).",
@@ -258,6 +267,9 @@ namespace NuclearOptionMouseAim
             CameraFollowSmoothing = cf.Bind("Camera", "CameraFollowSmoothing", 0.3f, new ConfigDescription(
                 "View-follow lag (seconds-ish). Higher = lazier, smoother camera; lower = snappier, can feel twitchy.",
                 new AcceptableValueRange<float>(0.02f, 1f)));
+            CameraPitchOffset     = cf.Bind("Camera", "CameraPitchOffset", 11f, new ConfigDescription(
+                "3rd-person only: lifts the camera's resting downward tilt (deg). The stock orbit camera sits above-and-behind looking ~22 down at the plane, which pushes the aim circle to the top of the screen. This raises the view toward the airframe axis so the circle sits closer to centre. 0 = stock (circle high); ~11 = halfway; ~22 = view level with the airframe (circle near centre).",
+                new AcceptableValueRange<float>(0f, 22f)));
         }
     }
 
@@ -367,12 +379,23 @@ namespace NuclearOptionMouseAim
                 float pan  = _smoothedDelta.x;
                 float tilt = _smoothedDelta.y * (Cfg.InvertPitch.Value ? -1f : 1f);
                 // Pick the rotation frame by view. Cockpit: the airframe up/right (== screen, since the
-                // cockpit view rolls with the plane). Orbit: the main camera's up/right, so "mouse up = up
-                // on screen" regardless of airframe roll/tilt (MouseFlight's screen-relative aim,
-                // MouseFlightController.cs:136-137). The camera lags our target (CameraOrbitPatch smooths
-                // it), so rotating around the lagged camera axes is the same stable feedback loop.
-                Vector3 upAxis    = (inOrbit && cam != null) ? cam.transform.up    : t.up;
-                Vector3 rightAxis = (inOrbit && cam != null) ? cam.transform.right : t.right;
+                // cockpit view rolls with the plane). Orbit: a HORIZON-LOCKED screen frame derived from the
+                // camera's forward — "mouse up = up on screen" regardless of airframe roll/tilt (MouseFlight's
+                // screen-relative aim, MouseFlightController.cs:136-137). We deliberately do NOT use the
+                // camera's own up/right: the orbit cam carries a little roll (and lags), which would feed back
+                // into the aim and let the marker slowly walk off on its own (the "drift" that a camera-toggle
+                // reset). Re-deriving right = up x forward kills that roll feedback.
+                Vector3 upAxis, rightAxis;
+                if (inOrbit && cam != null)
+                {
+                    Vector3 camFwd = cam.transform.forward;
+                    rightAxis = Vector3.Cross(Vector3.up, camFwd);
+                    if (rightAxis.sqrMagnitude < 1e-4f)        // looking near-straight up/down: no stable horizon
+                    { rightAxis = cam.transform.right; upAxis = cam.transform.up; }
+                    else
+                    { rightAxis.Normalize(); upAxis = Vector3.Cross(camFwd, rightAxis).normalized; }
+                }
+                else { upAxis = t.up; rightAxis = t.right; }
                 _aimForward = Quaternion.AngleAxis(pan * sens, upAxis)
                             * Quaternion.AngleAxis(-tilt * sens, rightAxis)
                             * _aimForward;
@@ -590,7 +613,8 @@ namespace NuclearOptionMouseAim
         private static bool  _wasActive;  // last frame (edge detection)
         private static float _outP, _outR, _outY;
         private static float _disRamp;    // 1->0 disengage blend
-        private static Vector3 _prevFwd;  // last frame's nose direction (for rotation-rate damping)
+        private static Vector3 _prevFwd;  // last frame's nose direction (for pitch/yaw rate damping)
+        private static Vector3 _prevUp;   // last frame's up axis (for roll-rate damping)
         private static bool  _prevFwdValid;
         private static float _lastChaseLog; // throttle the [chase] trace to ~5/sec
 
@@ -606,6 +630,12 @@ namespace NuclearOptionMouseAim
         // and the game has zeroed all stick input. Surfaced for the overlay's G-LOC warning. Seeded to 1
         // so we never flash the warning before the first read.
         public static float PilotStrength { get; private set; } = 1f;
+
+        // The instructor's own slewed stick command this frame (before any manual override blends on top),
+        // surfaced for the top-left debug readout: "what the instructor is saying". 0 when not flying.
+        public static float LastPitch { get; private set; }
+        public static float LastRoll  { get; private set; }
+        public static float LastYaw   { get; private set; }
 
         // The player's manual stick/keyboard/pedal source. Null until Rewired is ready.
         private static Player RewiredPlayer()
@@ -686,15 +716,20 @@ namespace NuclearOptionMouseAim
                 // Nose rotation rate (world delta of the forward axis), split into the body up/right
                 // components: how fast the nose is currently pitching up and yawing right. This is the
                 // PLANE'S own motion (independent of the mouse), so damping on it never fights a flick.
-                float pitchRate = 0f, yawRate = 0f, noseTurnDeg = 0f;
+                float pitchRate = 0f, yawRate = 0f, rollRate = 0f, noseTurnDeg = 0f;
                 if (_prevFwdValid && dt > 1e-5f)
                 {
                     Vector3 noseRate = (t.forward - _prevFwd) / dt;
                     pitchRate = Vector3.Dot(noseRate, t.up);    // +: nose swinging up
                     yawRate   = Vector3.Dot(noseRate, t.right); // +: nose swinging right
+                    // Roll rate about the body forward axis: as the plane rolls right (right wing dropping)
+                    // the up axis leans toward the right wing, so d(up)/dt . right > 0. Forward barely moves
+                    // in a pure roll, so this needs the up axis, not noseRate.
+                    rollRate  = Vector3.Dot((t.up - _prevUp) / dt, t.right); // +: rolling right
                     noseTurnDeg = Vector3.Angle(t.forward, _prevFwd); // total nose rotation this FixedUpdate
                 }
                 _prevFwd = t.forward;
+                _prevUp  = t.up;
                 _prevFwdValid = true;
 
                 // PITCH/YAW: straight PROPORTIONAL pull toward the marker, MINUS a damping term on the
@@ -723,7 +758,14 @@ namespace NuclearOptionMouseAim
                 // and leaving the weak rudder to crawl the last few degrees: the "deadzone"). At/above
                 // AggressiveTurnAngle it fully commits to the bank; below it rolls in proportionally.
                 float rollBlend = Mathf.Clamp01(off / Mathf.Max(1f, Cfg.AggressiveTurnAngle.Value));
-                float tgtR = Mathf.Clamp(Mathf.Lerp(wingsLevelRoll, aggressiveRoll, rollBlend) * Cfg.RollGain.Value, -1f, 1f);
+                // Rate-damp the roll the same way pitch/yaw are damped: in a hard bank-to-turn the proportional
+                // roll command overshoots the target bank and reverses, rocking the wings while the nose pulls
+                // around. Subtracting the live roll RATE eases the command off as the bank builds so it settles
+                // instead of hunting. It opposes only the rolling MOTION — once the bank is held and roll rate
+                // ~0 the term vanishes, so it doesn't fight the sustained bank itself.
+                float tgtR = Mathf.Clamp(
+                    (Mathf.Lerp(wingsLevelRoll, aggressiveRoll, rollBlend) - rollRate * Cfg.RollDamping.Value)
+                    * Cfg.RollGain.Value, -1f, 1f);
 
                 // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
                 // Symmetric on all three axes. _out* stay PURE chase values — manual override blends on
@@ -732,6 +774,7 @@ namespace NuclearOptionMouseAim
                 _outP = Mathf.MoveTowards(_outP, tgtP, slew);
                 _outY = Mathf.MoveTowards(_outY, tgtY, slew);
                 _outR = Mathf.MoveTowards(_outR, tgtR, slew);
+                LastPitch = _outP; LastYaw = _outY; LastRoll = _outR; // surface for the top-left readout
 
                 // Manual override-on-touch (per axis) — ALL THREE AXES IDENTICAL, roll included: when you
                 // push an axis past the deadzone your input takes it over instantly; when you're not
@@ -783,7 +826,9 @@ namespace NuclearOptionMouseAim
                 ci.pitch = Mathf.Clamp(Mathf.Lerp(ci.pitch, _outP, a), -1f, 1f);
                 ci.roll  = Mathf.Clamp(Mathf.Lerp(ci.roll,  _outR, a), -1f, 1f);
                 ci.yaw   = Mathf.Clamp(Mathf.Lerp(ci.yaw,   _outY, a), -1f, 1f);
+                LastPitch = LastYaw = LastRoll = 0f; // instructor not flying — readout reads zero
             }
+            else { LastPitch = LastYaw = LastRoll = 0f; }
         }
 
         private static void HideNativeVirtualJoystick()
@@ -867,11 +912,12 @@ namespace NuclearOptionMouseAim
     [HarmonyPatch(typeof(CameraOrbitState), "UpdateState")]
     internal static class CameraOrbitPatch
     {
+        private static float _pan;   // last stable orbit yaw — held through the vertical singularity
+
         private static void Prefix(CameraOrbitState __instance)
         {
             if (!Cfg.Enabled.Value || !Cfg.CameraFollow.Value) return;
             if (CameraStateManager.cameraMode != CameraMode.orbit) return;
-            if (AimRig.AimFrozen()) return;                         // frozen: hand orbit-look back to the player
             if (!AimRig.TryGetContext(out var ac, out _)) return;
             if (ac.disabled) return;                                // dead: leave the native camera alone
 
@@ -885,15 +931,31 @@ namespace NuclearOptionMouseAim
             Vector3 follow = tr.Field("followVector").GetValue<Vector3>();
             Vector3 followH = new Vector3(follow.x, 0f, follow.z);
             Vector3 aimH    = new Vector3(aim.x,   0f, aim.z);
-            if (followH.sqrMagnitude < 1e-6f || aimH.sqrMagnitude < 1e-6f) return; // degenerate: leave native
 
-            // panView: signed yaw from velocity heading to aim heading (matches native Rotate(0,panView,0,World)).
-            float pan = Vector3.SignedAngle(followH.normalized, aimH.normalized, Vector3.up);
-            // tiltView: native Rotate(tiltView,0,0,Self) pitches the view DOWN for +tilt, so aiming UP needs
-            // a negative tilt. Clamp short of the poles to avoid a gimbal flip straight up/down.
-            float tilt = Mathf.Clamp(-Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg, -85f, 85f);
+            // panView: signed yaw from the velocity heading to the aim heading (matches native
+            // Rotate(0,panView,0,World)). Near vertical BOTH headings collapse — aimH->0 when aiming straight
+            // up/down, and followH->0 in a vertical climb — so the heading turns to noise and the camera whips
+            // around the plane, throwing the aim offscreen (the "drift"). There, HOLD the last stable yaw: with
+            // the view pitched near-vertical the heading barely changes the shot, and a frozen yaw stays steady
+            // instead of spinning. Mirrors MouseFlight's |forward.y|>0.9 pole guard. We refresh _pan EVERY
+            // frame, even while frozen/free-looking, so releasing free-look returns straight to the live aim
+            // instead of snapping from a stale heading.
+            bool nearPole = Mathf.Abs(aim.y) > 0.9f;
+            if (!nearPole && followH.sqrMagnitude > 1e-3f && aimH.sqrMagnitude > 1e-3f)
+                _pan = Vector3.SignedAngle(followH.normalized, aimH.normalized, Vector3.up);
 
-            tr.Field("panView").SetValue(pan);
+            if (AimRig.AimFrozen()) return;                         // frozen: native owns the orbit-look (free-look)
+
+            // tiltView: native Rotate(tiltView,0,0,Self) pitches the view DOWN for +tilt, so aiming UP needs a
+            // negative tilt. Subtract CameraPitchOffset to lift the resting view: the stock orbit cam parks
+            // ~0.8*up above and 2*back behind, then looks AT the plane — ~22 of downward look that shoves the
+            // level reticle to the top of the screen; this raises it back toward centre. Clamp short of straight
+            // up/down (80, not 90): past there the look-at-plane up-vector goes degenerate and the view rolls/breaks.
+            float tilt = Mathf.Clamp(
+                -Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg - Cfg.CameraPitchOffset.Value,
+                -80f, 80f);
+
+            tr.Field("panView").SetValue(_pan);
             tr.Field("tiltView").SetValue(tilt);
         }
     }
