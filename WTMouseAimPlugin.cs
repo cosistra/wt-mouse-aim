@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.21.3";
+        public const string PluginVersion = "0.23.0";
 
         internal static ManualLogSource Log;
 
@@ -42,6 +42,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(PilotPlayerStatePatch));
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
+            harmony.PatchAll(typeof(CameraSwitchStatePatch));
             Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point + proportional chase w/ rate damping + per-axis manual override + Win32 raw mouse + 3rd-person mouse-aim w/ orbiting camera + RMB freeze — tune live via F1).");
         }
 
@@ -189,11 +190,20 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> ManualDeadzone;      // how far a manual axis must move before it counts as input
         public static ConfigEntry<bool>  RightClickFreeze;    // hold RMB to freeze the reticle + free-look (both views)
 
+        // --- Fine capture (the last few degrees). Log-confirmed v0.22: inside ~5deg the residual is
+        // almost pure azimuth with the wings level — roll blends to wings-level, yaw P-term is ~0.05
+        // stick, and the heading error decays with a ~6 s time constant ("never quite aligns").
+        public static ConfigEntry<float> FineAngle;           // deg: cone inside which the fine-capture aids ramp in
+        public static ConfigEntry<float> FineGainBoost;       // extra proportional gain at zero offset (0 = off)
+        public static ConfigEntry<float> FineBankGain;        // deg of target bank per deg of azimuth error (0 = off)
+        public static ConfigEntry<float> FineBankCap;         // max bank (deg) the fine servo may command
+
         // --- Cockpit camera follow.
         public static ConfigEntry<bool>  CameraFollow;        // smoothly look toward the marker
         public static ConfigEntry<float> CameraFollowAmount;  // 0..1 fraction of the marker offset to look toward
         public static ConfigEntry<float> CameraFollowSmoothing;// seconds-ish smoothing (higher = lazier)
-        public static ConfigEntry<float> CameraPitchOffset;   // 3p: deg to lift the view off its downward tilt
+        public static ConfigEntry<float> CameraPitchOffset;   // 3p: deg the view is pitched down off the aim direction
+        public static ConfigEntry<float> OrbitAimSmoothing;   // 3p: view-direction smoothing rate (1/s, higher = snappier)
 
         public static void Bind(ConfigFile cf)
         {
@@ -256,6 +266,18 @@ namespace NuclearOptionMouseAim
             ManualDeadzone      = cf.Bind("Control", "ManualDeadzone", 0.05f, new ConfigDescription(
                 "How far a manual axis must move before it counts as you taking over (ignores stick noise / a centred gamepad). Raise if the mod hands you control from a twitchy stick at rest; keyboard is digital so this barely matters there.",
                 new AcceptableValueRange<float>(0f, 0.3f)));
+            FineAngle           = cf.Bind("Control", "FineAngle", 6.0f, new ConfigDescription(
+                "Cone half-angle (deg) inside which the fine-capture aids (FineGainBoost / FineBankGain) ramp in. They are at full strength with the nose on the circle and fade to nothing at this angle, so the large-angle behaviour is untouched.",
+                new AcceptableValueRange<float>(2f, 15f)));
+            FineGainBoost       = cf.Bind("Control", "FineGainBoost", 2.0f, new ConfigDescription(
+                "Extra pitch/yaw pull for the last few degrees: multiplies the proportional term by up to (1 + this) as the offset closes. Cures the 'never quite centres' residual where a ~1 deg error left only ~0.05 stick. 0 = off. Raise if the nose still parks short of the circle; lower if it hunts around it.",
+                new AcceptableValueRange<float>(0f, 5f)));
+            FineBankGain        = cf.Bind("Control", "FineBankGain", 3.0f, new ConfigDescription(
+                "Inside FineAngle the wings-level servo is re-targeted to a small bank proportional to the horizontal error (deg of bank per deg of azimuth error), so lift helps carry the nose across instead of leaving the job to the weak rudder. 0 = off (pure wings-level, the old behaviour). Raise to close sideways residuals faster; lower if it wing-rocks.",
+                new AcceptableValueRange<float>(0f, 10f)));
+            FineBankCap         = cf.Bind("Control", "FineBankCap", 25.0f, new ConfigDescription(
+                "Maximum bank (deg) the fine bank servo may command. Keeps small corrections from turning into a corkscrew (v0.22 logs showed an 80 deg bank chasing a 6 deg error).",
+                new AcceptableValueRange<float>(5f, 60f)));
             RightClickFreeze    = cf.Bind("Control", "RightClickFreeze", true,
                 "Hold RIGHT MOUSE to freeze the aim reticle (cockpit AND 3rd-person): the plane keeps flying to the frozen point while the mouse looks the camera around, then the view eases back to the aim when you release. War Thunder–style free-look. Off = only the game's bound Free Look freezes the reticle.");
 
@@ -268,8 +290,11 @@ namespace NuclearOptionMouseAim
                 "View-follow lag (seconds-ish). Higher = lazier, smoother camera; lower = snappier, can feel twitchy.",
                 new AcceptableValueRange<float>(0.02f, 1f)));
             CameraPitchOffset     = cf.Bind("Camera", "CameraPitchOffset", 11f, new ConfigDescription(
-                "3rd-person only: lifts the camera's resting downward tilt (deg). The stock orbit camera sits above-and-behind looking ~22 down at the plane, which pushes the aim circle to the top of the screen. This raises the view toward the airframe axis so the circle sits closer to centre. 0 = stock (circle high); ~11 = halfway; ~22 = view level with the airframe (circle near centre).",
+                "3rd-person only: degrees the view is pitched DOWN off the aim direction, trading the aim circle's screen position against the airframe's. 0 = circle dead-centre (plane low in frame); ~11 = circle a little above centre, plane a little below — 'behind and slightly above, looking down at the airframe'; ~22 = plane centred (circle high).",
                 new AcceptableValueRange<float>(0f, 22f)));
+            OrbitAimSmoothing     = cf.Bind("Camera", "OrbitAimSmoothing", 8f, new ConfigDescription(
+                "3rd-person only: how quickly the orbit camera's view direction chases the aim circle (per second, frame-rate independent). Higher = snappier tracking; lower = lazier, smoother swings. Position never lags the plane — this only smooths the direction.",
+                new AcceptableValueRange<float>(1f, 20f)));
         }
     }
 
@@ -743,17 +768,37 @@ namespace NuclearOptionMouseAim
                 //
                 // (v0.18's FineShape sqrt "fine assist" was removed in v0.19: it boosted small offsets so
                 // hard that even a 6deg offset saturated the rudder, which is exactly what made it hunt.
-                // Proportional + rate damping handles fine aiming cleanly without the over-gain.)
+                // v0.22 logs showed the opposite failure: at ~1deg of pure azimuth error the yaw P-term
+                // was ~0.05 stick and the heading closed with a ~6 s time constant — "never aligns". The
+                // FINE-CAPTURE boost below is the measured middle ground: a LINEAR gain ramp (max 1+boost
+                // at zero offset, gone at FineAngle) instead of the sqrt's unbounded low-end slope, with
+                // the rate damping and the output slew limiter still active against hunting.)
                 float damp = Cfg.ChaseDamping.Value;
-                float tgtP = Mathf.Clamp((-local.y * sens + pitchRate * damp) * Cfg.PitchGain.Value, -1f, 1f);
-                float tgtY = Mathf.Clamp(( local.x * sens - yawRate   * damp) * Cfg.YawGain.Value,   -1f, 1f);
+                float fineBlend = Mathf.Clamp01(1f - off / Mathf.Max(1f, Cfg.FineAngle.Value));
+                float fineGain  = 1f + Cfg.FineGainBoost.Value * fineBlend;
+                float tgtP = Mathf.Clamp((-local.y * sens * fineGain + pitchRate * damp) * Cfg.PitchGain.Value, -1f, 1f);
+                float tgtY = Mathf.Clamp(( local.x * sens * fineGain - yawRate   * damp) * Cfg.YawGain.Value,   -1f, 1f);
 
-                // ROLL: bank-to-turn blend. Far off-target => bank hard toward the marker; on-target
-                // => level the wings (t.right.y is the world-up component on the wing: 0 = level,
-                // <0 = right wing down). As the nose arrives, off->0 so roll->wings-level and the
-                // marker returns to the boresight: convergence, not a sustained rate.
+                // World-frame azimuth error (deg, + = marker right of the nose heading). Drives the fine
+                // bank servo; degenerate headings (straight up/down) just disable the servo this frame.
+                Vector3 aimW   = AimRig.AimForward;
+                Vector3 aimHW  = new Vector3(aimW.x, 0f, aimW.z);
+                Vector3 noseHW = new Vector3(t.forward.x, 0f, t.forward.z);
+                float azErr = (aimHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
+                    ? Vector3.SignedAngle(noseHW, aimHW, Vector3.up) : 0f;
+
+                // ROLL: bank-to-turn blend. Far off-target => bank hard toward the marker; near-target
+                // => the fine bank servo. v0.22's pure wings-level small-offset behaviour left the weak
+                // rudder alone on the lateral residual, so instead the servo banks a LITTLE, proportional
+                // to the azimuth error (FineBankGain deg per deg, capped at FineBankCap) and lets lift
+                // carry the nose across; as azErr->0 the target bank ->0 and it converges to wings-level
+                // exactly as before. t.right.y is the world-up component on the wing (0 = level, <0 =
+                // right wing down), so (t.right.y + sin(targetBank)) is a proportional servo about the
+                // commanded bank with the same gain the old wings-level term had.
                 float aggressiveRoll = Mathf.Clamp(local.x * sens, -1f, 1f);
-                float wingsLevelRoll = t.right.y;
+                float fineBank = Mathf.Clamp(azErr * Cfg.FineBankGain.Value,
+                                             -Cfg.FineBankCap.Value, Cfg.FineBankCap.Value);
+                float fineRoll = t.right.y + Mathf.Sin(fineBank * Mathf.Deg2Rad);
                 // Linear blend (no ease-in square — that was starving the bank on small/medium offsets
                 // and leaving the weak rudder to crawl the last few degrees: the "deadzone"). At/above
                 // AggressiveTurnAngle it fully commits to the bank; below it rolls in proportionally.
@@ -764,7 +809,7 @@ namespace NuclearOptionMouseAim
                 // instead of hunting. It opposes only the rolling MOTION — once the bank is held and roll rate
                 // ~0 the term vanishes, so it doesn't fight the sustained bank itself.
                 float tgtR = Mathf.Clamp(
-                    (Mathf.Lerp(wingsLevelRoll, aggressiveRoll, rollBlend) - rollRate * Cfg.RollDamping.Value)
+                    (Mathf.Lerp(fineRoll, aggressiveRoll, rollBlend) - rollRate * Cfg.RollDamping.Value)
                     * Cfg.RollGain.Value, -1f, 1f);
 
                 // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
@@ -801,21 +846,37 @@ namespace NuclearOptionMouseAim
                 ci.yaw   = Mathf.Clamp(yOut, -1f, 1f);
                 _disRamp = 1f; // primed for the next disengage
 
-                // Chase trace, throttled to ~5/sec (no longer per-frame — the snap diagnosis is done).
-                //   off      : nose->marker angle before this frame's command takes effect
-                //   noseTurn : how far the nose actually rotated THIS FixedUpdate
-                //   raw      : body-frame marker offset components (x = right, y = up)
-                //   tgt/out  : commanded vs slewed pitch/roll/yaw — if tgt Y pins at +/-1.00, the rudder
-                //              is saturating (the over-gain that caused the side-to-side hunt)
-                if (Cfg.DebugLogging.Value && Time.time - _lastChaseLog >= 0.2f &&
-                    (off > 0.02f || Mathf.Abs(_outP) > 0.005f || Mathf.Abs(_outY) > 0.005f || Mathf.Abs(_outR) > 0.005f))
+                // Chase trace. Normal cadence ~5/sec; inside 10deg ("fine capture") ~10/sec at higher
+                // precision — the last-few-degrees stall is exactly what we're diagnosing.
+                //   off       : nose->marker angle before this frame's command takes effect
+                //   elevE/azE : world-frame error split (elevation vs azimuth, deg). A persistent elevE
+                //               with azE~0 is gravity droop; a persistent azE is lateral residual.
+                //   P/D (p/y) : the two additive terms inside tgt, per axis — proportional pull vs the
+                //               rate-damping bite. If D ~cancels P while off stays put, the damping is
+                //               strangling the final closure (the prime suspect).
+                //   spd/bank/g: flight-state context for the residual.
+                if (Cfg.DebugLogging.Value)
                 {
-                    _lastChaseLog = Time.time;
-                    WTMouseAimPlugin.Log.LogInfo(
-                        $"[chase] t={Time.time:0.000} f={Time.frameCount} off={off:0.000}deg noseTurn={noseTurnDeg:0.000}deg " +
-                        $"raw=({local.x:0.000},{local.y:0.000}) " +
-                        $"tgt P/R/Y=({tgtP:0.00},{tgtR:0.00},{tgtY:0.00}) out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) " +
-                        $"man P/R/Y=({_engP:0.0},{_engR:0.0},{_engY:0.0})->({ci.pitch:0.00},{ci.roll:0.00},{ci.yaw:0.00})");
+                    bool fine = off < 10f; // fine-capture regime: the regime under investigation
+                    if (Time.time - _lastChaseLog >= (fine ? 0.1f : 0.2f) &&
+                        (off > 0.02f || Mathf.Abs(_outP) > 0.005f || Mathf.Abs(_outY) > 0.005f || Mathf.Abs(_outR) > 0.005f))
+                    {
+                        _lastChaseLog = Time.time;
+                        float pTermP = -local.y * sens * fineGain, dTermP = pitchRate * damp; // tgtP = (P+D)*PitchGain
+                        float pTermY =  local.x * sens * fineGain, dTermY = -yawRate  * damp; // tgtY = (P+D)*YawGain
+                        float elevE = (Mathf.Asin(Mathf.Clamp(aimW.y, -1f, 1f)) - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
+                        float spd  = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
+                        float bank = -Mathf.Asin(Mathf.Clamp(t.right.y, -1f, 1f)) * Mathf.Rad2Deg; // +: right wing down
+                        string f = fine ? "0.000" : "0.00";
+                        WTMouseAimPlugin.Log.LogInfo(
+                            $"[chase] t={Time.time:0.000} off={off:0.000}deg elevE={elevE:0.00} azE={azErr:0.00} noseTurn={noseTurnDeg:0.000} " +
+                            $"fineG={fineGain:0.00} fineBank={fineBank:0.0} " +
+                            $"P(p/y)=({pTermP.ToString(f)},{pTermY.ToString(f)}) D(p/y)=({dTermP.ToString(f)},{dTermY.ToString(f)}) " +
+                            $"tgt P/R/Y=({tgtP.ToString(f)},{tgtR.ToString(f)},{tgtY.ToString(f)}) " +
+                            $"out P/R/Y=({_outP.ToString(f)},{_outR.ToString(f)},{_outY.ToString(f)}) " +
+                            $"fin=({ci.pitch:0.00},{ci.roll:0.00},{ci.yaw:0.00}) man=({_engP:0.0},{_engR:0.0},{_engY:0.0}) " +
+                            $"spd={spd:0} bank={bank:0.0} g={aircraft.gForce:0.0}");
+                    }
                 }
             }
             else if (_disRamp > 0f)
@@ -898,21 +959,37 @@ namespace NuclearOptionMouseAim
     }
 
     // ---------------------------------------------------------------------------------------------
-    // 3rd-person (orbit) camera follow — MouseFlight-style, but built by REUSING the game's own orbit
-    // camera unchanged. Native CameraOrbitState parks the camera behind the plane along its smoothed
-    // velocity (the pivot is parented to the plane's rigidbody, so it follows with zero translational lag),
-    // applies the player's orbit-look offsets panView (yaw around the plane) + tiltView (pitch), smooths
-    // them, runs terrain-collision pull-in, then looks AT the plane. Our earlier version overrode the final
-    // transform in world space and Lerped it — which is exactly what made the camera lag at speed and then
-    // jump forward to catch up. So instead we do NOT move the camera at all: we just feed the native
-    // panView/tiltView the angles that point its orbit along the aim direction, and let all of native's
-    // positioning / following / smoothing / collision do the work. Result: identical feel to the stock 3p
-    // camera (and a clean handoff when freezing, since we simply stop writing the offsets). Prefix so the
-    // values are in place before native CameraMotion reads them this frame.
+    // 3rd-person (orbit) camera follow — WT-style: the camera stays behind/above the plane but always
+    // faces the aim direction, marker near screen centre.
+    //
+    // v0.22 verdict on the pan/tilt-steering approach (prefix writes native panView/tiltView): the pan
+    // half tracks heading fine, but the RESULT was off the aim by an elevation-dependent error of up to
+    // ~25-33 deg ([orbitcam:res] camOffAim, FOV 50 => marker offscreen) — native's tilt rotates the
+    // camera around the plane through an arm that already carries a built-in downward angle (the 0.8r
+    // up-offset), then look-at-plane re-aims it, so tilt never maps 1:1 to view elevation. Not fixable
+    // by a better tilt formula without modelling that whole chain.
+    //
+    // So v0.23 splits the job:
+    //   * Prefix (kept): still writes panView/tiltView. While we fly it keeps the NATIVE pivot pose
+    //     roughly on the aim so RMB free-look starts from approximately the current view, and free-look
+    //     itself stays 100% native.
+    //   * Postfix (new): after native CameraMotion/Inputs have run, override the FINAL camera pose:
+    //     position rigidly from the live plane position (the earlier world-space override failed by
+    //     smoothing the POSITION — at speed that lags then jumps; only the view DIRECTION is smoothed
+    //     here, frame-rate independent slerp, MouseFlight-style pole guard), native's terrain linecast
+    //     replicated, then look along the smoothed aim. While the reticle is frozen (RMB free-look) or
+    //     native's look-at-target is engaged the override stands down and re-seeds from the live pose on
+    //     return, so transitions ease instead of snapping.
     [HarmonyPatch(typeof(CameraOrbitState), "UpdateState")]
     internal static class CameraOrbitPatch
     {
         private static float _pan;   // last stable orbit yaw — held through the vertical singularity
+        private static bool  _prevNearPole;    // edge detection: pole-hold enter/exit diagnostics
+        private static bool  _prevFrozen;      // edge detection: RMB/Free-Look freeze enter/exit
+        private static float _lastOrbitLog;    // throttle the [orbitcam] trace to ~5/sec
+        private static float _lastOrbitResLog; // throttle the [orbitcam:res] trace to ~5/sec
+        private static Quaternion _aimRot = Quaternion.identity; // smoothed view rotation (postfix override)
+        private static bool _aimRotValid;      // false => re-seed _aimRot from the live camera pose
 
         private static void Prefix(CameraOrbitState __instance)
         {
@@ -940,11 +1017,40 @@ namespace NuclearOptionMouseAim
             // instead of spinning. Mirrors MouseFlight's |forward.y|>0.9 pole guard. We refresh _pan EVERY
             // frame, even while frozen/free-looking, so releasing free-look returns straight to the live aim
             // instead of snapping from a stale heading.
-            bool nearPole = Mathf.Abs(aim.y) > 0.9f;
-            if (!nearPole && followH.sqrMagnitude > 1e-3f && aimH.sqrMagnitude > 1e-3f)
-                _pan = Vector3.SignedAngle(followH.normalized, aimH.normalized, Vector3.up);
+            bool nearPole   = Mathf.Abs(aim.y) > 0.9f;
+            bool freshValid = followH.sqrMagnitude > 1e-3f && aimH.sqrMagnitude > 1e-3f;
+            float freshPan  = freshValid
+                ? Vector3.SignedAngle(followH.normalized, aimH.normalized, Vector3.up)
+                : _pan;
+            if (!nearPole && freshValid)
+                _pan = freshPan;
 
-            if (AimRig.AimFrozen()) return;                         // frozen: native owns the orbit-look (free-look)
+            bool frozen = AimRig.AimFrozen();
+            bool dbg    = Cfg.DebugLogging.Value;
+
+            // Native's own accumulated look offsets BEFORE we overwrite them — nonzero growth here while
+            // we're aiming means native Inputs() is fighting us for the orbit (it reads the same mouse).
+            float nativePan = 0f, nativeTilt = 0f;
+            if (dbg)
+            {
+                nativePan  = tr.Field("panView").GetValue<float>();
+                nativeTilt = tr.Field("tiltView").GetValue<float>();
+            }
+
+            // Edge events (not throttled): the exact moments the two suspect mechanisms kick in/out.
+            //   POLE  — how stale did the held yaw get vs a fresh computation while we were holding it?
+            //   FREEZE— what offsets native accumulated during free-look, and what we resume to.
+            if (dbg && nearPole != _prevNearPole)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[orbitcam] POLE {(nearPole ? "ENTER" : "EXIT")} t={Time.time:0.000} heldPan={_pan:0.0} " +
+                    $"freshPan={freshPan:0.0} stale={Mathf.DeltaAngle(freshPan, _pan):0.0} aimY={aim.y:0.00} " +
+                    $"followHmag={followH.magnitude:0.00} freshValid={freshValid}");
+            if (dbg && frozen != _prevFrozen)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[orbitcam] FREEZE {(frozen ? "ENTER" : "EXIT")} t={Time.time:0.000} " +
+                    $"nativePan={nativePan:0.0} nativeTilt={nativeTilt:0.0} ourPan={_pan:0.0}");
+            _prevNearPole = nearPole;
+            _prevFrozen   = frozen;
 
             // tiltView: native Rotate(tiltView,0,0,Self) pitches the view DOWN for +tilt, so aiming UP needs a
             // negative tilt. Subtract CameraPitchOffset to lift the resting view: the stock orbit cam parks
@@ -955,8 +1061,118 @@ namespace NuclearOptionMouseAim
                 -Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg - Cfg.CameraPitchOffset.Value,
                 -80f, 80f);
 
+            // Steady-state trace: everything the pan/tilt computation depends on, ~5/sec.
+            if (dbg && Time.time - _lastOrbitLog >= 0.2f)
+            {
+                _lastOrbitLog = Time.time;
+                float aimHdg    = aimH.sqrMagnitude    > 1e-6f ? Vector3.SignedAngle(Vector3.forward, aimH.normalized,    Vector3.up) : float.NaN;
+                float followHdg = followH.sqrMagnitude > 1e-6f ? Vector3.SignedAngle(Vector3.forward, followH.normalized, Vector3.up) : float.NaN;
+                float aimElev   = Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg;
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[orbitcam] t={Time.time:0.000} aimHdg={aimHdg:0.0} aimElev={aimElev:0.0} " +
+                    $"followHdg={followHdg:0.0} followHmag={followH.magnitude:0.00} pan={_pan:0.0} tilt={tilt:0.0} " +
+                    $"pole={(nearPole ? 1 : 0)} frozen={(frozen ? 1 : 0)} nativePan={nativePan:0.0} nativeTilt={nativeTilt:0.0} " +
+                    $"curVis={(Cursor.visible ? 1 : 0)} curFlags={CursorManager.GetFlags()}");
+            }
+
+            if (frozen) return;                                     // frozen: native owns the orbit-look (free-look)
+
             tr.Field("panView").SetValue(_pan);
             tr.Field("tiltView").SetValue(tilt);
+        }
+
+        // After native CameraMotion/Inputs have run: take over the FINAL camera pose (see the block
+        // comment above), then log where the camera actually ended up. camOffAim is the "is the marker
+        // on screen" proxy — bigger than ~half the FOV and the aim marker is offscreen (the reported
+        // failure). With the override active it should sit ~CameraPitchOffset and stay there.
+        private static void Postfix(CameraOrbitState __instance, CameraStateManager cam)
+        {
+            if (cam == null || cam.mainCamera == null) return;
+            bool overrode = ApplyAimPose(__instance, cam);
+
+            if (!Cfg.DebugLogging.Value) return;
+            if (CameraStateManager.cameraMode != CameraMode.orbit) return;
+            if (!AimRig.TryGetContext(out var ac, out _)) return;
+            if (Time.time - _lastOrbitResLog < 0.2f) return;
+            _lastOrbitResLog = Time.time;
+            Transform ct = cam.mainCamera.transform;
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[orbitcam:res] t={Time.time:0.000} camOffAim={Vector3.Angle(ct.forward, AimRig.AimForward):0.0} " +
+                $"camOffNose={Vector3.Angle(ct.forward, ac.transform.forward):0.0} fov={cam.mainCamera.fieldOfView:0} " +
+                $"ovr={(overrode ? 1 : 0)}");
+        }
+
+        // The WT-style pose: camera 2r behind the (smoothed) aim direction and 0.8r above the plane,
+        // looking along the aim pitched down by CameraPitchOffset. Returns true when it took the pose
+        // this frame. Position is rigid to the live plane position (zero translational lag at speed);
+        // only the view direction is smoothed (1 - exp(-rate*dt) slerp — frame-rate independent), with
+        // MouseFlight's pole guard: near straight up/down keep the previous frame's up instead of world
+        // up so the view doesn't flip/spin through the singularity. Native's terrain-collision pull-in
+        // is replicated with native's own layerMask. Stand-down cases reset _aimRotValid so the next
+        // override frame re-seeds smoothing from wherever the camera actually is — no snap on re-entry.
+        private static bool ApplyAimPose(CameraOrbitState st, CameraStateManager cam)
+        {
+            if (!Cfg.Enabled.Value || !Cfg.CameraFollow.Value) { _aimRotValid = false; return false; }
+            // Re-check the mode: native Inputs() (Center button etc.) may have switched state this frame.
+            if (CameraStateManager.cameraMode != CameraMode.orbit) { _aimRotValid = false; return false; }
+            if (!AimRig.TryGetContext(out var ac, out _) || ac.disabled) { _aimRotValid = false; return false; }
+            if (AimRig.AimFrozen()) { _aimRotValid = false; return false; } // RMB free-look: native owns the view
+            var tr = Traverse.Create(st);
+            if (tr.Field("lookAtTargetLerp").GetValue<float>() > 0f)        // native look-at-target engaged
+            { _aimRotValid = false; return false; }
+
+            Vector3 aim = AimRig.AimForward;
+            if (aim.sqrMagnitude < 0.5f) return false;
+
+            Transform ct = cam.transform; // what native CameraMotion positions (mainCamera rides on it)
+            Vector3 planePos = cam.cameraPivot != null ? cam.cameraPivot.position : ac.transform.position;
+
+            Vector3 upRef = (_aimRotValid && Mathf.Abs(aim.y) > 0.9f) ? _aimRot * Vector3.up : Vector3.up;
+            Quaternion want = Quaternion.LookRotation(aim, upRef);
+            if (!_aimRotValid) { _aimRot = ct.rotation; _aimRotValid = true; } // ease in from the live pose
+            _aimRot = Quaternion.Slerp(_aimRot, want,
+                1f - Mathf.Exp(-Cfg.OrbitAimSmoothing.Value * Time.deltaTime));
+
+            Vector3 dir = _aimRot * Vector3.forward;
+            float maxR = tr.Field("followingMaxRadius").GetValue<float>();
+            float zoom = tr.Field("viewDistAdjust").GetValue<float>();
+            float r = 1f + maxR * (1f + zoom);                       // native's num2: zoom-aware orbit radius
+            Vector3 camPos = planePos - dir * (2f * r) + Vector3.up * (0.8f * r);
+
+            // Terrain pull-in, same math as native CameraMotion's linecast block.
+            Vector3 armN = (planePos - camPos).normalized;
+            int mask = tr.Field("layerMask").GetValue<int>();
+            if (Physics.Linecast(planePos, camPos, out RaycastHit hitInfo, mask))
+            {
+                float dot = Mathf.Max(Vector3.Dot(armN, hitInfo.normal), 0.1f);
+                camPos = hitInfo.point + armN / dot;
+            }
+
+            ct.SetPositionAndRotation(camPos,
+                _aimRot * Quaternion.Euler(Cfg.CameraPitchOffset.Value, 0f, 0f));
+            return true;
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Diagnostic: log every native camera-state transition (Center button -> chase, death -> free,
+    // look-at switches, etc.) so a "camera suddenly reframed" report can be attributed to a native
+    // state switch vs our orbit math. cameraMode is updated inside EnterState, so the postfix sees
+    // the new mode.
+    [HarmonyPatch(typeof(CameraStateManager), "SwitchState")]
+    internal static class CameraSwitchStatePatch
+    {
+        private static void Prefix(CameraStateManager __instance, out string __state)
+        {
+            __state = __instance.currentState != null ? __instance.currentState.GetType().Name : "<none>";
+        }
+
+        private static void Postfix(CameraStateManager __instance, string __state)
+        {
+            if (!Cfg.DebugLogging.Value) return;
+            string now = __instance.currentState != null ? __instance.currentState.GetType().Name : "<none>";
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[camstate] t={Time.time:0.000} {__state} -> {now} (mode={CameraStateManager.cameraMode})");
         }
     }
 }
