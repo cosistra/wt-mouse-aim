@@ -12,3 +12,6 @@ obj/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Local dev/agent notes (machine-specific paths)
+CLAUDE.md
