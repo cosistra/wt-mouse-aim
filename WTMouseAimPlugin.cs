@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.26.0";
+        public const string PluginVersion = "0.26.1";
 
         internal static ManualLogSource Log;
 
@@ -760,7 +760,8 @@ namespace NuclearOptionMouseAim
         private static float _huntWinStart;                     // start of the 1 s sign-flip window
         private static int   _flipsP, _flipsY;                  // output sign-flips this window (hunt)
         private static float _prevSignP, _prevSignY;            // last non-trivial output sign per axis
-        private static float _missTimer;                        // seconds off has stayed high while saturated
+        private static float _missTimer;                        // seconds off has stayed high while saturated (no progress)
+        private static float _missAnchorOff;                    // off captured at the start of the current stall window
         private static float _yawWagWinStart;                   // start of the low-speed yaw-wag window
         private static int   _yawWagFlips;                      // yaw output sign-flips this window (low-speed wag)
         private static float _prevSignYW;                       // last non-trivial yaw output sign (wag counter)
@@ -879,7 +880,7 @@ namespace NuclearOptionMouseAim
                 var ci = aircraft.GetInputs();
                 _outP = ci.pitch; _outR = ci.roll; _outY = ci.yaw;
                 _iPitch = _iYaw = 0f;  // fresh integrator on each engage
-                _offMin = float.MaxValue; _prevOff = 0f; _missTimer = 0f; // fresh anomaly detectors
+                _offMin = float.MaxValue; _prevOff = 0f; _missTimer = 0f; _missAnchorOff = 0f; // fresh anomaly detectors
                 _flipsP = _flipsY = 0; _prevSignP = _prevSignY = 0f; _huntWinStart = 0f;
                 _yawWagFlips = 0; _prevSignYW = 0f; _yawWagWinStart = 0f;
                 _wobbleFlips = 0; _prevSignRW = 0f; _wobbleWinStart = 0f;
@@ -1119,7 +1120,7 @@ namespace NuclearOptionMouseAim
                 // per completed turn — the "how did the planned path actually work out" record.
                 if (Cfg.AnomalyLogging.Value)
                 {
-                    DetectAnomalies(aircraft, off, bank, targetBank, bigTurn, yawRate, dt);
+                    DetectAnomalies(aircraft, off, bank, targetBank, bigTurn, yawRate, rollRate, dt);
                     TrackManeuver(aircraft, off, phi, bank, rollRate, dt);
                 }
 
@@ -1181,7 +1182,7 @@ namespace NuclearOptionMouseAim
         // Event-only anomaly logger (v0.25). Each detector keeps small rolling state and fires at most
         // once per cooldown, writing a single compact [anomaly] line. Runs every FixedUpdate while flying,
         // so it catches the exact frame a command goes wrong without the per-frame [chase] spam.
-        private static void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float dt)
+        private static void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float rollRate, float dt)
         {
             float now = Time.time;
             float spdNow = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
@@ -1205,12 +1206,15 @@ namespace NuclearOptionMouseAim
             }
             if (off > 40f) _offMin = off;
 
-            // OVER-ROLL — actual bank exceeded the bank-angle servo's target by more than the margin:
-            // the plane rolled past what the turn needed and now has to roll back to compensate. GATED to the
-            // small-turn regime (bigTurn < 0.5): the bank servo's target only governs roll inside the fine
-            // cone now (v0.26 rolls body-frame on big turns), so comparing to targetBank mid-turn would false-
-            // fire constantly. The bank degeneracy at steep pitch no longer drives control, only this detector.
-            if (bigTurn < 0.5f && Mathf.Abs(bank) > Mathf.Abs(targetBank) + Cfg.AnomalyOverRollDeg.Value)
+            // OVER-ROLL — actual bank overshot what the law actually asked for. GATED to the PURE fine regime
+            // (bigTurn <= 0, i.e. off < FineAngle): only there does the fine bank servo alone govern roll, so
+            // targetBank is the real commanded bank. Above FineAngle the v0.26 body-frame roll-to-align law
+            // legitimately commands more bank than the azimuth servo would, so comparing to targetBank there
+            // false-fires all through a normal turn (the bigTurn<0.5 gate let that happen — v0.26.1 fix). Also
+            // require the bank to be DEEPENING (roll rate still increasing |bank|, same sign as bank) so a
+            // turn-exit roll-out — bank momentarily above target but actively levelling — doesn't trip it.
+            if (bigTurn <= 0f && Mathf.Abs(bank) > Mathf.Abs(targetBank) + Cfg.AnomalyOverRollDeg.Value
+                && Mathf.Sign(rollRate) == Mathf.Sign(bank))
                 Anomaly("over-roll", $"bank={bank:0.0} target={targetBank:0.0}", ref _anOverRollT, now, ac, off, bank);
 
             // HUNT — rapid output sign-flapping on pitch or yaw within a 1 s window while the error is NOT
@@ -1249,13 +1253,27 @@ namespace NuclearOptionMouseAim
                 _wobbleFlips = 0; // consume the window
             }
 
-            // PERSISTENT-MISS — off stuck above ~8deg while an axis is near saturation for >2 s: the
-            // instructor is fighting itself / not finding the efficient line (a "non-optimal path").
+            // PERSISTENT-MISS — off stuck high while an axis is near saturation: the instructor is fighting
+            // itself / not finding the efficient line. v0.26.1: require a genuine STALL, not an honest long
+            // turn. With the G-limiter gone a big reorientation legitimately holds full elevator at high G for
+            // many seconds while off steadily closes (logs showed off 90->19 over ~30 s) — that must NOT flag.
+            // Anchor off when the stall window opens; if off drops progressDeg below the anchor the turn is
+            // closing, so reset and re-anchor. Only fire when the timer reaches 2 s with off still within
+            // progressDeg of the anchor — i.e. closing slower than progressDeg/2 deg/s (genuinely not closing).
+            // progressDeg=4 => fires only below ~2 deg/s; the honest max-rate turns close at ~2.4 deg/s.
+            const float progressDeg = 4f;
             bool saturated = Mathf.Abs(_outP) > 0.9f || Mathf.Abs(_outY) > 0.9f || Mathf.Abs(_outR) > 0.9f;
-            _missTimer = (off > 8f && saturated) ? _missTimer + dt : 0f;
-            if (_missTimer > 2f)
+            if (off > 8f && saturated)
             {
-                Anomaly("persistent-miss", $"stuck {_missTimer:0.0}s saturated", ref _anMissT, now, ac, off, bank);
+                if (_missTimer <= 0f) _missAnchorOff = off;            // open a fresh stall window — anchor here
+                else if (off < _missAnchorOff - progressDeg)           // closed progressDeg => making real progress
+                { _missTimer = 0f; _missAnchorOff = off; }
+                _missTimer += dt;
+            }
+            else _missTimer = 0f;
+            if (_missTimer > 2f && off > _missAnchorOff - progressDeg)
+            {
+                Anomaly("persistent-miss", $"stuck {_missTimer:0.0}s off~{_missAnchorOff:0} (<{progressDeg:0}deg progress)", ref _anMissT, now, ac, off, bank);
                 _missTimer = 0f;
             }
 
