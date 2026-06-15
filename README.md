@@ -13,6 +13,32 @@ Works in both **cockpit** and **3rd-person** views.
 
 ---
 
+## See it in action
+
+**Cockpit gunnery** — point the reticle at a target and the instructor flies the guns onto it.
+
+<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg1-cockpit-gunnery.mp4" controls muted></video>
+
+**Third-person gunnery** — the same point-and-shoot, now with the WT-style chase camera tracking the aim.
+
+<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg2-thirdperson-gunnery.mp4" controls muted></video>
+
+**Third-person combat** — maneuvering and firing in 3rd-person; the camera leads with the marker through the turns.
+
+<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg3-thirdperson-combat.mp4" controls muted></video>
+
+**Target marking + missiles** — designating targets and sending missiles while the aim layer keeps the nose where you point.
+
+<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg4-target-marking-missiles.mp4" controls muted></video>
+
+**Fly Level (F7)** — hands-off level flight holding heading and the velocity vector on the horizon, free-look panning around as the plane skims the water.
+
+<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg5-fly-level.mp4" controls muted></video>
+
+> If the players don't load, your browser/network may be blocking inline video — the clips are in [`media/`](media/) and on the [releases page](https://github.com/cosistra/wt-mouse-aim/releases).
+
+---
+
 ## What it does
 
 - **Point-and-chase aiming.** Move the mouse to place a marker; the plane chases its nose onto
