@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.28.1";
+        public const string PluginVersion = "0.28.2";
 
         internal static ManualLogSource Log;
 
@@ -432,6 +432,7 @@ namespace NuclearOptionMouseAim
         private static float   _lastAimLog;                 // throttle the [aim] trace to ~5/sec
         private static bool _captureFresh;                 // true on the frame aiming begins (drop the recenter-warp jump)
         private static bool _managing;                     // we are currently driving the cursor regime at all
+        private static Vector2 _lookDelta;                 // smoothed mouse delta exposed for 3p free-look (same units as aim)
 
         // Win32 raw mouse: GetCursorPos gives a true hardware delta from frame 1, immune to Unity's
         // focus-gated legacy "Mouse X/Y" axis (which stays dead until the window gets a focus event,
@@ -449,6 +450,9 @@ namespace NuclearOptionMouseAim
 
         public static Vector3 AimForward => _aimForward;
         public static Vector3 MouseAimPos(Aircraft ac) => ac.transform.position + _aimForward * Cfg.AimDistance.Value;
+        // Smoothed mouse delta during 3rd-person free-look (same units/smoothing as the aim), zero otherwise.
+        // CameraOrbitPatch multiplies it by MouseSensitivity so free-look feel == aim feel.
+        internal static Vector2 LookDelta => _lookDelta;
 
         public static void Update()
         {
@@ -480,7 +484,11 @@ namespace NuclearOptionMouseAim
             bool menuWants  = Guards.MenusOpen() || CursorManager.GetFlags() != CursorFlags.None;
             bool flyHidden  = flying && !menuWants;
             bool aimCapture = flyHidden && !frozen && (inCockpit || inOrbit);
-            ApplyCursorRegime(flyHidden, aimCapture);
+            // Orbit free-look: WE drive the camera with the mouse (so it gets the same sensitivity as
+            // aiming), so capture the cursor exactly like aiming (None+hidden + Win32 recenter) instead of
+            // handing the look to native. Cockpit free-look stays native (Locked+hidden, below).
+            bool lookCapture = flyHidden && frozen && inOrbit;
+            ApplyCursorRegime(flyHidden, aimCapture || lookCapture);
 
             Transform t = ac.transform;
             int id = ac.GetInstanceID();
@@ -497,12 +505,23 @@ namespace NuclearOptionMouseAim
             // only while we own the cursor for aiming; otherwise it stays parked in the world (frozen
             // during menus/map/pause/free-look/external cam).
             Vector2 raw = Vector2.zero;
-            if (aimCapture)
+            if (aimCapture || lookCapture)
             {
                 raw = ReadMouseDelta();
                 float sm = Mathf.Clamp01(Cfg.MouseSmoothing.Value);
                 _smoothedDelta = Vector2.Lerp(raw, _smoothedDelta, sm); // sm=0 -> raw, higher -> smoother/laggier
+            }
+            else
+            {
+                _smoothedDelta = Vector2.zero; // drop stale delta so it doesn't lurch on resume
+            }
 
+            // Expose the look delta for orbit free-look (CameraOrbitPatch). Same smoothed delta the aim
+            // uses, so applying MouseSensitivity camera-side makes free-look and aiming feel identical.
+            _lookDelta = lookCapture ? _smoothedDelta : Vector2.zero;
+
+            if (aimCapture)
+            {
                 float sens = Cfg.MouseSensitivity.Value;
                 float pan  = _smoothedDelta.x;
                 float tilt = _smoothedDelta.y * (Cfg.InvertPitch.Value ? -1f : 1f);
@@ -527,10 +546,6 @@ namespace NuclearOptionMouseAim
                 _aimForward = Quaternion.AngleAxis(pan * sens, upAxis)
                             * Quaternion.AngleAxis(-tilt * sens, rightAxis)
                             * _aimForward;
-            }
-            else
-            {
-                _smoothedDelta = Vector2.zero; // drop stale delta so it doesn't lurch on resume
             }
 
             // Clamp the marker into the cone around the CURRENT nose — but ONLY when it actually exceeds
@@ -1623,11 +1638,11 @@ namespace NuclearOptionMouseAim
             Vector3 planePos = cam.cameraPivot != null ? cam.cameraPivot.position : ac.transform.position;
 
             // RMB / Free-Look: KEEP our orbit pose (same pivot, +0.8r up, CameraPitchOffset framing) and
-            // look around with the game's own Pan/Tilt View axes — instead of standing down to the native
-            // orbit, whose pivot looks AT the plane with a different downward angle (that hand-off was the
-            // "snap a bit down" on RMB). Horizon-locked yaw/pitch so the view can't roll or hit a pole
-            // singularity. Seeded from the current aim view on entry, so engaging free-look is seamless;
-            // on release the marker is committed to this look direction (AimRig), so the hand-back is too.
+            // look around with the MOUSE — instead of standing down to the native orbit, whose pivot looks
+            // AT the plane with a different downward angle (that hand-off was the "snap a bit down" on RMB).
+            // Horizon-locked yaw/pitch so the view can't roll or hit a pole singularity. Seeded from the
+            // current aim view on entry, so engaging free-look is seamless; on release the view eases back
+            // to the flight direction (the timed return below).
             if (AimRig.AimFrozen())
             {
                 if (!_freeLookSeeded)
@@ -1637,19 +1652,13 @@ namespace NuclearOptionMouseAim
                     _flPitch = Mathf.Asin(Mathf.Clamp(seed.y, -1f, 1f)) * Mathf.Rad2Deg;
                     _freeLookSeeded = true;
                 }
-                // Same input native orbit free-look reads (GameManager.playerInput — focus-immune, unlike
-                // Unity's legacy mouse axis), gated on the cursor being hidden exactly like native.
-                var pin = GameManager.playerInput;
-                if (pin != null && !Cursor.visible)
-                {
-                    float fovF   = Mathf.Min(cam.mainCamera.fieldOfView / 20f, 1f);
-                    float scale  = 90f * PlayerSettings.viewSensitivity * fovF * Time.unscaledDeltaTime;
-                    _flYaw  += pin.GetAxis("Pan View")  * scale;
-                    // +Tilt View looks DOWN (native Rotate(tiltView,0,0,Self)); subtract from elevation.
-                    _flPitch = Mathf.Clamp(
-                        _flPitch - pin.GetAxis("Tilt View") * scale * (PlayerSettings.viewInvertPitch ? -1f : 1f),
-                        -85f, 85f);
-                }
+                // Drive the look with the SAME smoothed mouse delta + MouseSensitivity as aiming (from
+                // AimRig), so free-look and aim feel identical. d.x = mouse right (+), d.y = mouse up (+).
+                Vector2 d = AimRig.LookDelta;
+                float sens = Cfg.MouseSensitivity.Value;
+                _flYaw  += d.x * sens;
+                _flPitch = Mathf.Clamp(_flPitch + d.y * sens * (Cfg.InvertPitch.Value ? -1f : 1f), -85f, 85f);
+
                 Quaternion look = Quaternion.Euler(-_flPitch, _flYaw, 0f);
                 PlaceOrbitCamera(tr, ct, planePos, look * Vector3.forward, look);
                 _aimRotValid   = false; // release re-seeds the aim smoother (from this pose, via _wasFrozenPose)
