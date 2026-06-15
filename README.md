@@ -17,25 +17,27 @@ Works in both **cockpit** and **3rd-person** views.
 
 **Cockpit gunnery** — point the reticle at a target and the instructor flies the guns onto it.
 
-<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg1-cockpit-gunnery.mp4" controls muted></video>
+<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg1-cockpit-gunnery.mp4" controls muted></video>
 
 **Third-person gunnery** — the same point-and-shoot, now with the WT-style chase camera tracking the aim.
 
-<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg2-thirdperson-gunnery.mp4" controls muted></video>
+<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg2-thirdperson-gunnery.mp4" controls muted></video>
 
 **Third-person combat** — maneuvering and firing in 3rd-person; the camera leads with the marker through the turns.
 
-<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg3-thirdperson-combat.mp4" controls muted></video>
+<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg3-thirdperson-combat.mp4" controls muted></video>
+
+> **Tip:** the 3rd-person camera looks and reads best with the **Quality of Life (QoL)** overhaul mod installed (available in NOMM) and the game's **third-person HUD** turned on.
 
 **Target marking + missiles** — designating targets and sending missiles while the aim layer keeps the nose where you point.
 
-<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg4-target-marking-missiles.mp4" controls muted></video>
+<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg4-target-marking-missiles.mp4" controls muted></video>
 
 **Fly Level (F7)** — hands-off level flight holding heading and the velocity vector on the horizon, free-look panning around as the plane skims the water.
 
-<video src="https://github.com/cosistra/wt-mouse-aim/raw/main/media/seg5-fly-level.mp4" controls muted></video>
+<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg5-fly-level.mp4" controls muted></video>
 
-> If the players don't load, your browser/network may be blocking inline video — the clips are in [`media/`](media/) and on the [releases page](https://github.com/cosistra/wt-mouse-aim/releases).
+> If the players don't load inline, your browser may be blocking embedded video — the clips are also in the [`media/`](media/) folder.
 
 ---
 
