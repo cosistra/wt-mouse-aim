@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.27.0";
+        public const string PluginVersion = "0.28.1";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + fine integrator + per-axis manual override + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB freeze + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + fine integrator + per-axis manual override + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
         }
 
         private void Update()
@@ -262,6 +262,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> CameraPitchOffset;   // 3p: deg the view is pitched down off the aim direction
         public static ConfigEntry<float> OrbitAimSmoothing;   // 3p: view-direction smoothing rate (1/s, higher = snappier)
         public static ConfigEntry<float> HorizonDeadzoneDeg;  // 3p: half-width of the no-horizon-level band at the pole (hysteresis)
+        public static ConfigEntry<float> FreeLookReturnTime;  // 3p: seconds to ease the view back to the flight dir on release
 
         public static void Bind(ConfigFile cf)
         {
@@ -394,6 +395,9 @@ namespace NuclearOptionMouseAim
             HorizonDeadzoneDeg    = cf.Bind("Camera", "HorizonDeadzoneDeg", 5f, new ConfigDescription(
                 "3rd-person only: half-width (deg) of the no-horizon-level band straight up/down. Inside it the camera stops re-leveling to the world horizon and holds its current up so it can't flip through the singularity; leveling eases back in over this band as you come out (hysteresis), so over-the-top loops roll to the new level side smoothly instead of snapping. Smaller keeps the horizon level closer to vertical; larger widens the no-level hold band.",
                 new AcceptableValueRange<float>(0f, 20f)));
+            FreeLookReturnTime    = cf.Bind("Camera", "FreeLookReturnTime", 0.5f, new ConfigDescription(
+                "3rd-person only: seconds for the view to smoothly swing back to your flight direction when you RELEASE free-look (RMB / Free Look). Classic free-look — the plane keeps flying the heading it held; only the camera eases back (smoothstep). 0.5 is a gentle swing; smaller = snappier return, larger = lazier.",
+                new AcceptableValueRange<float>(0.05f, 2f)));
         }
     }
 
@@ -1479,6 +1483,12 @@ namespace NuclearOptionMouseAim
         private static Quaternion _aimRot = Quaternion.identity; // smoothed view rotation (postfix override)
         private static bool _aimRotValid;      // false => re-seed _aimRot from the live camera pose
         private static bool _levelingSuppressed; // true while inside the pole deadzone (horizon leveling off)
+        private static float _flYaw, _flPitch; // free-look look angles (deg): heading + elevation, horizon-locked
+        private static bool  _freeLookSeeded;  // rising-edge guard: seed _flYaw/_flPitch once when free-look begins
+        private static bool  _wasFrozenPose;   // last pose frame was free-look (release starts the timed return)
+        private static Quaternion _returnFrom = Quaternion.identity; // free-look view we ease back FROM on release
+        private static float _returnT;         // 0..1 progress of the release return animation
+        private static bool  _returning;       // true while easing the view back to the flight direction
 
         private static void Prefix(CameraOrbitState __instance)
         {
@@ -1601,22 +1611,74 @@ namespace NuclearOptionMouseAim
         // override frame re-seeds smoothing from wherever the camera actually is — no snap on re-entry.
         private static bool ApplyAimPose(CameraOrbitState st, CameraStateManager cam)
         {
-            if (!Cfg.Enabled.Value || !Cfg.CameraFollow.Value) { _aimRotValid = false; return false; }
+            if (!Cfg.Enabled.Value || !Cfg.CameraFollow.Value) { _aimRotValid = false; _freeLookSeeded = false; return false; }
             // Re-check the mode: native Inputs() (Center button etc.) may have switched state this frame.
-            if (CameraStateManager.cameraMode != CameraMode.orbit) { _aimRotValid = false; return false; }
-            if (!AimRig.TryGetContext(out var ac, out _) || ac.disabled) { _aimRotValid = false; return false; }
-            if (AimRig.AimFrozen()) { _aimRotValid = false; return false; } // RMB free-look: native owns the view
+            if (CameraStateManager.cameraMode != CameraMode.orbit) { _aimRotValid = false; _freeLookSeeded = false; return false; }
+            if (!AimRig.TryGetContext(out var ac, out _) || ac.disabled) { _aimRotValid = false; _freeLookSeeded = false; return false; }
             var tr = Traverse.Create(st);
             if (tr.Field("lookAtTargetLerp").GetValue<float>() > 0f)        // native look-at-target engaged
-            { _aimRotValid = false; return false; }
-
-            Vector3 aim = AimRig.AimForward;
-            if (aim.sqrMagnitude < 0.5f) return false;
+            { _aimRotValid = false; _freeLookSeeded = false; return false; }
 
             Transform ct = cam.transform; // what native CameraMotion positions (mainCamera rides on it)
             Vector3 planePos = cam.cameraPivot != null ? cam.cameraPivot.position : ac.transform.position;
 
-            if (!_aimRotValid) { _aimRot = ct.rotation; _aimRotValid = true; } // ease in from the live pose
+            // RMB / Free-Look: KEEP our orbit pose (same pivot, +0.8r up, CameraPitchOffset framing) and
+            // look around with the game's own Pan/Tilt View axes — instead of standing down to the native
+            // orbit, whose pivot looks AT the plane with a different downward angle (that hand-off was the
+            // "snap a bit down" on RMB). Horizon-locked yaw/pitch so the view can't roll or hit a pole
+            // singularity. Seeded from the current aim view on entry, so engaging free-look is seamless;
+            // on release the marker is committed to this look direction (AimRig), so the hand-back is too.
+            if (AimRig.AimFrozen())
+            {
+                if (!_freeLookSeeded)
+                {
+                    Vector3 seed = (_aimRotValid ? _aimRot : ct.rotation) * Vector3.forward;
+                    _flYaw   = Mathf.Atan2(seed.x, seed.z) * Mathf.Rad2Deg;
+                    _flPitch = Mathf.Asin(Mathf.Clamp(seed.y, -1f, 1f)) * Mathf.Rad2Deg;
+                    _freeLookSeeded = true;
+                }
+                // Same input native orbit free-look reads (GameManager.playerInput — focus-immune, unlike
+                // Unity's legacy mouse axis), gated on the cursor being hidden exactly like native.
+                var pin = GameManager.playerInput;
+                if (pin != null && !Cursor.visible)
+                {
+                    float fovF   = Mathf.Min(cam.mainCamera.fieldOfView / 20f, 1f);
+                    float scale  = 90f * PlayerSettings.viewSensitivity * fovF * Time.unscaledDeltaTime;
+                    _flYaw  += pin.GetAxis("Pan View")  * scale;
+                    // +Tilt View looks DOWN (native Rotate(tiltView,0,0,Self)); subtract from elevation.
+                    _flPitch = Mathf.Clamp(
+                        _flPitch - pin.GetAxis("Tilt View") * scale * (PlayerSettings.viewInvertPitch ? -1f : 1f),
+                        -85f, 85f);
+                }
+                Quaternion look = Quaternion.Euler(-_flPitch, _flYaw, 0f);
+                PlaceOrbitCamera(tr, ct, planePos, look * Vector3.forward, look);
+                _aimRotValid   = false; // release re-seeds the aim smoother (from this pose, via _wasFrozenPose)
+                _wasFrozenPose = true;
+                return true;
+            }
+            _freeLookSeeded = false;    // free-look ended; the next entry re-seeds the look angles
+
+            Vector3 aim = AimRig.AimForward;
+            if (aim.sqrMagnitude < 0.5f) return false;
+
+            // Seed the smoother. Straight out of free-look, START A TIMED EASE back to the flight
+            // direction: the plane keeps flying the heading it held (no commit) and the camera swings
+            // back over FreeLookReturnTime. Otherwise just ease in from the live pose.
+            if (_wasFrozenPose)
+            {
+                _aimRot      = Quaternion.Euler(-_flPitch, _flYaw, 0f); // the free-look view we return FROM
+                _returnFrom  = _aimRot;
+                _returnT     = 0f;
+                _returning   = true;
+                _aimRotValid = true;
+                _wasFrozenPose = false;
+            }
+            else if (!_aimRotValid)
+            {
+                _aimRot      = ct.rotation;
+                _aimRotValid = true;
+                _returning   = false;
+            }
 
             // Pole-stable horizon leveling with a hysteresis deadzone. Replaces the old hard
             // |aim.y|>0.9 world-up / prev-up switch, which flipped the camera's up instantly through
@@ -1645,10 +1707,29 @@ namespace NuclearOptionMouseAim
                 }
             }
             Quaternion want = Quaternion.LookRotation(aim, upRef);
-            _aimRot = Quaternion.Slerp(_aimRot, want,
-                1f - Mathf.Exp(-Cfg.OrbitAimSmoothing.Value * Time.deltaTime));
+            if (_returning)
+            {
+                // Fixed-duration smoothstep swing from the free-look view back to the live flight dir.
+                _returnT += Time.deltaTime / Mathf.Max(Cfg.FreeLookReturnTime.Value, 0.01f);
+                if (_returnT >= 1f) { _returnT = 1f; _returning = false; }
+                _aimRot = Quaternion.Slerp(_returnFrom, want, Mathf.SmoothStep(0f, 1f, _returnT));
+            }
+            else
+            {
+                _aimRot = Quaternion.Slerp(_aimRot, want,
+                    1f - Mathf.Exp(-Cfg.OrbitAimSmoothing.Value * Time.deltaTime));
+            }
 
-            Vector3 dir = _aimRot * Vector3.forward;
+            PlaceOrbitCamera(tr, ct, planePos, _aimRot * Vector3.forward, _aimRot);
+            return true;
+        }
+
+        // Position the camera 2r behind the look direction and 0.8r above the plane (native's orbit
+        // geometry), pull it in off terrain with native's own linecast, and look along lookRot pitched
+        // down by CameraPitchOffset. Shared by the aim-tracking and free-look paths so engaging or
+        // releasing free-look never changes the pivot/offset (the source of the old RMB snap).
+        private static void PlaceOrbitCamera(Traverse tr, Transform ct, Vector3 planePos, Vector3 dir, Quaternion lookRot)
+        {
             float maxR = tr.Field("followingMaxRadius").GetValue<float>();
             float zoom = tr.Field("viewDistAdjust").GetValue<float>();
             float r = 1f + maxR * (1f + zoom);                       // native's num2: zoom-aware orbit radius
@@ -1663,9 +1744,7 @@ namespace NuclearOptionMouseAim
                 camPos = hitInfo.point + armN / dot;
             }
 
-            ct.SetPositionAndRotation(camPos,
-                _aimRot * Quaternion.Euler(Cfg.CameraPitchOffset.Value, 0f, 0f));
-            return true;
+            ct.SetPositionAndRotation(camPos, lookRot * Quaternion.Euler(Cfg.CameraPitchOffset.Value, 0f, 0f));
         }
     }
 
