@@ -17,27 +17,25 @@ Works in both **cockpit** and **3rd-person** views.
 
 **Cockpit gunnery** — point the reticle at a target and the instructor flies the guns onto it.
 
-<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg1-cockpit-gunnery.mp4" controls muted></video>
+https://github.com/user-attachments/assets/e1ec4f22-4545-4636-aac7-f4b432983ea4
 
 **Third-person gunnery** — the same point-and-shoot, now with the WT-style chase camera tracking the aim.
 
-<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg2-thirdperson-gunnery.mp4" controls muted></video>
+https://github.com/user-attachments/assets/445cf942-f47b-4fd4-85a4-887fec76c296
 
 **Third-person combat** — maneuvering and firing in 3rd-person; the camera leads with the marker through the turns.
 
-<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg3-thirdperson-combat.mp4" controls muted></video>
+https://github.com/user-attachments/assets/9d779c48-f08e-4a09-bcf5-a8cdd02b59cd
 
 > **Tip:** the 3rd-person camera looks and reads best with the **Quality of Life (QoL)** overhaul mod installed (available in NOMM) and the game's **third-person HUD** turned on.
 
 **Target marking + missiles** — designating targets and sending missiles while the aim layer keeps the nose where you point.
 
-<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg4-target-marking-missiles.mp4" controls muted></video>
+https://github.com/user-attachments/assets/78deb5d6-fac2-4617-9171-f3c5fb8ce341
 
 **Fly Level (F7)** — hands-off level flight holding heading and the velocity vector on the horizon, free-look panning around as the plane skims the water.
 
-<video src="https://cdn.jsdelivr.net/gh/cosistra/wt-mouse-aim@main/media/seg5-fly-level.mp4" controls muted></video>
-
-> If the players don't load inline, your browser may be blocking embedded video — the clips are also in the [`media/`](media/) folder.
+https://github.com/user-attachments/assets/00afefa5-f5c9-479c-9c92-4d6c2e1452b7
 
 ---
 
