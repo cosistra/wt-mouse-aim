@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.26.1";
+        public const string PluginVersion = "0.27.0";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + fine integrator + per-axis manual override + Win32 raw mouse + 3rd-person orbit-camera override + RMB freeze + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + fine integrator + per-axis manual override + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB freeze + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
         }
 
         private void Update()
@@ -261,6 +261,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> CameraFollowSmoothing;// seconds-ish smoothing (higher = lazier)
         public static ConfigEntry<float> CameraPitchOffset;   // 3p: deg the view is pitched down off the aim direction
         public static ConfigEntry<float> OrbitAimSmoothing;   // 3p: view-direction smoothing rate (1/s, higher = snappier)
+        public static ConfigEntry<float> HorizonDeadzoneDeg;  // 3p: half-width of the no-horizon-level band at the pole (hysteresis)
 
         public static void Bind(ConfigFile cf)
         {
@@ -390,6 +391,9 @@ namespace NuclearOptionMouseAim
             OrbitAimSmoothing     = cf.Bind("Camera", "OrbitAimSmoothing", 8f, new ConfigDescription(
                 "3rd-person only: how quickly the orbit camera's view direction chases the aim circle (per second, frame-rate independent). Higher = snappier tracking; lower = lazier, smoother swings. Position never lags the plane — this only smooths the direction.",
                 new AcceptableValueRange<float>(1f, 20f)));
+            HorizonDeadzoneDeg    = cf.Bind("Camera", "HorizonDeadzoneDeg", 5f, new ConfigDescription(
+                "3rd-person only: half-width (deg) of the no-horizon-level band straight up/down. Inside it the camera stops re-leveling to the world horizon and holds its current up so it can't flip through the singularity; leveling eases back in over this band as you come out (hysteresis), so over-the-top loops roll to the new level side smoothly instead of snapping. Smaller keeps the horizon level closer to vertical; larger widens the no-level hold band.",
+                new AcceptableValueRange<float>(0f, 20f)));
         }
     }
 
@@ -1474,6 +1478,7 @@ namespace NuclearOptionMouseAim
         private static float _lastOrbitResLog; // throttle the [orbitcam:res] trace to ~5/sec
         private static Quaternion _aimRot = Quaternion.identity; // smoothed view rotation (postfix override)
         private static bool _aimRotValid;      // false => re-seed _aimRot from the live camera pose
+        private static bool _levelingSuppressed; // true while inside the pole deadzone (horizon leveling off)
 
         private static void Prefix(CameraOrbitState __instance)
         {
@@ -1583,7 +1588,7 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogInfo(
                 $"[orbitcam:res] t={Time.time:0.000} camOffAim={Vector3.Angle(ct.forward, AimRig.AimForward):0.0} " +
                 $"camOffNose={Vector3.Angle(ct.forward, ac.transform.forward):0.0} fov={cam.mainCamera.fieldOfView:0} " +
-                $"ovr={(overrode ? 1 : 0)}");
+                $"ovr={(overrode ? 1 : 0)} levelSuppressed={(_levelingSuppressed ? 1 : 0)}");
         }
 
         // The WT-style pose: camera 2r behind the (smoothed) aim direction and 0.8r above the plane,
@@ -1611,9 +1616,35 @@ namespace NuclearOptionMouseAim
             Transform ct = cam.transform; // what native CameraMotion positions (mainCamera rides on it)
             Vector3 planePos = cam.cameraPivot != null ? cam.cameraPivot.position : ac.transform.position;
 
-            Vector3 upRef = (_aimRotValid && Mathf.Abs(aim.y) > 0.9f) ? _aimRot * Vector3.up : Vector3.up;
-            Quaternion want = Quaternion.LookRotation(aim, upRef);
             if (!_aimRotValid) { _aimRot = ct.rotation; _aimRotValid = true; } // ease in from the live pose
+
+            // Pole-stable horizon leveling with a hysteresis deadzone. Replaces the old hard
+            // |aim.y|>0.9 world-up / prev-up switch, which flipped the camera's up instantly through
+            // the singularity (an abrupt ~180deg roll over the top of a loop). Away from vertical we
+            // level to the world horizon; inside the deadzone we hold the current (continuous) up so
+            // nothing can flip; leveling eases back in over the band as we come out, and only
+            // re-enables once past the far edge — hysteresis, so hovering right at the pole can't
+            // oscillate. The OrbitAimSmoothing slerp below turns the up-vector hand-off into a smooth
+            // roll to the new level side instead of a snap. holdUp comes from the previous smoothed
+            // rotation, so the view direction never inverts through vertical.
+            float vertical = 90f - Mathf.Abs(Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg); // 0 at pole, 90 at horizon
+            float dz = Cfg.HorizonDeadzoneDeg.Value;
+            if (!_levelingSuppressed && vertical <= 0f) _levelingSuppressed = true;
+            else if (_levelingSuppressed && vertical >= dz) _levelingSuppressed = false;
+
+            Vector3 holdUp = _aimRot * Vector3.up;   // continuous: never flips through the pole
+            Vector3 upRef  = holdUp;
+            if (!_levelingSuppressed)
+            {
+                Vector3 right = Vector3.Cross(Vector3.up, aim);
+                if (right.sqrMagnitude > 1e-5f)
+                {
+                    Vector3 levelUp = Vector3.Cross(aim, right.normalized).normalized;
+                    float w = dz > 0f ? Mathf.InverseLerp(0f, dz, vertical) : 1f; // ease leveling in over the band
+                    upRef = Vector3.Slerp(holdUp, levelUp, w);
+                }
+            }
+            Quaternion want = Quaternion.LookRotation(aim, upRef);
             _aimRot = Quaternion.Slerp(_aimRot, want,
                 1f - Mathf.Exp(-Cfg.OrbitAimSmoothing.Value * Time.deltaTime));
 

@@ -1,21 +1,81 @@
 # WT Mouse Aim — Nuclear Option
 
-A War Thunder–style mouse-aim ("smart instructor") mod for [Nuclear Option](https://store.steampowered.com/app/2168680/Nuclear_Option/),
+A War Thunder–style **mouse-aim** mod for [Nuclear Option](https://store.steampowered.com/app/2168680/Nuclear_Option/),
 built as a BepInEx 5 / HarmonyX plugin.
 
-You point a **world-locked aim marker** where you want the nose to go; a thin instructor
-rolls and pulls the aircraft onto that vector, then levels out as the nose arrives. The
-game's own fly-by-wire still governs the envelope. Works in cockpit and 3rd-person views.
+You point a **world-locked aim marker** where you want the nose to go. A thin "instructor"
+flies the aircraft onto that vector — it rolls the lift vector onto the marker, pulls up into
+it, and levels out as the nose arrives. You stop flying the airframe and start flying the
+*reticle*, the way you do in War Thunder's mouse-aim. The game's own fly-by-wire still governs
+the flight envelope (stall, G, AoA, auto-trim), so the mod is a layer on top, not a replacement.
+
+Works in both **cockpit** and **3rd-person** views.
+
+---
+
+## What it does
+
+- **Point-and-chase aiming.** Move the mouse to place a marker; the plane chases its nose onto
+  it. It's a "turn once and arrive" follow-point, not a rate joystick — the marker stays put in
+  the world until you move it, and the aircraft settles onto it.
+- **Roll-then-pull turn law.** For anything but tiny corrections it banks first to put the lift
+  vector on the target, *then* pulls — the efficient turn — instead of mushing across the wrong
+  plane. No negative-G bunting.
+- **Fine capture that actually centres.** A small integrator defeats the fly-by-wire's
+  rate-command residual so the nose lands *on* the marker instead of parking a degree short.
+- **Per-axis manual override.** Touch the stick, keyboard, or rudder and you instantly own that
+  axis; the mouse keeps aiming the axes you're *not* touching. Release and it eases back.
+- **Right-mouse free-look.** Hold RMB to freeze the reticle and look around (the plane keeps
+  flying to the frozen point), then the view eases back when you let go.
+- **Camera follow.** The cockpit view leans toward the marker; the 3rd-person orbit camera sits
+  WT-style behind-and-above and tracks the aim, with pole-stable horizon leveling through loops.
+- **Fly Level toggle (F7).** Locks the current heading and holds true level flight (velocity
+  vector on the horizon, AoA-corrected) until you nudge the stick or toggle off.
+- **Live tuning (F1).** 50+ parameters — sensitivity, gains, the roll-then-pull behaviour,
+  camera, HUD — all tunable in-game with sensible defaults out of the box.
+
+## How it works (under the hood)
+
+The mouse drives a **world-space aim direction** via raw Win32 mouse input (so big sweeps
+aren't clamped by the screen edge), clamped to a cone around the nose. Each physics tick the
+mod hooks `PilotPlayerState.PlayerAxisControls` and writes stick commands from a small control
+law: a bank-angle servo proportional to heading error, a gated pitch pull (the "roll-then-pull"
+coordination), rate damping to kill wobble, and a leaky integrator for the final few degrees.
+Because Nuclear Option's FBW reads pitch/yaw as a commanded **angular rate**, the law is tuned
+around that rather than fighting it. Camera patches on the cockpit and orbit camera states make
+the view follow the same marker. It's deliberately a *thin* instructor — the game still owns the
+flight model.
+
+---
 
 ## Install
 
-1. Install [BepInEx 5](https://github.com/BepInEx/BepInEx) (Mono build) into your Nuclear
-   Option folder and run the game once to generate its folders.
-2. Drop `NuclearOption-MouseAim.dll` into `<game>\BepInEx\plugins\WTMouseAim\`.
-3. (Optional but recommended) Install the BepInEx **ConfigurationManager** plugin to tune
-   everything live with **F1**.
+### Option A — via NOMM (recommended, easiest)
+
+[**NOMM** (Nuclear Option Mod Manager)](https://github.com/Combat787/NOMM) installs and updates
+this mod for you, including BepInEx and the ConfigurationManager dependency.
+
+1. Download and run [NOMM](https://github.com/Combat787/NOMM/releases/latest).
+2. Point it at your Nuclear Option install if it doesn't auto-detect it.
+3. Search for **WT Mouse Aim**, click install. Done — NOMM handles BepInEx and dependencies.
+
+NOMM sources its mod list from the community [**NOMNOM**](https://github.com/KopterBuzz/NOMNOM)
+registry, where this mod is listed.
+
+### Option B — manual
+
+1. Install [BepInEx 5](https://github.com/BepInEx/BepInEx/releases) (the **Mono x64** build) into
+   your Nuclear Option folder and run the game once so it generates its folders.
+2. Drop `NuclearOption-MouseAim.dll` (from the
+   [latest release](https://github.com/cosistra/wt-mouse-aim/releases/latest)) into
+   `<game>\BepInEx\plugins\WTMouseAim\`.
+3. *(Recommended)* Install the BepInEx
+   [**ConfigurationManager**](https://github.com/BepInEx/BepInEx.ConfigurationManager/releases)
+   plugin to tune everything live with **F1**.
 
 First launch writes the config to `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
+
+---
 
 ## Controls
 
@@ -25,19 +85,22 @@ First launch writes the config to `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
 | **Stick / keyboard / pedals** | Per-axis manual override (take any axis instantly; release to hand it back) |
 | **Right Mouse (hold)** | Freeze the marker and free-look the camera (War Thunder style) |
 | **F7** | Toggle **Fly Level** — hold wings-level, velocity vector on the horizon |
-| **F1** | Open the live config (with ConfigurationManager) |
+| **F1** | Open the live config (requires ConfigurationManager) |
 
 ## Tuning
 
 Everything is live-tunable via F1, grouped into config sections: **Aim** (sensitivity,
 smoothing, cone), **Control** (the instructor's gains and the roll-then-pull behaviour),
-**Camera**, **FlyLevel**, and **HUD** (overlay + diagnostic logging). Sensible defaults
-ship out of the box; the in-game descriptions explain each knob.
+**Camera**, **FlyLevel**, and **HUD** (overlay + diagnostic logging). Sensible defaults ship out
+of the box; the in-game descriptions explain each knob. If a command ever misbehaves, the mod
+writes a single compact `[anomaly]` line to the BepInEx log — handy for bug reports.
+
+---
 
 ## Build from source
 
-Requires the .NET SDK. Point `<GamePath>` in `NuclearOption-MouseAim.csproj` at your
-install (the folder containing `NuclearOption.exe`, with BepInEx 5 installed into it):
+Requires the .NET SDK. Point `<GamePath>` in `NuclearOption-MouseAim.csproj` at your install
+(the folder containing `NuclearOption.exe`, with BepInEx 5 installed into it):
 
 ```
 dotnet build NuclearOption-MouseAim.csproj -c Release
@@ -45,10 +108,14 @@ dotnet build NuclearOption-MouseAim.csproj -c Release
 
 Then copy `bin\Release\NuclearOption-MouseAim.dll` into `<game>\BepInEx\plugins\WTMouseAim\`.
 
+Maintainers: [`release.ps1`](release.ps1) builds, tags, and publishes a GitHub release in one
+step — see [the publishing notes](NOMM_PUBLISH_PLAN.md).
+
 ## Requirements
 
 - Nuclear Option
-- BepInEx 5 (Mono)
+- BepInEx 5 (Mono x64)
+- *(optional)* BepInEx.ConfigurationManager — for live F1 tuning
 
 ## License
 
