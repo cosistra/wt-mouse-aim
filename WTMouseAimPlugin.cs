@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.28.2";
+        public const string PluginVersion = "0.32.0";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + fine integrator + per-axis manual override + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
         }
 
         private void Update()
@@ -212,6 +212,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> PitchYawSensitivity; // base chase gain on the body-frame aim direction
         public static ConfigEntry<float> ChaseDamping;        // derivative damping on the nose's rotation rate
         public static ConfigEntry<float> RollDamping;         // derivative damping on the roll rate (anti bank-wobble)
+        public static ConfigEntry<float> RollRateSmoothing;   // sec: low-pass time constant on rollRate feeding the damping term (anti high-speed roll PIO)
         public static ConfigEntry<float> RollGain;            // roll output scale (negative flips roll direction)
         public static ConfigEntry<float> PitchGain;           // pitch output scale (negative flips)
         public static ConfigEntry<float> YawGain;             // yaw/rudder output scale (negative flips)
@@ -233,6 +234,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> FineAngle;           // deg: cone inside which the fine-capture aids ramp in
         public static ConfigEntry<float> FineGainBoost;       // extra proportional gain at zero offset (0 = off)
         public static ConfigEntry<float> FineBankGain;        // deg of target bank per deg of azimuth error (the bank-servo gain)
+        public static ConfigEntry<float> FineBankDeadzone;    // deg of azimuth error below which the bank servo commands ZERO bank (anti fine-cone roll wobble)
 
         // --- Fine integrator (kills the steady-state residual the FBW rate-command leaves; v0.24).
         // The game's FlyByWire reads our pitch/yaw as a commanded ANGULAR RATE and PID-tracks it, so a
@@ -301,6 +303,9 @@ namespace NuclearOptionMouseAim
             RollDamping         = cf.Bind("Control", "RollDamping", 0.6f, new ConfigDescription(
                 "Anti-wobble damping for the ROLL axis specifically — the bank-angle counterpart of ChaseDamping. In a hard bank-to-turn the bank can overshoot the servo's target (roll past what the turn needs, then compensate); this opposes the rolling RATE so it eases onto the commanded bank instead of blowing through it. Raise if the bank still overshoots its target / rocks; lower if roll-out feels sluggish. 0 = off. Only opposes the rolling MOTION, so it won't fight a held bank.",
                 new AcceptableValueRange<float>(0f, 2f)));
+            RollRateSmoothing   = cf.Bind("Control", "RollRateSmoothing", 0.06f, new ConfigDescription(
+                "Low-pass time constant (seconds) on the roll RATE that feeds RollDamping. The high-speed roll wobble is a derivative-feedback limit cycle: when level on-heading the roll command is essentially -rollRate*RollDamping, and rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is responsive enough that this delayed rate feedback flips from damping to DRIVING at ~6-7 Hz (a fast roll-stick dither / PIO). Smoothing the rate before the damping term rolls off that high-frequency content so the damping only opposes real, low-frequency roll motion — killing the wobble while keeping turn damping. Higher = more smoothing (more wobble margin, but slightly laggier roll-out damping); 0 = off (raw rate, old behaviour). ~0.05-0.10 is the useful band.",
+                new AcceptableValueRange<float>(0f, 0.3f)));
             RollGain            = cf.Bind("Control", "RollGain", 1.3f, new ConfigDescription(
                 "Roll authority scale. Lower if it banks too eagerly, raise for crisper rolls (faster roll-in AND roll-out — pair a higher gain with higher RollDamping to stay well-damped). Negative flips roll direction — if the plane rolls AWAY from level when on-target, set this negative.",
                 new AcceptableValueRange<float>(-2f, 2f)));
@@ -348,6 +353,9 @@ namespace NuclearOptionMouseAim
             FineBankGain        = cf.Bind("Control", "FineBankGain", 3.0f, new ConfigDescription(
                 "The bank-angle servo gain (v0.25): degrees of commanded bank per degree of heading (azimuth) error, capped at MaxBankAngle. This now drives the bank across the WHOLE range — a small error leans a few degrees, a big side command rolls to a firm bank and holds it — replacing the old proportional roll-rate slam that over-rolled. 0 = no banking (wings-level, leans on the weak rudder). Raise to bank harder/sooner; lower if it over-banks or wing-rocks.",
                 new AcceptableValueRange<float>(0f, 10f)));
+            FineBankDeadzone    = cf.Bind("Control", "FineBankDeadzone", 2.5f, new ConfigDescription(
+                "Heading-error deadband (deg) for the bank servo. Below this azimuth error the commanded bank is ZERO — the wings stay level and the rudder/yaw does the final fine capture, instead of the bank servo amplifying a sub-few-degree heading hunt into a continuous roll-stick dither (the fine-cone roll wobble). Above it the bank ramps in smoothly (the error past the deadband still feeds FineBankGain) so genuine side commands bank to turn normally. 0 = off (old behaviour); raise if the wings still rock on-heading, lower if small corrections won't bank.",
+                new AcceptableValueRange<float>(0f, 15f)));
             FineIntegralGain    = cf.Bind("Control", "FineIntegralGain", 0.8f, new ConfigDescription(
                 "The piece that actually lands the nose ON the circle. The game's fly-by-wire treats our pitch/yaw as a turn-RATE request, not a position, so a plain proportional pull always parks a fraction of a degree short — this small integrator winds in the steady bias needed to close that last bit. Only active inside FineAngle. 0 = off (back to the v0.23 'gets close but never quite centres' behaviour). Raise if it still parks short; lower if it slowly drifts past and hunts.",
                 new AcceptableValueRange<float>(0f, 3f)));
@@ -398,6 +406,29 @@ namespace NuclearOptionMouseAim
             FreeLookReturnTime    = cf.Bind("Camera", "FreeLookReturnTime", 0.5f, new ConfigDescription(
                 "3rd-person only: seconds for the view to smoothly swing back to your flight direction when you RELEASE free-look (RMB / Free Look). Classic free-look — the plane keeps flying the heading it held; only the camera eases back (smoothstep). 0.5 is a gentle swing; smaller = snappier return, larger = lazier.",
                 new AcceptableValueRange<float>(0.05f, 2f)));
+
+            // Config logging (v0.29): dump the full control law ONCE at startup, then log just the
+            // changed entry whenever a value is edited live (F1 menu) — so the log always shows what
+            // gains produced any [anomaly]/[maneuver] line, without bloating each event line.
+            cf.SettingChanged += (_, e) =>
+            {
+                var s = e.ChangedSetting;
+                WTMouseAimPlugin.Log.LogInfo($"[config] {s.Definition.Section}/{s.Definition.Key} = {s.BoxedValue}");
+            };
+            LogSnapshot();
+        }
+
+        // One compact [config ...] line with every control-law knob — emitted at startup so the log is
+        // self-describing for tuning/debugging. Live edits are logged per-entry via SettingChanged above.
+        public static void LogSnapshot()
+        {
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[config sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
+                $"pitchG={PitchGain.Value:0.0} yawG={YawGain.Value:0.0} rollG={RollGain.Value:0.00} rollDamp={RollDamping.Value:0.00} rollSm={RollRateSmoothing.Value:0.00} " +
+                $"bankGain={FineBankGain.Value:0.0} bankDz={FineBankDeadzone.Value:0.0} maxBank={MaxBankAngle.Value:0} " +
+                $"fineAng={FineAngle.Value:0} fineBoost={FineGainBoost.Value:0.0} align={AlignAngle.Value:0} " +
+                $"coord={RollPitchCoordination.Value:0.00} brake={PitchBrake.Value:0.00} yawSc={TurnYawScale.Value:0.00} slew={OutputSlew.Value:0.0} " +
+                $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00}]");
         }
     }
 
@@ -818,11 +849,12 @@ namespace NuclearOptionMouseAim
         // log NOTHING. When a detector fires, DumpTrail emits the last ~20 frames as a single [anomaly:trail]
         // line so the lead-UP to the event is visible (how the wag built / how the bank blew past) without
         // any continuous spam. Formatting only happens on a real anomaly, so the buffer itself is free.
-        private struct AnFrame { public float t, off, bank, tgtBank, p, r, y, yr, spd, g; }
+        private struct AnFrame { public float t, off, bank, tgtBank, p, r, y, yr, rr, rf, spd, g; }
         private static readonly AnFrame[] _ring = new AnFrame[64];
         private static int   _ringHead;     // next write index
         private static int   _ringCount;    // valid entries (<= _ring.Length)
         private static float _lastTrailT;   // one trail dump per second across all anomaly types
+        private static float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
 
         public static bool IsFlying => _active;
 
@@ -1085,12 +1117,34 @@ namespace NuclearOptionMouseAim
                 //            attitude-robust where eFine degenerates (steep nose => meaningless horizon bank).
                 // bigTurn blends fine->align; subtract the roll RATE (RollDamping) so it eases on without
                 // overshooting. As the turn completes off shrinks, bigTurn->0, and the fine servo levels out.
-                float targetBank = Mathf.Clamp(azErr * Cfg.FineBankGain.Value,
+                // Soft azimuth deadband (v0.29): inside FineBankDeadzone of heading error the servo
+                // commands NO bank — the wings just level (eFine collapses to t.right.y) and yaw alone
+                // does the final capture, instead of the bank servo amplifying a sub-few-degree heading
+                // hunt into a continuous roll-stick dither (the fine-cone roll wobble). The error PAST
+                // the deadband still feeds FineBankGain, so a genuine side command banks to turn as before.
+                float azDz = Cfg.FineBankDeadzone.Value;
+                float azBank = Mathf.Abs(azErr) <= azDz ? 0f : (Mathf.Abs(azErr) - azDz) * Mathf.Sign(azErr);
+                float targetBank = Mathf.Clamp(azBank * Cfg.FineBankGain.Value,
                                                -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);
                 float eFine  = t.right.y + Mathf.Sin(targetBank * Mathf.Deg2Rad);
                 float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
                 float rollErr = Mathf.Lerp(eFine, eAlign, bigTurn);
-                float tgtR = Mathf.Clamp((rollErr - rollRate * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
+
+                // ROLL-RATE LOW-PASS (v0.31) — fix for the high-speed roll wobble. When level on-heading the
+                // roll P-term (eFine) is ~0, so the command is essentially -rollRate*RollDamping*RollGain. The
+                // rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is
+                // responsive enough that this DELAYED rate feedback flips from damping to DRIVING at ~6-7 Hz —
+                // a self-sustaining limit cycle (logs: R=±0.05 tracking rr=±0.2, bank<0.2deg). Its amplitude is
+                // set by the loop delay, not the gain, which is why the v0.30 qScale gain-cut to 0.35x left it
+                // unchanged. Smoothing the rate (first-order LPF, time constant RollRateSmoothing) rolls off the
+                // high-freq content so the damping only opposes real low-freq roll motion — breaking the cycle
+                // while keeping turn damping. tau=0 -> raw rate (old behaviour).
+                float rollTau = Cfg.RollRateSmoothing.Value;
+                if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
+                else _rollRateFilt = rollRate;
+                float rollRateF = _rollRateFilt;
+
+                float tgtR = Mathf.Clamp((rollErr - rollRateF * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
 
                 // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
                 // Symmetric on all three axes. _out* stay PURE chase values — manual override blends on
@@ -1213,9 +1267,25 @@ namespace NuclearOptionMouseAim
             // Stash this frame in the ring buffer FIRST (logs nothing; dumped only if an event fires below).
             _ring[_ringHead] = new AnFrame {
                 t = now, off = off, bank = bank, tgtBank = targetBank,
-                p = _outP, r = _outR, y = _outY, yr = yawRate, spd = spdNow, g = ac.gForce };
+                p = _outP, r = _outR, y = _outY, yr = yawRate, rr = rollRate, rf = _rollRateFilt, spd = spdNow, g = ac.gForce };
             _ringHead = (_ringHead + 1) % _ring.Length;
             if (_ringCount < _ring.Length) _ringCount++;
+
+            // MANUAL-OVERRIDE GATE — when you're on the stick/pedals (any axis manually engaged, or easing back
+            // after release) the airframe's attitude/rates are being driven by YOU, not the instructor, so the
+            // chase law's reaction to your input would false-fire over-roll/wobble/overshoot/etc. Suspend all
+            // detection while engaged and RESET the rolling windows so a flip count accrued during manual flight
+            // doesn't fire the instant control hands back. The ring buffer above still fills, so an anomaly just
+            // after handback keeps its pre-frames. _eng* are 0 whenever ManualOverride is off, so this is inert then.
+            if (_engP > 0f || _engR > 0f || _engY > 0f)
+            {
+                _huntWinStart = _yawWagWinStart = _wobbleWinStart = now;
+                _flipsP = _flipsY = _yawWagFlips = _wobbleFlips = 0;
+                _prevSignP = _prevSignY = _prevSignYW = _prevSignRW = 0f;
+                _missTimer = 0f;
+                _offMin = off; _prevOff = off;
+                return;
+            }
 
             // OVERSHOOT — the nose closed toward the marker then the error grew back. Track the closest
             // approach; if off rebounds past it by AnomalyOvershootDeg after getting reasonably close
@@ -1325,7 +1395,7 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogWarning(
                 $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
                 $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
-                $"[sens={Cfg.PitchYawSensitivity.Value:0.0} bankGain={Cfg.FineBankGain.Value:0.0} maxBank={Cfg.MaxBankAngle.Value:0} brake={Cfg.PitchBrake.Value:0.00} coord={Cfg.RollPitchCoordination.Value:0.00} align={Cfg.AlignAngle.Value:0} yawSc={Cfg.TurnYawScale.Value:0.00}]");
+                $"[sens={Cfg.PitchYawSensitivity.Value:0.0} bankGain={Cfg.FineBankGain.Value:0.0} bankDz={Cfg.FineBankDeadzone.Value:0.0} maxBank={Cfg.MaxBankAngle.Value:0} brake={Cfg.PitchBrake.Value:0.00} coord={Cfg.RollPitchCoordination.Value:0.00} align={Cfg.AlignAngle.Value:0} yawSc={Cfg.TurnYawScale.Value:0.00} rollG={Cfg.RollGain.Value:0.00} rollDamp={Cfg.RollDamping.Value:0.00} rollSm={Cfg.RollRateSmoothing.Value:0.00}]");
             if (Cfg.AnomalyContext.Value) DumpTrail(now);
         }
 
@@ -1338,12 +1408,12 @@ namespace NuclearOptionMouseAim
             if (now - _lastTrailT < 1f || _ringCount == 0) return;
             _lastTrailT = now;
             int n = Mathf.Min(_ringCount, 20);
-            var sb = new System.Text.StringBuilder("[anomaly:trail] (t off b>tgt P,R,Y yr spd)");
+            var sb = new System.Text.StringBuilder("[anomaly:trail] (t off b>tgt P,R,Y yr rr rf spd)");
             for (int i = n - 1; i >= 0; i--)
             {
                 int idx = ((_ringHead - 1 - i) % _ring.Length + _ring.Length) % _ring.Length;
                 AnFrame f = _ring[idx];
-                sb.Append($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.spd:0}");
+                sb.Append($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}");
             }
             WTMouseAimPlugin.Log.LogWarning(sb.ToString());
         }
