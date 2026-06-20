@@ -134,8 +134,7 @@ dotnet build NuclearOption-MouseAim.csproj -c Release
 
 Then copy `bin\Release\NuclearOption-MouseAim.dll` into `<game>\BepInEx\plugins\WTMouseAim\`.
 
-Maintainers: [`release.ps1`](release.ps1) builds, tags, and publishes a GitHub release in one
-step — see [the publishing notes](NOMM_PUBLISH_PLAN.md).
+Maintainers: [`release.ps1`](release.ps1) builds, tags, and publishes a GitHub release in one step.
 
 ## Requirements
 
