@@ -3,6 +3,29 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.33.0
+
+- **Fixed the high-speed roll buzz for real — by cutting the damping, not adding more.** Restoring
+  full roll authority in 0.32 brought back a violent roll PIO at high dynamic pressure (logs: roll
+  stick dithering ±0.45 at ~3 Hz on-heading, bank overshooting its target to ±40° rolling out). The
+  driver is the roll-*damping* term itself: with the wings level the roll command is essentially
+  `−rollRate · RollDamping · RollGain`, and that delayed rate feedback flips from damping to driving
+  the cycle — so raising `RollDamping` (the old "fix overshoot" advice) made it *worse*. New defaults
+  **`RollDamping` 0.6 → 0.1** and **`RollGain` 1.3 → 1.0** drop the loop gain below the limit-cycle
+  threshold: the buzz is gone and the wings hold steady at speed, while fast rolls stay crisp. (Both
+  remain live-tunable; 0 damping is a touch jittery on-heading, hence 0.1.)
+- **Controls every airframe now, not just fixed-wing.** Helicopters and hover-VTOLs (collective
+  aircraft, flagged by `takeoffDistance == 0`) fly off the same chase law — they drive the same
+  pitch/roll/yaw (cyclic + tail rotor); collective stays on your throttle, untouched. New
+  `Control/ControlRotorcraft` (default on) opts them out if you'd rather keep rotorcraft on stock
+  controls.
+- **Master ON/OFF hotkey (`General/ToggleKey`, default F10).** Flip the whole mod on/off in flight
+  without opening the menu; a brief on-screen toast confirms the change.
+- **Clean reticle-only HUD by default.** The diagnostic text readouts (status line, live
+  pitch/yaw/roll, anomaly flash, phase) are now hidden behind `HUD/ShowDebugHud` (default off). Out
+  of the box you see just the reticle, the airframe marker, the FLY LEVEL banner, and the G-LOC
+  warning — turn `ShowDebugHud` on for tuning.
+
 ## 0.32.0
 
 - **Restored high-speed roll authority.** Removed the v0.30 dynamic-pressure roll gain schedule

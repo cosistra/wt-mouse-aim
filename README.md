@@ -9,7 +9,8 @@ it, and levels out as the nose arrives. You stop flying the airframe and start f
 *reticle*, the way you do in War Thunder's mouse-aim. The game's own fly-by-wire still governs
 the flight envelope (stall, G, AoA, auto-trim), so the mod is a layer on top, not a replacement.
 
-Works in both **cockpit** and **3rd-person** views.
+Works in both **cockpit** and **3rd-person** views, and on **every airframe** — fixed-wing
+jets, helicopters, and VTOLs all fly off the same reticle.
 
 ---
 
@@ -57,6 +58,14 @@ https://github.com/user-attachments/assets/00afefa5-f5c9-479c-9c92-4d6c2e1452b7
   WT-style behind-and-above and tracks the aim, with pole-stable horizon leveling through loops.
 - **Fly Level toggle (F7).** Locks the current heading and holds true level flight (velocity
   vector on the horizon, AoA-corrected) until you nudge the stick or toggle off.
+- **Every airframe.** Fixed-wing, helicopters, and hover-VTOLs all fly off the same chase law
+  (rotorcraft steer their cyclic + tail rotor; collective stays on your throttle). Helicopters can
+  be opted out via the `ControlRotorcraft` setting if you prefer them on stock controls.
+- **One-key master toggle (F10).** Flip the whole mod on/off in flight without opening the menu —
+  a brief on-screen toast confirms the change.
+- **Clean HUD by default.** Out of the box you see just the reticle, the airframe marker, and the
+  Fly Level banner. The diagnostic readouts (status, live stick command, anomaly/phase) are hidden
+  behind `ShowDebugHud` for tuning.
 - **Live tuning (F1).** 50+ parameters — sensitivity, gains, the roll-then-pull behaviour,
   camera, HUD — all tunable in-game with sensible defaults out of the box.
 
@@ -111,15 +120,17 @@ First launch writes the config to `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
 | **Stick / keyboard / pedals** | Per-axis manual override (take any axis instantly; release to hand it back) |
 | **Right Mouse (hold)** | Freeze the marker and free-look the camera (War Thunder style) |
 | **F7** | Toggle **Fly Level** — hold wings-level, velocity vector on the horizon |
+| **F10** | Toggle the whole mod **ON/OFF** (master switch) |
 | **F1** | Open the live config (requires ConfigurationManager) |
 
 ## Tuning
 
 Everything is live-tunable via F1, grouped into config sections: **Aim** (sensitivity,
 smoothing, cone), **Control** (the instructor's gains and the roll-then-pull behaviour),
-**Camera**, **FlyLevel**, and **HUD** (overlay + diagnostic logging). Sensible defaults ship out
-of the box; the in-game descriptions explain each knob. If a command ever misbehaves, the mod
-writes a single compact `[anomaly]` line to the BepInEx log — handy for bug reports.
+**Camera**, **FlyLevel**, and **HUD** (overlay, the `ShowDebugHud` readout toggle, and diagnostic
+logging). Sensible defaults ship out of the box; the in-game descriptions explain each knob. If a
+command ever misbehaves, the mod writes a single compact `[anomaly]` line to the BepInEx log —
+handy for bug reports.
 
 ---
 

@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.32.0";
+        public const string PluginVersion = "0.33.0";
 
         internal static ManualLogSource Log;
 
@@ -43,11 +43,25 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) — tune live via F1).");
         }
+
+        // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
+        // change is confirmed on-screen even while the mod (and its overlay) are off.
+        private static float _toastUntil = -999f;
+        private static bool  _toastOn;
 
         private void Update()
         {
+            // Master enable/disable hotkey (v0.33). Ungated by Enabled so it can always toggle back ON.
+            // Setting .Value persists to the config file and logs via the SettingChanged hook.
+            if (Input.GetKeyDown(Cfg.ToggleKey.Value))
+            {
+                Cfg.Enabled.Value = !Cfg.Enabled.Value;
+                _toastUntil = Time.time + 2f;
+                _toastOn = Cfg.Enabled.Value;
+            }
+
             AimRig.Update();
 
             // Fly Level toggle (v0.24). Edge-triggered; needs an aircraft to latch the heading onto.
@@ -61,6 +75,17 @@ namespace NuclearOptionMouseAim
 
         private void OnGUI()
         {
+            // Master-toggle toast — drawn BEFORE the overlay/enabled guard so it confirms an OFF flip too.
+            if (Time.time < _toastUntil)
+            {
+                var tc = GUI.color;
+                GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
+                const float tw = 220f;
+                GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f),
+                    _toastOn ? "WT MouseAim  ON" : "WT MouseAim  OFF");
+                GUI.color = tc;
+            }
+
             if (!Cfg.ShowOverlay.Value || !Cfg.Enabled.Value)
                 return;
             if (!AimRig.TryGetContext(out var ac, out var cam))
@@ -99,18 +124,22 @@ namespace NuclearOptionMouseAim
             if (aimVis)
                 CircleOutline(aimScreen, 13f, new Color(1f, 0.95f, 0.4f, 0.55f)); // aim marker: faint yellow ring
 
-            // Tiny text readout (top-left) so feel/cone clamping is verifiable.
+            // Tiny text readout (top-left) so feel/cone clamping is verifiable. DEBUG-only (v0.33):
+            // hidden by default so installers get a clean reticle-only HUD; ShowDebugHud reveals it.
             var prev = GUI.color;
             GUI.color = Color.white;
-            string ctrl = !Cfg.WriteControl.Value ? "overlay-only"
-                        : ChaseController.IsFlying ? "FLYING (mod owns stick)"
-                        : "native";
-            GUI.Label(new Rect(12f, 12f, 560f, 22f),
-                $"WT MouseAim  off={off:0.0}°  cone={half:0}°  [{ctrl}]");
-            // Instructor's live stick command (what the mod is telling the plane, before manual override).
-            GUI.Label(new Rect(12f, 30f, 560f, 22f),
-                $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
-                $"yaw={ChaseController.LastYaw:+0.00;-0.00;0.00}  roll={ChaseController.LastRoll:+0.00;-0.00;0.00}");
+            if (Cfg.ShowDebugHud.Value)
+            {
+                string ctrl = !Cfg.WriteControl.Value ? "overlay-only"
+                            : ChaseController.IsFlying ? "FLYING (mod owns stick)"
+                            : "native";
+                GUI.Label(new Rect(12f, 12f, 560f, 22f),
+                    $"WT MouseAim  off={off:0.0}°  cone={half:0}°  [{ctrl}]");
+                // Instructor's live stick command (what the mod is telling the plane, before manual override).
+                GUI.Label(new Rect(12f, 30f, 560f, 22f),
+                    $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
+                    $"yaw={ChaseController.LastYaw:+0.00;-0.00;0.00}  roll={ChaseController.LastRoll:+0.00;-0.00;0.00}");
+            }
             // Fly Level indicator — distinct cyan so it's obvious the marker is being ignored on purpose.
             if (ChaseController.FlyLevelActive)
             {
@@ -119,21 +148,25 @@ namespace NuclearOptionMouseAim
                     $"FLY LEVEL  holding level — nudge the stick or press [{Cfg.FlyLevelKey.Value}] to release");
             }
 
-            // Anomaly flash: show the most recent anomaly's index + type for a few seconds (or until the next
-            // one replaces it) so the pilot can jot down "#N felt wrong" mid-flight and bring it back for tuning.
-            if (Cfg.AnomalyLogging.Value &&
-                Time.time - ChaseController.LastAnomalyTime < ChaseController.AnomalyFlashSec &&
-                ChaseController.LastAnomalyIndex > 0)
+            // Anomaly flash + live phase — DEBUG-only (v0.33), hidden unless ShowDebugHud is on.
+            if (Cfg.ShowDebugHud.Value)
             {
-                GUI.color = new Color(1f, 1f, 1f, 0.95f); // white — salmon-red was unreadable against some scenes
-                GUI.Label(new Rect(12f, 66f, 560f, 22f),
-                    $"ANOMALY #{ChaseController.LastAnomalyIndex}  {ChaseController.LastAnomalyType}");
-            }
-            // Live phase of the instructor's plan (LEVEL/FINE/ALIGN/PULL/TURN/HOLD) — white, under the readout.
-            if (ChaseController.IsFlying && !string.IsNullOrEmpty(ChaseController.LastPhase))
-            {
-                GUI.color = Color.white;
-                GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {ChaseController.LastPhase}");
+                // Anomaly flash: show the most recent anomaly's index + type for a few seconds (or until the
+                // next one replaces it) so the pilot can jot down "#N felt wrong" mid-flight and tune it later.
+                if (Cfg.AnomalyLogging.Value &&
+                    Time.time - ChaseController.LastAnomalyTime < ChaseController.AnomalyFlashSec &&
+                    ChaseController.LastAnomalyIndex > 0)
+                {
+                    GUI.color = new Color(1f, 1f, 1f, 0.95f); // white — salmon-red was unreadable against some scenes
+                    GUI.Label(new Rect(12f, 66f, 560f, 22f),
+                        $"ANOMALY #{ChaseController.LastAnomalyIndex}  {ChaseController.LastAnomalyType}");
+                }
+                // Live phase of the instructor's plan (LEVEL/FINE/ALIGN/PULL/TURN/HOLD) — white, under the readout.
+                if (ChaseController.IsFlying && !string.IsNullOrEmpty(ChaseController.LastPhase))
+                {
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {ChaseController.LastPhase}");
+                }
             }
             GUI.color = prev;
 
@@ -198,7 +231,9 @@ namespace NuclearOptionMouseAim
     internal static class Cfg
     {
         public static ConfigEntry<bool>  Enabled;
+        public static ConfigEntry<KeyCode> ToggleKey; // master enable/disable hotkey (default F10)
         public static ConfigEntry<bool>  ShowOverlay;
+        public static ConfigEntry<bool>  ShowDebugHud; // show the diagnostic text readouts (off = clean reticle-only HUD)
         public static ConfigEntry<bool>  DebugLogging; // periodic BepInEx-log dump of mouse/aim/chase state (verbose)
         public static ConfigEntry<bool>  AnomalyLogging; // event-only log: fires one line when a command misbehaves
         public static ConfigEntry<float> MouseSensitivity; // degrees of aim offset per unit of mouse delta
@@ -209,6 +244,7 @@ namespace NuclearOptionMouseAim
 
         // --- Chase law (writes flight controls). Per-axis gains may be negative to flip a sign.
         public static ConfigEntry<bool>  WriteControl;        // actually drive the stick (off = overlay only)
+        public static ConfigEntry<bool>  ControlRotorcraft;   // fly collective aircraft (helis/hover-VTOLs) too, not just fixed-wing
         public static ConfigEntry<float> PitchYawSensitivity; // base chase gain on the body-frame aim direction
         public static ConfigEntry<float> ChaseDamping;        // derivative damping on the nose's rotation rate
         public static ConfigEntry<float> RollDamping;         // derivative damping on the roll rate (anti bank-wobble)
@@ -270,8 +306,12 @@ namespace NuclearOptionMouseAim
         {
             Enabled          = cf.Bind("General", "Enabled", true,
                 "Master ON/OFF for the whole mod. Off = stock game controls, no overlay, no camera follow.");
+            ToggleKey        = cf.Bind("General", "ToggleKey", KeyCode.F10,
+                "Key that enables/disables the whole mod in-flight (flips Enabled). Default F10. A brief on-screen toast confirms the change. Pick any single key.");
             ShowOverlay      = cf.Bind("HUD", "ShowOverlay", true,
                 "Show the on-screen aim circle, boresight cross, and turn cone. Purely visual — no effect on handling.");
+            ShowDebugHud     = cf.Bind("HUD", "ShowDebugHud", false,
+                "Show the diagnostic text readouts in the top-left: mod status / nose-off-marker / cone, the instructor's live pitch/yaw/roll command, the ANOMALY flash, and the live PHASE. OFF by default so installers get a clean reticle-only HUD (the aim circle, airframe marker, FLY LEVEL banner, and G-LOC warning still show). Turn ON for tuning/debugging.");
             DebugLogging     = cf.Bind("HUD", "DebugLogging", false,
                 "VERBOSE periodic trace: dumps mouse delta, marker-vs-nose angle, camera-vs-nose angle and chase outputs to the BepInEx log every ~0.1-0.2 s. Token-heavy — leave OFF normally and rely on AnomalyLogging. Flip it on for one run only when a problem feels wrong but the anomaly log stays quiet.");
             AnomalyLogging   = cf.Bind("HUD", "AnomalyLogging", true,
@@ -294,20 +334,22 @@ namespace NuclearOptionMouseAim
 
             WriteControl        = cf.Bind("Control", "WriteControl", true,
                 "Let the mod actually fly the plane (drive the stick). Off = overlay/camera only, you keep manual control — handy for A/B comparing the feel.");
+            ControlRotorcraft   = cf.Bind("Control", "ControlRotorcraft", true,
+                "Also fly helicopters and hover-VTOLs (collective aircraft — the game flags them by takeoffDistance==0). They drive the SAME pitch/roll/yaw (cyclic + tail rotor); collective stays on your throttle, untouched. The chase law was tuned for forward flight, so the feel differs at low speed/hover — turn this OFF to leave rotorcraft on stock controls while keeping mouse-aim for fixed-wing.");
             PitchYawSensitivity = cf.Bind("Control", "PitchYawSensitivity", 3.0f, new ConfigDescription(
                 "How hard the instructor pulls the nose toward the circle. Higher = snappier and closes faster, but can overshoot and wobble (raise ChaseDamping to compensate); lower = gentler, easier fine aiming. ~3 is balanced.",
                 new AcceptableValueRange<float>(0.5f, 8f)));
             ChaseDamping        = cf.Bind("Control", "ChaseDamping", 0.25f, new ConfigDescription(
                 "Calms the inputs as the nose nears the circle so it eases in instead of overshooting — opposes the nose's own turn rate (the anti-wobble term). ~0.25 is a smooth default. 0 = off (snappy, but the rudder can hunt side-to-side); raise toward ~0.4 if it still oscillates around the aim direction, lower if it feels sluggish to close.",
                 new AcceptableValueRange<float>(0f, 1f)));
-            RollDamping         = cf.Bind("Control", "RollDamping", 0.6f, new ConfigDescription(
-                "Anti-wobble damping for the ROLL axis specifically — the bank-angle counterpart of ChaseDamping. In a hard bank-to-turn the bank can overshoot the servo's target (roll past what the turn needs, then compensate); this opposes the rolling RATE so it eases onto the commanded bank instead of blowing through it. Raise if the bank still overshoots its target / rocks; lower if roll-out feels sluggish. 0 = off. Only opposes the rolling MOTION, so it won't fight a held bank.",
+            RollDamping         = cf.Bind("Control", "RollDamping", 0.1f, new ConfigDescription(
+                "Anti-wobble damping for the ROLL axis — opposes the rolling RATE so the bank eases onto its target instead of blowing through it. Keep it SMALL: the rate feedback is delayed (one-frame finite difference + the RollRateSmoothing low-pass), so too much of it flips from damping to DRIVING a high-speed roll limit cycle — the ±roll-stick buzz/PIO felt at high dynamic pressure. ~0.1 takes the edge off the roll-out jitter without sustaining the cycle; 0 = off (a touch jittery on-heading); raising past ~0.3 brings the high-speed wobble back. Only opposes the rolling MOTION, so it won't fight a held bank.",
                 new AcceptableValueRange<float>(0f, 2f)));
             RollRateSmoothing   = cf.Bind("Control", "RollRateSmoothing", 0.06f, new ConfigDescription(
                 "Low-pass time constant (seconds) on the roll RATE that feeds RollDamping. The high-speed roll wobble is a derivative-feedback limit cycle: when level on-heading the roll command is essentially -rollRate*RollDamping, and rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is responsive enough that this delayed rate feedback flips from damping to DRIVING at ~6-7 Hz (a fast roll-stick dither / PIO). Smoothing the rate before the damping term rolls off that high-frequency content so the damping only opposes real, low-frequency roll motion — killing the wobble while keeping turn damping. Higher = more smoothing (more wobble margin, but slightly laggier roll-out damping); 0 = off (raw rate, old behaviour). ~0.05-0.10 is the useful band.",
                 new AcceptableValueRange<float>(0f, 0.3f)));
-            RollGain            = cf.Bind("Control", "RollGain", 1.3f, new ConfigDescription(
-                "Roll authority scale. Lower if it banks too eagerly, raise for crisper rolls (faster roll-in AND roll-out — pair a higher gain with higher RollDamping to stay well-damped). Negative flips roll direction — if the plane rolls AWAY from level when on-target, set this negative.",
+            RollGain            = cf.Bind("Control", "RollGain", 1.0f, new ConfigDescription(
+                "Roll authority scale. Lower if it banks too eagerly, raise for crisper rolls (faster roll-in and roll-out). Negative flips roll direction — if the plane rolls AWAY from level when on-target, set this negative.",
                 new AcceptableValueRange<float>(-2f, 2f)));
             PitchGain           = cf.Bind("Control", "PitchGain", 1.0f, new ConfigDescription(
                 "Pitch authority scale. Negative flips pitch direction (nose chases the wrong way vertically).",
@@ -924,7 +966,7 @@ namespace NuclearOptionMouseAim
             bool active =
                 Cfg.Enabled.Value &&
                 Cfg.WriteControl.Value &&
-                fixedWing &&
+                (fixedWing || Cfg.ControlRotorcraft.Value) &&  // collective aircraft (helis/VTOLs) only when opted in
                 pilotStrength >= 0.2f &&                 // not blacked out
                 aircraft.cockpit != null && !aircraft.cockpit.IsDetached();
 
@@ -943,7 +985,7 @@ namespace NuclearOptionMouseAim
                 _ringHead = _ringCount = 0; // clear the context buffer for this command
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
                 HideNativeVirtualJoystick();
-                WTMouseAimPlugin.Log.LogInfo("WT Mouse Aim: ON (fixed-wing) — chase control engaged.");
+                WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
             else if (!active && _wasActive)
             {
