@@ -12,7 +12,7 @@
       5. Computes the SHA-256 and writes version / downloadUrl / hash into the NOMNOM manifest.
 
     After the first release is listed in NOMNOM, future versions are picked up automatically by
-    NOMNOM's hourly auto-update job — you still run this script to build + publish the release,
+    NOMNOM's hourly auto-update job - you still run this script to build + publish the release,
     but you do NOT need to touch NOMNOM again.
 
 .PARAMETER Notes
@@ -68,9 +68,9 @@ if (-not $NoCommit) {
     if ($dirty) {
         Step "Committing pending changes"
         git add -A
-        git commit -m "$tag — $Notes"
+        git commit -m "$tag - $Notes"
     } else {
-        Write-Host "Working tree clean — nothing to commit."
+        Write-Host "Working tree clean - nothing to commit."
     }
 }
 
@@ -94,7 +94,7 @@ if ($exists) {
 # --- 6. Refresh NOMNOM manifest ----------------------------------------------------------------
 # Targeted string edits rather than ConvertFrom/ConvertTo-Json: PS 5.1 can collapse single-element
 # arrays on round-trip (breaking the schema). The artifact "version" is the FIRST "version" in the
-# file (it precedes the dependency block), so replace only the first match — a global replace would
+# file (it precedes the dependency block), so replace only the first match - a global replace would
 # also clobber the dependency's version.
 Step "Updating NOMNOM manifest ($manifest)"
 $downloadUrl = "https://github.com/$repoSlug/releases/download/$tag/NuclearOption-MouseAim.dll"
@@ -113,10 +113,10 @@ if ($Deploy) {
     Copy-Item $dll $dest -Force
 }
 
-Step "Done — $tag published"
+Step "Done - $tag published"
 Write-Host "  Release : https://github.com/$repoSlug/releases/tag/$tag"
 Write-Host "  Hash    : sha256:$hash"
 Write-Host "  Manifest: $manifest (updated)"
 Write-Host ""
-Write-Host "If this is the FIRST release, submit $manifest to NOMNOM as modManifests/$($json.id).json" -ForegroundColor Yellow
+Write-Host "If this is the FIRST release, submit $manifest to NOMNOM as modManifests/NuclearOption-MouseAim.json" -ForegroundColor Yellow
 Write-Host "Otherwise NOMNOM's hourly job will pick up this release automatically." -ForegroundColor Yellow
