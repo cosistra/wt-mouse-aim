@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.33.0";
+        public const string PluginVersion = "0.34.0";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button — tune live via F1).");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -301,6 +301,13 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> OrbitAimSmoothing;   // 3p: view-direction smoothing rate (1/s, higher = snappier)
         public static ConfigEntry<float> HorizonDeadzoneDeg;  // 3p: half-width of the no-horizon-level band at the pole (hysteresis)
         public static ConfigEntry<float> FreeLookReturnTime;  // 3p: seconds to ease the view back to the flight dir on release
+        public static ConfigEntry<float> CameraDistanceOffset;// 3p: extra orbit distance (units of radius); + = farther back, - = closer/in front
+        public static ConfigEntry<float> CameraHeightOffset;  // 3p: extra height vs plane (units of radius); + = higher, - = lower
+        public static ConfigEntry<float> CameraSideOffset;    // 3p: lateral shift (units of radius); + = right of plane, - = left
+
+        // --- "I broke it, fix it please" reset button (drawn as a real button in the F1 menu).
+        public static ConfigEntry<bool>  ResetToDefaults;
+        private static ConfigFile        _file;               // kept so the reset can walk every entry
 
         public static void Bind(ConfigFile cf)
         {
@@ -448,6 +455,23 @@ namespace NuclearOptionMouseAim
             FreeLookReturnTime    = cf.Bind("Camera", "FreeLookReturnTime", 0.5f, new ConfigDescription(
                 "3rd-person only: seconds for the view to smoothly swing back to your flight direction when you RELEASE free-look (RMB / Free Look). Classic free-look — the plane keeps flying the heading it held; only the camera eases back (smoothstep). 0.5 is a gentle swing; smaller = snappier return, larger = lazier.",
                 new AcceptableValueRange<float>(0.05f, 2f)));
+            CameraDistanceOffset  = cf.Bind("Camera", "CameraDistanceOffset", 0f, new ConfigDescription(
+                "3rd-person only: how far the camera sits from the plane, on top of the stock zoom-aware distance (measured in orbit-radius units, so it scales with zoom). 0 = stock framing. Positive pulls the camera FARTHER back; negative brings it CLOSER (large negatives can push it in front of the plane). Try +/-0.5 at a time.",
+                new AcceptableValueRange<float>(-1.8f, 3f)));
+            CameraHeightOffset    = cf.Bind("Camera", "CameraHeightOffset", 0f, new ConfigDescription(
+                "3rd-person only: camera height relative to the plane, on top of the stock rise (orbit-radius units). 0 = stock. Positive raises the camera (look down more at the airframe); negative lowers it (look up). Try +/-0.3 at a time.",
+                new AcceptableValueRange<float>(-1.5f, 2f)));
+            CameraSideOffset      = cf.Bind("Camera", "CameraSideOffset", 0f, new ConfigDescription(
+                "3rd-person only: shift the camera left/right of the plane (orbit-radius units), for an over-the-shoulder framing. 0 = centred behind. Positive shifts to the plane's RIGHT, negative to the LEFT. Try +/-0.3 at a time.",
+                new AcceptableValueRange<float>(-2f, 2f)));
+
+            // "I broke it, fix it please" — a real button in the F1 (ConfigurationManager) menu that
+            // restores every MouseAim setting to its default. The custom drawer below replaces the usual
+            // checkbox with the button; the bound bool is just a carrier (its value is never read).
+            ResetToDefaults = cf.Bind("ZZZ - Panic Button", "I broke it, fix it please", false, new ConfigDescription(
+                "Click to reset ALL of this mod's settings (camera, control law, keybinds, HUD — everything) back to their defaults. Use this if you've tuned yourself into a corner and want a clean slate.",
+                null, new ConfigurationManagerAttributes { CustomDrawer = DrawResetButton, HideDefaultButton = true, HideSettingName = true }));
+            _file = cf;
 
             // Config logging (v0.29): dump the full control law ONCE at startup, then log just the
             // changed entry whenever a value is edited live (F1 menu) — so the log always shows what
@@ -472,6 +496,41 @@ namespace NuclearOptionMouseAim
                 $"coord={RollPitchCoordination.Value:0.00} brake={PitchBrake.Value:0.00} yawSc={TurnYawScale.Value:0.00} slew={OutputSlew.Value:0.0} " +
                 $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00}]");
         }
+
+        // Custom F1-menu widget for ResetToDefaults: a single button instead of a checkbox.
+        private static void DrawResetButton(ConfigEntryBase _)
+        {
+            if (GUILayout.Button(new GUIContent("I broke it, fix it please",
+                    "Reset every MouseAim setting back to its default."), GUILayout.ExpandWidth(true)))
+                ResetAllToDefaults();
+        }
+
+        // Walk every bound entry and restore its default. Setting BoxedValue fires SettingChanged, so
+        // each restored knob is logged via the hook in Bind(); we add one summary line + a fresh snapshot.
+        private static void ResetAllToDefaults()
+        {
+            if (_file == null) return;
+            var defs = new System.Collections.Generic.List<ConfigDefinition>(_file.Keys);
+            foreach (var def in defs)
+            {
+                var entry = _file[def];
+                if (entry == null || entry == ResetToDefaults) continue; // skip the panic button itself
+                if (!Equals(entry.BoxedValue, entry.DefaultValue))
+                    entry.BoxedValue = entry.DefaultValue;
+            }
+            WTMouseAimPlugin.Log.LogInfo("[config] ALL settings reset to defaults ('I broke it, fix it please').");
+            LogSnapshot();
+        }
+    }
+
+    // Minimal stand-in for BepInEx.ConfigurationManager's attributes class. ConfigurationManager finds
+    // it in a ConfigDescription's tags by TYPE NAME via reflection (no hard assembly reference needed),
+    // then reads these fields — so a local copy carrying just the bits we use drives the in-menu button.
+    internal sealed class ConfigurationManagerAttributes
+    {
+        public System.Action<ConfigEntryBase> CustomDrawer;
+        public bool? HideDefaultButton;
+        public bool? HideSettingName;
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1854,7 +1913,15 @@ namespace NuclearOptionMouseAim
             float maxR = tr.Field("followingMaxRadius").GetValue<float>();
             float zoom = tr.Field("viewDistAdjust").GetValue<float>();
             float r = 1f + maxR * (1f + zoom);                       // native's num2: zoom-aware orbit radius
-            Vector3 camPos = planePos - dir * (2f * r) + Vector3.up * (0.8f * r);
+            // Stock framing is 2r behind the look dir + 0.8r above. The three user offsets ride on top,
+            // each scaled by r so they hold their feel across zoom. Side uses a horizontal "camera right"
+            // (up x dir); guard the degenerate near-vertical look where that cross collapses.
+            Vector3 right = Vector3.Cross(Vector3.up, dir);
+            right = right.sqrMagnitude > 1e-6f ? right.normalized : Vector3.right;
+            Vector3 camPos = planePos
+                - dir   * ((2f + Cfg.CameraDistanceOffset.Value) * r)
+                + Vector3.up * ((0.8f + Cfg.CameraHeightOffset.Value) * r)
+                + right * (Cfg.CameraSideOffset.Value * r);
 
             // Terrain pull-in, same math as native CameraMotion's linecast block.
             Vector3 armN = (planePos - camPos).normalized;
