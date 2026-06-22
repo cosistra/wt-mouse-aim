@@ -22,9 +22,19 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.43.0";
+        public const string PluginVersion = "0.44.0";
 
         internal static ManualLogSource Log;
+
+        // Session id (v0.44): one short wallclock-derived id per game session, stamped into the startup
+        // log line, every recording CSV header and the anomaly file header — the human-visible join key
+        // that ties the three artifacts together (Time.time stays the per-row numeric join key). Lazy so
+        // it's stable from first access regardless of which artifact opens first.
+        private static string _sessionId;
+        internal static string SessionId
+        {
+            get { if (_sessionId == null) _sessionId = System.DateTime.Now.ToString("yyyyMMdd-HHmmss"); return _sessionId; }
+        }
 
         // 1x1 white texture for drawing dots/lines in OnGUI (IMGUI has no primitive line draw).
         private static Texture2D _px;
@@ -43,7 +53,8 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft (now tagged with the active control law per row) + A/B control-law toggle [{Cfg.ControlLawKey.Value}] switching Legacy<->EvolvedLegacy in flight (v0.42: EvolvedLegacy is now the DEFAULT/graduated law = universal atan(ωV/g) bank at all speeds/regimes + final-leg align-hold so the roll-to-align contribution persists until the target is genuinely close laterally, preventing the early wings-level-and-stop-short that Legacy shows in the final few degrees; v0.42 also lowered AssistTurnRateGain 1.5->0.9 to kill the high-speed eager/back-and-forth bank limit cycle. Legacy kept as the pristine A/B reference; BankToTurn abandoned and hidden from the toggle) + regime-aware hover handling (v0.43: on collective aircraft [helis/hover-VTOLs, takeoffDistance==0] EvolvedLegacy ramps from bank-to-turn to yaw-to-point as forward speed drops between HeliForwardSpeed and HeliHoverSpeed [or whenever the game's AutoHover is engaged] — bank is suppressed [wings level] and yaw authority raised by HeliYawScale so the tail rotor points the nose; fixed-wing unchanged) — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft (now tagged with the active control law per row) + A/B control-law toggle [{Cfg.ControlLawKey.Value}] switching Legacy<->EvolvedLegacy in flight (v0.42: EvolvedLegacy is now the DEFAULT/graduated law = universal atan(ωV/g) bank at all speeds/regimes + final-leg align-hold so the roll-to-align contribution persists until the target is genuinely close laterally, preventing the early wings-level-and-stop-short that Legacy shows in the final few degrees; v0.42 also lowered AssistTurnRateGain 1.5->0.9 to kill the high-speed eager/back-and-forth bank limit cycle. Legacy kept as the pristine A/B reference; BankToTurn abandoned and hidden from the toggle) + regime-aware hover handling (v0.43: on collective aircraft [helis/hover-VTOLs, takeoffDistance==0] EvolvedLegacy ramps from bank-to-turn to yaw-to-point as forward speed drops between HeliForwardSpeed and HeliHoverSpeed [or whenever the game's AutoHover is engaged] — bank is suppressed [wings level] and yaw authority raised by HeliYawScale so the tail rotor points the nose; fixed-wing unchanged) + self-describing recordings & a dedicated anomaly file (v0.44) — tune live via F1).");
+            Logger.LogInfo($"[session] {SessionId} — recordings, the anomaly file and this log share this id for cross-referencing.");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -638,16 +649,20 @@ namespace NuclearOptionMouseAim
             {
                 var s = e.ChangedSetting;
                 WTMouseAimPlugin.Log.LogInfo($"[config] {s.Definition.Section}/{s.Definition.Key} = {s.BoxedValue}");
+                // Mirror the change into any active recording so a mid-run tuning edit is inline with
+                // the data (no-op when not recording). Lets the CSV alone explain a feel change.
+                ManeuverRecorder.NoteConfigChange(s.Definition.Section, s.Definition.Key, s.BoxedValue);
             };
             LogSnapshot();
         }
 
-        // One compact [config ...] line with every control-law knob — emitted at startup so the log is
-        // self-describing for tuning/debugging. Live edits are logged per-entry via SettingChanged above.
-        public static void LogSnapshot()
+        // One compact line with every control-law knob — the single source of truth for the gain dump,
+        // reused by the startup/reset log line (LogSnapshot) AND the maneuver-recorder CSV header so a
+        // recording is self-describing without cross-referencing the BepInEx log. Includes the active law.
+        public static string SnapshotString()
         {
-            WTMouseAimPlugin.Log.LogInfo(
-                $"[config sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
+            return
+                $"law={ControlLawMode.Value} sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
                 $"pitchG={PitchGain.Value:0.0} yawG={YawGain.Value:0.0} rollG={RollGain.Value:0.00} rollDamp={RollDamping.Value:0.00} rollSm={RollRateSmoothing.Value:0.00} " +
                 $"bankGain={FineBankGain.Value:0.0} bankDz={FineBankDeadzone.Value:0.0} maxBank={MaxBankAngle.Value:0} " +
                 $"fineAng={FineAngle.Value:0} fineBoost={FineGainBoost.Value:0.0} align={AlignAngle.Value:0} " +
@@ -655,8 +670,15 @@ namespace NuclearOptionMouseAim
                 $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00} " +
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
-                $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} " +
-                $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}]");
+                $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
+                $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
+        }
+
+        // Emit the gain dump to the BepInEx log at startup/reset so the log is self-describing for tuning.
+        // Live edits are logged per-entry via SettingChanged above.
+        public static void LogSnapshot()
+        {
+            WTMouseAimPlugin.Log.LogInfo($"[config {SnapshotString()}]");
         }
 
         // Custom F1-menu widget for ResetToDefaults: a single button instead of a checkbox.
@@ -860,7 +882,7 @@ namespace NuclearOptionMouseAim
             //   noseMoved  : how far the NOSE rotated in world since last Update (plane chasing in) — if this
             //                tracks markerOff shrinking, the plane is eating the offset (one-frame arrival)
             //   clamp      : how much the cone clamp pulled the marker back toward the nose this frame
-            if (Cfg.DebugLogging.Value && Time.time - _lastAimLog >= 0.2f)
+            if (Cfg.DebugLogging.Value && Time.time - _lastAimLog >= 0.4f) // v0.44: ~2.5/sec (halved)
             {
                 float markerOff   = Vector3.Angle(t.forward, _aimForward);
                 float markerMoved = _prevAimDbg  == Vector3.zero ? 0f : Vector3.Angle(_aimForward, _prevAimDbg);
@@ -1058,11 +1080,14 @@ namespace NuclearOptionMouseAim
         public static bool IsRecording => _w != null;
         public static int  Samples     => _samples;
         public static float Elapsed    => IsRecording ? Time.time - _startTime : 0f;
+        // Bare filename of the active recording (for the anomaly file's rec= tag); "" when not recording.
+        public static string CurrentFile => _w != null ? System.IO.Path.GetFileName(_path) : "";
 
         // CSV header — keep in lockstep with the Sample() row below.
         private const string Header =
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
-            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw,heliBlend,vFwd";
+            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw," +
+            "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -1079,6 +1104,16 @@ namespace NuclearOptionMouseAim
                 string name = "mouseaim-rec-" + System.DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
                 _path = System.IO.Path.Combine(dir, name);
                 _w = new System.IO.StreamWriter(_path, false) { AutoFlush = true };
+                // Self-describing header block (v0.44): '#' comment lines (ignored as non-data by CSV
+                // tooling and parsers) so the recording alone explains "what we were dealing with" — the
+                // full gain set, active law, aircraft and the session id that ties it to the anomaly file.
+                string acName = "<unknown>";
+                try { if (GameManager.GetLocalAircraft(out var ac) && ac != null && ac.definition != null) acName = ac.definition.name; }
+                catch { /* aircraft not resolvable right now — leave <unknown> */ }
+                _w.WriteLine($"# mouseaim recording  v{WTMouseAimPlugin.PluginVersion}  session={WTMouseAimPlugin.SessionId}");
+                _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
+                _w.WriteLine($"# aircraft '{acName}'");
+                _w.WriteLine($"# config {Cfg.SnapshotString()}");
                 _w.WriteLine(Header);
                 _startTime  = Time.time;
                 _lastSample = -999f; // force the first frame to sample
@@ -1111,6 +1146,19 @@ namespace NuclearOptionMouseAim
             _w = null;
         }
 
+        // Write a live config-change marker into the recording so a mid-run tuning edit is inline with the
+        // data (no-op when not recording). Called from Cfg's SettingChanged hook. Guarded like every write.
+        public static void NoteConfigChange(string section, string key, object value)
+        {
+            if (_w == null) return;
+            try { _w.WriteLine($"# cfg t={Time.time:0.000} {section}/{key} = {value}"); }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[rec] config-note write failed, stopping: {e.Message}");
+                CloseQuietly();
+            }
+        }
+
         // Write one row if recording and the per-second throttle (RecordRateHz) allows it. Called from
         // ChaseController.Apply with the already-computed control state — no recompute. A write failure
         // stops the recording cleanly rather than throwing.
@@ -1118,7 +1166,8 @@ namespace NuclearOptionMouseAim
             float off, float azErr, float elevErr, float phi, float bigTurn, float bank, float targetBank,
             float outP, float outR, float outY, float pitchRate, float yawRate, float rollRate,
             float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
-            float engP, float engR, float engY, float heliBlend, float vFwd)
+            float engP, float engR, float engY, float heliBlend, float vFwd,
+            float rollRateF, float iPitch, float iYaw, float bankTR, float bankBlend)
         {
             if (_w == null) return;
             float now = Time.time;
@@ -1131,13 +1180,68 @@ namespace NuclearOptionMouseAim
                     $"{now:0.000},{off:0.00},{azErr:0.00},{elevErr:0.00},{phi:0.0},{bigTurn:0.000}," +
                     $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
-                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value},{heliBlend:0.000},{vFwd:0.0}");
+                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}," +
+                    $"{heliBlend:0.000},{vFwd:0.0},{rollRateF:0.000},{iPitch:0.000},{iYaw:0.000},{bankTR:0.0},{bankBlend:0.000}");
                 _samples++;
             }
             catch (System.Exception e)
             {
                 WTMouseAimPlugin.Log.LogWarning($"[rec] write failed, stopping: {e.Message}");
                 CloseQuietly();
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Anomaly file (v0.44). The always-on companion to the maneuver recorder: a dedicated, session-scoped
+    // file (mouseaim-anomalies-<session>.log next to LogOutput.log) that collects ONLY the [anomaly] and
+    // [anomaly:trail] lines, separated from the noisy shared BepInEx log so a session's misbehaviours can
+    // be read on their own. Opens lazily on the first anomaly while flying and stays open (AutoFlush, so
+    // nothing is lost) for the rest of the session; the OS closes the handle on quit. Each line is also
+    // tagged with the session id (header) + active control law + the recording it belongs to (in Anomaly),
+    // so it cross-references the CSV and the BepInEx config log. All IO guarded — never throws into the loop.
+    internal static class AnomalyLog
+    {
+        private static System.IO.StreamWriter _w;
+        private static string _path;
+        private static bool   _failed; // give up after a failure rather than retry every anomaly
+
+        private static void EnsureOpen()
+        {
+            if (_w != null || _failed) return;
+            try
+            {
+                string dir  = BepInEx.Paths.BepInExRootPath; // folder that holds LogOutput.log
+                string name = "mouseaim-anomalies-" + WTMouseAimPlugin.SessionId + ".log";
+                _path = System.IO.Path.Combine(dir, name);
+                _w = new System.IO.StreamWriter(_path, true) { AutoFlush = true }; // append: one file per session
+                _w.WriteLine($"# mouseaim anomalies  v{WTMouseAimPlugin.PluginVersion}  session={WTMouseAimPlugin.SessionId}");
+                _w.WriteLine($"# opened {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
+                WTMouseAimPlugin.Log.LogInfo($"[anomaly] file -> {_path}");
+            }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[anomaly] could not open anomaly file: {e.Message}");
+                _failed = true;
+                try { _w?.Dispose(); } catch { /* ignore */ }
+                _w = null;
+            }
+        }
+
+        // Append one already-formatted [anomaly]/[anomaly:trail] line. The caller still writes its own
+        // BepInEx warning; this only mirrors it to the dedicated file. A failure disables the file for the
+        // session (the BepInEx line keeps working) rather than retrying every event.
+        public static void Write(string line)
+        {
+            EnsureOpen();
+            if (_w == null) return;
+            try { _w.WriteLine(line); }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[anomaly] file write failed, disabling: {e.Message}");
+                _failed = true;
+                try { _w?.Dispose(); } catch { /* ignore */ }
+                _w = null;
             }
         }
     }
@@ -1649,11 +1753,13 @@ namespace NuclearOptionMouseAim
                         aoaR = TargetCalc.GetAngleOnAxis(t.forward, aircraft.rb.velocity, t.right);
                     ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
-                        spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd);
+                        spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
+                        _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend);
                 }
 
-                // Chase trace. Normal cadence ~5/sec; inside 10deg ("fine capture") ~10/sec at higher
-                // precision — the last-few-degrees stall is exactly what we're diagnosing.
+                // Chase trace. Normal cadence ~2.5/sec; inside 10deg ("fine capture") ~5/sec at higher
+                // precision — the last-few-degrees stall is exactly what we're diagnosing. (v0.44: halved
+                // from 5/10/sec so a DebugLogging run stays readable / low-context without losing shape.)
                 //   off       : nose->marker angle before this frame's command takes effect
                 //   elevE/azE : world-frame error split (elevation vs azimuth, deg). A persistent elevE
                 //               with azE~0 is gravity droop; a persistent azE is lateral residual.
@@ -1664,7 +1770,7 @@ namespace NuclearOptionMouseAim
                 if (Cfg.DebugLogging.Value)
                 {
                     bool fine = off < 10f; // fine-capture regime: the regime under investigation
-                    if (Time.time - _lastChaseLog >= (fine ? 0.1f : 0.2f) &&
+                    if (Time.time - _lastChaseLog >= (fine ? 0.2f : 0.4f) &&
                         (off > 0.02f || Mathf.Abs(_outP) > 0.005f || Mathf.Abs(_outY) > 0.005f || Mathf.Abs(_outR) > 0.005f))
                     {
                         _lastChaseLog = Time.time;
@@ -2066,8 +2172,11 @@ namespace NuclearOptionMouseAim
             prevSign = s;
         }
 
-        // Emit one [anomaly] line with a short flight-state + gain snapshot, honouring a per-type cooldown
-        // (the ref stamp) so a single event can't flood the log.
+        // Emit one [anomaly] line (per-type cooldown via the ref stamp so a single event can't flood) to
+        // both the BepInEx log (drives the on-screen flash, handy live) and the dedicated anomaly file.
+        // No per-anomaly gain snapshot: gains are logged once at startup + on every change ([config] lines)
+        // and embedded in each recording's header, so repeating them here only burned log/context. Instead
+        // we tag the active control law and, when a recording is running, the CSV it belongs to.
         private static void Anomaly(string type, string detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
         {
             if (now - lastStamp < 1f) return; // per-type cooldown
@@ -2076,10 +2185,13 @@ namespace NuclearOptionMouseAim
             _anomalyIndex++;
             LastAnomalyIndex = _anomalyIndex; LastAnomalyType = type; LastAnomalyTime = now;
             float spd = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
-            WTMouseAimPlugin.Log.LogWarning(
+            string rec = ManeuverRecorder.CurrentFile;
+            string line =
                 $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
                 $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
-                $"[sens={Cfg.PitchYawSensitivity.Value:0.0} bankGain={Cfg.FineBankGain.Value:0.0} bankDz={Cfg.FineBankDeadzone.Value:0.0} maxBank={Cfg.MaxBankAngle.Value:0} brake={Cfg.PitchBrake.Value:0.00} coord={Cfg.RollPitchCoordination.Value:0.00} align={Cfg.AlignAngle.Value:0} yawSc={Cfg.TurnYawScale.Value:0.00} rollG={Cfg.RollGain.Value:0.00} rollDamp={Cfg.RollDamping.Value:0.00} rollSm={Cfg.RollRateSmoothing.Value:0.00}]");
+                $"law={Cfg.ControlLawMode.Value}{(rec.Length > 0 ? $" rec={rec}" : "")}";
+            WTMouseAimPlugin.Log.LogWarning(line);
+            AnomalyLog.Write(line);
             if (Cfg.AnomalyContext.Value) DumpTrail(now);
         }
 
@@ -2099,7 +2211,9 @@ namespace NuclearOptionMouseAim
                 AnFrame f = _ring[idx];
                 sb.Append($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}");
             }
-            WTMouseAimPlugin.Log.LogWarning(sb.ToString());
+            string line = sb.ToString();
+            WTMouseAimPlugin.Log.LogWarning(line);
+            AnomalyLog.Write(line);
         }
 
         // PHASE CLASSIFICATION (v0.26). Map the current frame onto the instructor's plan so it's legible
@@ -2329,8 +2443,8 @@ namespace NuclearOptionMouseAim
                 -Mathf.Asin(Mathf.Clamp(aim.y, -1f, 1f)) * Mathf.Rad2Deg - Cfg.CameraPitchOffset.Value,
                 -80f, 80f);
 
-            // Steady-state trace: everything the pan/tilt computation depends on, ~5/sec.
-            if (dbg && Time.time - _lastOrbitLog >= 0.2f)
+            // Steady-state trace: everything the pan/tilt computation depends on, ~2.5/sec (v0.44: halved).
+            if (dbg && Time.time - _lastOrbitLog >= 0.4f)
             {
                 _lastOrbitLog = Time.time;
                 float aimHdg    = aimH.sqrMagnitude    > 1e-6f ? Vector3.SignedAngle(Vector3.forward, aimH.normalized,    Vector3.up) : float.NaN;
@@ -2361,7 +2475,7 @@ namespace NuclearOptionMouseAim
             if (!Cfg.DebugLogging.Value) return;
             if (CameraStateManager.cameraMode != CameraMode.orbit) return;
             if (!AimRig.TryGetContext(out var ac, out _)) return;
-            if (Time.time - _lastOrbitResLog < 0.2f) return;
+            if (Time.time - _lastOrbitResLog < 0.4f) return; // v0.44: ~2.5/sec (halved)
             _lastOrbitResLog = Time.time;
             Transform ct = cam.mainCamera.transform;
             WTMouseAimPlugin.Log.LogInfo(

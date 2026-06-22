@@ -3,6 +3,42 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.44.0
+
+- **Recordings are now self-describing.** Each maneuver-recorder CSV (`F8`) starts with a `#` comment
+  header block carrying the plugin version, the session id, the wallclock + `Time.time` start, the
+  aircraft, and the **full control-law gain set** (the same dump the startup `[config]` line emits, via
+  a shared `Cfg.SnapshotString()`). Any setting changed live (F1) *during* a recording is appended as a
+  `# cfg t=… Section/Key = value` row, so a feel change is inline with the data — you can debug a run
+  from the CSV alone without cross-referencing the log.
+- **New diagnostic CSV columns:** `rollRateF` (the filtered roll rate that feeds the damping term — the
+  key signal for high-speed roll-PIO/wobble, previously only in the anomaly trail), `iPitch`/`iYaw`
+  (fine-integrator state), and `bankTR`/`bankBlend` (the EvolvedLegacy `atan(ωV/g)` commanded bank and
+  its blend weight).
+- **Anomalies get their own file.** A dedicated, session-scoped `mouseaim-anomalies-<session>.log` (next
+  to `LogOutput.log`) collects only the `[anomaly]`/`[anomaly:trail]` lines, separated from the noisy
+  shared BepInEx log. Each anomaly is tagged with the active **control law** and, when a recording is
+  running, the **CSV it belongs to** (`rec=…`); a session id ties the anomaly file, every recording, and
+  the BepInEx config log together. The on-screen flash and the BepInEx warning still fire as before.
+- **Less log spam / lower context.** Dropped the full gain snapshot that every `[anomaly]` line repeated
+  (gains are already logged once at startup + on each change, and embedded in each recording header).
+  Halved the verbose `DebugLogging` trace cadences (`[chase]` ~5→2.5/sec, fine-capture ~10→5/sec;
+  `[aim]` and `[orbitcam]` likewise) so a debug run stays readable without losing shape. The recorder
+  rate stays 20 Hz (`Recorder/RecordRateHz` is the knob if files get large).
+
+## 0.43.0
+
+- **Regime-aware hover handling for EvolvedLegacy.** On collective aircraft (helicopters / hover-VTOLs,
+  `takeoffDistance == 0`) the `atan(ωV/g)` bank-to-turn law degenerates at low forward speed — it lays
+  the aircraft over without slewing the nose. EvolvedLegacy now ramps from bank-to-turn to *yaw-to-point*
+  as forward speed (`vFwd`, the nose-direction velocity component) drops between new knobs
+  `Control/HeliForwardSpeed` (60 m/s, full fixed-wing) and `Control/HeliHoverSpeed` (20 m/s, full hover),
+  via a per-frame blend `heliBlend`. In hover the commanded bank is suppressed (the roll axis becomes a
+  wings-leveler) and yaw authority is raised by `Control/HeliYawScale` (2.0) so the tail rotor points the
+  nose. Forced fully on whenever the game's AutoHover is engaged. Fixed-wing airframes are unaffected
+  (`heliBlend == 0`, byte-identical to 0.42). New recorder columns `heliBlend`/`vFwd`; `[seam]` logs the
+  collective/AutoHover flags.
+
 ## 0.33.0
 
 - **Fixed the high-speed roll buzz for real — by cutting the damping, not adding more.** Restoring
