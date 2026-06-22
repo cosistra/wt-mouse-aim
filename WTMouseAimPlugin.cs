@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.34.0";
+        public const string PluginVersion = "0.37.1";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft — tune live via F1).");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -71,7 +71,21 @@ namespace NuclearOptionMouseAim
             {
                 ChaseController.ToggleFlyLevel(ac);
             }
+
+            // Maneuver recorder toggle (v0.35). Ungated by aircraft/Enabled so it can always be stopped;
+            // it only writes rows while the chase is actually flying (Sample is called from Apply).
+            if (Input.GetKeyDown(Cfg.RecordKey.Value))
+            {
+                bool on = ManeuverRecorder.Toggle();
+                _toastUntil = Time.time + 2f;
+                _toastOn = on; // reuse the toast: cyan "REC" on, amber off (label switched in OnGUI)
+                _toastRec = true;
+            }
+            else if (Time.time >= _toastUntil) _toastRec = false;
         }
+
+        // True while the active toast is a recorder toast (so OnGUI labels it REC/REC OFF, not ON/OFF).
+        private static bool _toastRec;
 
         private void OnGUI()
         {
@@ -81,9 +95,22 @@ namespace NuclearOptionMouseAim
                 var tc = GUI.color;
                 GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
                 const float tw = 220f;
-                GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f),
-                    _toastOn ? "WT MouseAim  ON" : "WT MouseAim  OFF");
+                string msg = _toastRec ? (_toastOn ? "MouseAim  REC START" : "MouseAim  REC STOP")
+                                       : (_toastOn ? "WT MouseAim  ON"      : "WT MouseAim  OFF");
+                GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f), msg);
                 GUI.color = tc;
+            }
+
+            // Persistent recording indicator — drawn BEFORE every gate (even on the clean HUD / mod-off)
+            // so a running capture is always visible. Top-centre, red, with elapsed time + sample count.
+            if (ManeuverRecorder.IsRecording)
+            {
+                var rc = GUI.color;
+                GUI.color = new Color(1f, 0.25f, 0.2f, 0.95f);
+                const float rw = 220f;
+                GUI.Label(new Rect((Screen.width - rw) * 0.5f, Screen.height * 0.08f, rw, 24f),
+                    $"● REC  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
+                GUI.color = rc;
             }
 
             if (!Cfg.ShowOverlay.Value || !Cfg.Enabled.Value)
@@ -280,6 +307,24 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> FineIntegralLeak;    // 1/s: bleed toward zero (anti-windup)
         public static ConfigEntry<float> FineIntegralCap;     // max stick units the integrator may add per axis
 
+        // --- Measured-reactive bank-and-pull assist (v0.35). When the rudder is empirically failing to
+        // move the heading (low measured yaw effectiveness — happens at high speed / on draggy airframes),
+        // the instructor shifts a side correction into bank-and-pull instead of leaning on the weak rudder.
+        public static ConfigEntry<bool>  YawAssistEnabled;    // master on/off for the reactive assist
+        public static ConfigEntry<float> YawAssistStrength;   // 0..1 overall scale of the assist
+        public static ConfigEntry<float> YawAssistResponse;   // sec: low-pass time constant on the yaw-weakness estimate
+        public static ConfigEntry<float> CoordPullGain;       // 0..1 coordinating-pull authority (the "pitch into the bank")
+        public static ConfigEntry<float> CoordPullCap;        // 0..1 cap on the coordinating-pull stick
+        public static ConfigEntry<float> BankAuthGain;        // bank-gain boost per unit assist (steep banks when yaw weak)
+        public static ConfigEntry<float> YawWeakFade;         // 0..1 how far the rudder fades out as the assist rises
+        public static ConfigEntry<float> AssistTurnRateGain;  // 1/s: turn-rate-targeted bank (self-scales the loaded bank with airspeed)
+        public static ConfigEntry<float> CoordPullReleaseAngle;// deg: error cone inside which the coordinating pull eases off
+
+        // --- Maneuver recorder (v0.35): a hotkey dumps a bounded high-rate CSV of the control state so a
+        // problem can be captured cleanly across aircraft and the assist calibrated against real data.
+        public static ConfigEntry<KeyCode> RecordKey;         // start/stop the CSV capture (default F8)
+        public static ConfigEntry<float>   RecordRateHz;      // samples per second written to the CSV
+
         // --- Fly Level autopilot (v0.24): toggle a key to hold wings-level + nose-on-horizon at the
         // heading captured when you pressed it. Ignores the reticle; a stick nudge or re-press releases it.
         public static ConfigEntry<bool>    FlyLevelEnabled;   // master on/off for the feature
@@ -414,6 +459,39 @@ namespace NuclearOptionMouseAim
             FineIntegralCap     = cf.Bind("Control", "FineIntegralCap", 0.12f, new ConfigDescription(
                 "Hard limit on how much stick (per axis) the fine integrator may add. Keeps it from winding up into a lurch if the nose is held off-target. ~0.12 is enough to defeat the rate-command residual without being felt as a kick.",
                 new AcceptableValueRange<float>(0f, 0.3f)));
+
+            YawAssistEnabled    = cf.Bind("Control", "YawAssistEnabled", true,
+                "Reactive bank-and-pull (v0.35). The honest way to move the flight-path heading is to BANK and PULL, not to push rudder — and rudder gets weaker the faster you go, which is why a small sideways nudge 'leaves yaw on the table' at high speed and the nose parks short of the reticle. When ON, the instructor continuously MEASURES how much heading change your yaw command is actually buying; when that's poor it automatically rolls a touch more into the correction AND adds a coordinating pull so the bank turns the nose, instead of leaning on the weak rudder. Self-adapting per airframe and speed — no tuning needed to work. OFF = the v0.34 rudder-led fine capture.");
+            YawAssistStrength   = cf.Bind("Control", "YawAssistStrength", 0.7f, new ConfigDescription(
+                "Overall scale of the reactive bank-and-pull assist (YawAssistEnabled). 0 = effectively off; 1 = full authority shift into bank-and-pull when the rudder is measured to be ineffective. ~0.7 is a firm assist that still leaves the rudder doing the final fine alignment. Lower if side corrections now over-bank or feel too eager to roll; raise if the nose still parks short on high-speed sideways nudges. Only acts in the small/mid correction regime — big turns already roll-and-pull, so it fades out there.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            YawAssistResponse   = cf.Bind("Control", "YawAssistResponse", 0.8f, new ConfigDescription(
+                "How quickly (seconds) the measured yaw-weakness estimate reacts. It's a low-pass so a momentary blip doesn't swing the assist — but it has MEMORY, so once it has learned the rudder is weak in this regime (e.g. high speed) the very next nudge already banks-and-pulls. Lower = snappier/twitchier adaptation; higher = smoother but slower to notice the rudder is failing. ~0.8 s is a calm, responsive default.",
+                new AcceptableValueRange<float>(0.1f, 3f)));
+            CoordPullGain       = cf.Bind("Control", "CoordPullGain", 0.8f, new ConfigDescription(
+                "Coordinating-pull authority — the 'pitch INTO the bank' half of the assist, and the REAL driver of a high-speed correction. Once banked into a side nudge, a level turn needs back-pressure or gravity just drops the nose and the bank does nothing (without it the nose mushes at under 1g and the heading barely moves). This adds a nose-up pull proportional to the commanded bank so the bank becomes a loaded turn that actually slews the nose. Always a PULL (nose-up, positive-G) — clamped so it can never push/bunt, and capped by CoordPullCap. 0 = bank only (the nose sags); ~0.8 loads a firm coordinated turn. Raise if high-speed side nudges still creep, lower if they balloon high or feel grabby.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            CoordPullCap        = cf.Bind("Control", "CoordPullCap", 0.85f, new ConfigDescription(
+                "Cap on the coordinating-pull stick so the assist can load real G for a firm, quick correction without ever pinning the pitch axis (the rest of the pitch budget stays for the normal pull-to-target and the anti-overshoot brake). ~0.85 lets a high-speed nudge pull hard enough to slew the nose in ~1-2 s. Lower if banked corrections pull too hard / bleed too much energy; raise toward 1 if they still feel soft at the very highest speeds.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            BankAuthGain        = cf.Bind("Control", "BankAuthGain", 5.0f, new ConfigDescription(
+                "How much steeper the instructor banks per unit of measured yaw-weakness (the assist). At full assist the fine bank-servo gain is multiplied by (1 + this), so a small side nudge at high speed commands a real loaded-turn bank (~45-60 deg, still capped by MaxBankAngle) instead of the shallow ~20 deg that turns at well under 1 deg/s. Backed by the coordinating pull this becomes an efficient loaded turn. Lower if high-speed nudges over-bank/feel violent; raise if they still don't bank enough to turn.",
+                new AcceptableValueRange<float>(0f, 10f)));
+            YawWeakFade         = cf.Bind("Control", "YawWeakFade", 1.0f, new ConfigDescription(
+                "How far the rudder is faded OUT as the assist rises. When the rudder is measured ineffective (high speed) it's just sideslip and drag doing nothing for the heading, so the law commits to bank-and-pull instead. At full assist the fine-regime yaw command is scaled by (1 - this), so 1.0 leaves ~30% rudder for a little coordination (never fully zero), 0 = keep full rudder alongside the bank+pull. Low speed (rudder still effective) is unaffected either way. Lower if you want some rudder retained when weak; raise to commit harder to bank+pull.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            AssistTurnRateGain  = cf.Bind("Control", "AssistTurnRateGain", 1.5f, new ConfigDescription(
+                "THE high-speed fix (v0.37). The old assist banked PROPORTIONAL to the heading error, so a small nudge commanded a shallow bank that turns fast at low speed but barely at all when fast (a 12 deg bank at 400 m/s slews the nose ~0.3 deg/s — the nose mushed the last few degrees). Instead the bank is now sized from a target TURN-RATE (proportional to error, this gain in 1/s) converted to the bank that physically holds it: phi = atan(omega*V/g). Because V is in there, the SAME error commands a steep loaded bank when fast and a gentle one when slow — automatically, no per-speed tuning. Blended in by measured yaw-weakness, so low speed / strong-yaw airframes keep the old gentle servo untouched. Higher = asks for a faster turn (steeper bank, snappier, more G) for a given error; lower = gentler. ~1.5 slews a high-speed nudge onto aim in ~1 s. Lower if fast nudges now overshoot or feel violent.",
+                new AcceptableValueRange<float>(0f, 4f)));
+            CoordPullReleaseAngle = cf.Bind("Control", "CoordPullReleaseAngle", 2.0f, new ConfigDescription(
+                "Heading-error cone (deg) inside which the coordinating pull eases back to zero. Outside it the pull stays at full strength so the loaded turn holds its G right down through the tail of the correction (the v0.36 pull tapered over the whole 6 deg fine cone, so it was already half-gone at 3 deg and the nose mushed); inside it the pull bleeds off so the bank+pull releases cleanly onto aim instead of overshooting. ~2 deg keeps the turn loaded until the nose is nearly on, then lets go. Raise if it overshoots / balloons past aim; lower if the very last degree still creeps.",
+                new AcceptableValueRange<float>(0.5f, 8f)));
+            RecordKey           = cf.Bind("Recorder", "RecordKey", KeyCode.F8,
+                "Key that starts/stops the maneuver recorder. Press once to begin capturing, fly the maneuver, press again to stop — each capture writes its own timestamped CSV (mouseaim-rec-<date-time>.csv) into the BepInEx folder next to LogOutput.log, one row per sample. A 'REC' marker shows on-screen while it's running. For diagnosing/tuning feel across different aircraft. Default F8.");
+            RecordRateHz        = cf.Bind("Recorder", "RecordRateHz", 20f, new ConfigDescription(
+                "How many samples per second the maneuver recorder writes to the CSV. Higher = finer time resolution (bigger files); 20/s resolves a normal correction well without bloating the file. Sampling runs on the physics step, so very high values are capped by the fixed-update rate.",
+                new AcceptableValueRange<float>(5f, 60f)));
+
             FlyLevelEnabled     = cf.Bind("FlyLevel", "Enabled", true,
                 "Enable the 'Fly Level' toggle key. When you press it, the instructor locks the current heading and holds TRUE level flight — wings level, zero climb rate (the velocity vector on the horizon, accounting for angle-of-attack), ignoring the aim circle. Press again (or nudge the stick) to return to mouse-aim.");
             FlyLevelKey         = cf.Bind("FlyLevel", "Key", KeyCode.F7,
@@ -494,7 +572,10 @@ namespace NuclearOptionMouseAim
                 $"bankGain={FineBankGain.Value:0.0} bankDz={FineBankDeadzone.Value:0.0} maxBank={MaxBankAngle.Value:0} " +
                 $"fineAng={FineAngle.Value:0} fineBoost={FineGainBoost.Value:0.0} align={AlignAngle.Value:0} " +
                 $"coord={RollPitchCoordination.Value:0.00} brake={PitchBrake.Value:0.00} yawSc={TurnYawScale.Value:0.00} slew={OutputSlew.Value:0.0} " +
-                $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00}]");
+                $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00} " +
+                $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
+                $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
+                $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0}]");
         }
 
         // Custom F1-menu widget for ResetToDefaults: a single button instead of a checkbox.
@@ -877,6 +958,107 @@ namespace NuclearOptionMouseAim
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Maneuver recorder (v0.35). A hotkey-gated, bounded high-rate capture of the control state to its
+    // OWN timestamped CSV (one file per recording, next to LogOutput.log) — so a feel problem can be
+    // recorded cleanly across several aircraft and the reactive assist calibrated against real numbers,
+    // without the always-on [anomaly] log or the verbose [chase] trace. Start/stop with RecordKey.
+    // All file IO is guarded: a failure aborts the recording and never throws into the game loop.
+    internal static class ManeuverRecorder
+    {
+        private static System.IO.StreamWriter _w;   // open while recording, null otherwise
+        private static float _startTime;            // Time.time at start (elapsed + summary)
+        private static float _lastSample;           // throttle stamp (Time.time of last written row)
+        private static int   _samples;              // rows written this recording
+        private static string _path;                // current file path (for the summary line)
+
+        public static bool IsRecording => _w != null;
+        public static int  Samples     => _samples;
+        public static float Elapsed    => IsRecording ? Time.time - _startTime : 0f;
+
+        // CSV header — keep in lockstep with the Sample() row below.
+        private const string Header =
+            "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
+            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY";
+
+        // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
+        public static bool Toggle()
+        {
+            if (IsRecording) { Stop("toggled off"); return false; }
+            return Start();
+        }
+
+        private static bool Start()
+        {
+            try
+            {
+                string dir  = BepInEx.Paths.BepInExRootPath; // folder that holds LogOutput.log
+                string name = "mouseaim-rec-" + System.DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
+                _path = System.IO.Path.Combine(dir, name);
+                _w = new System.IO.StreamWriter(_path, false) { AutoFlush = true };
+                _w.WriteLine(Header);
+                _startTime  = Time.time;
+                _lastSample = -999f; // force the first frame to sample
+                _samples    = 0;
+                WTMouseAimPlugin.Log.LogInfo($"[rec] recording -> {_path}");
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[rec] could not start recording: {e.Message}");
+                CloseQuietly();
+                return false;
+            }
+        }
+
+        // Stop and close, emitting a one-line summary. Safe to call when not recording (no-op).
+        public static void Stop(string reason)
+        {
+            if (_w == null) return;
+            float dur = Time.time - _startTime;
+            int   n   = _samples;
+            string path = _path;
+            CloseQuietly();
+            WTMouseAimPlugin.Log.LogInfo($"[rec] done ({reason}) dur={dur:0.0}s samples={n} -> {path}");
+        }
+
+        private static void CloseQuietly()
+        {
+            try { _w?.Flush(); _w?.Dispose(); } catch { /* ignore */ }
+            _w = null;
+        }
+
+        // Write one row if recording and the per-second throttle (RecordRateHz) allows it. Called from
+        // ChaseController.Apply with the already-computed control state — no recompute. A write failure
+        // stops the recording cleanly rather than throwing.
+        public static void Sample(
+            float off, float azErr, float elevErr, float phi, float bigTurn, float bank, float targetBank,
+            float outP, float outR, float outY, float pitchRate, float yawRate, float rollRate,
+            float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
+            float engP, float engR, float engY)
+        {
+            if (_w == null) return;
+            float now = Time.time;
+            float minDt = 1f / Mathf.Clamp(Cfg.RecordRateHz.Value, 1f, 1000f);
+            if (now - _lastSample < minDt) return;
+            _lastSample = now;
+            try
+            {
+                _w.WriteLine(
+                    $"{now:0.000},{off:0.00},{azErr:0.00},{elevErr:0.00},{phi:0.0},{bigTurn:0.000}," +
+                    $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
+                    $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
+                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0}");
+                _samples++;
+            }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[rec] write failed, stopping: {e.Message}");
+                CloseQuietly();
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // The chase controller (thin "instructor"). Point-and-chase law from brihernandez/MouseFlight
     // (MIT), spec §3.1/3.2: compute the marker direction in the body frame, pitch/yaw toward it, and
     // blend roll between "bank toward target" (far off) and "wings level" (on target). We fully OWN
@@ -956,6 +1138,17 @@ namespace NuclearOptionMouseAim
         private static int   _ringCount;    // valid entries (<= _ring.Length)
         private static float _lastTrailT;   // one trail dump per second across all anomaly types
         private static float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
+
+        // Measured-reactive yaw-weakness estimate (v0.35). _yawEffFilt is a low-passed raw measure of how
+        // much nose-yaw rate each unit of yaw command is buying (deg/s per stick); _yawWeak in [0,1] rises
+        // when the rudder is empirically failing to CLOSE the heading error despite being commanded toward
+        // it, and decays toward 0 otherwise. It has memory (the LPF) so it pre-biases the next nudge in the
+        // same regime. _prevAzErr feeds the heading-closing rate. Reset on engage with the other detectors.
+        private static float _yawWeak;          // 0 = rudder is working, 1 = rudder ineffective -> bank-and-pull
+        private static float _yawEffFilt;       // low-passed |yawRate|/|outY| (diagnostic, logged to the CSV)
+        private static float _prevAzErr;        // last frame's azimuth error (deg) for d|azErr|/dt
+        private static bool  _prevAzErrValid;   // skip the first frame's bogus derivative
+        private static float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
 
         public static bool IsFlying => _active;
 
@@ -1043,6 +1236,7 @@ namespace NuclearOptionMouseAim
                 _manvActive = false; _manvSettle = 0f; _manvOvershot = false; LastPhase = ""; // fresh maneuver tracker
                 _ringHead = _ringCount = 0; // clear the context buffer for this command
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
+                _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -1155,6 +1349,77 @@ namespace NuclearOptionMouseAim
                 float bigTurn = Mathf.Clamp01((off - Cfg.FineAngle.Value)
                                               / Mathf.Max(1f, Cfg.AlignAngle.Value - Cfg.FineAngle.Value));
 
+                // WORLD-FRAME AZIMUTH ERROR (deg, + = marker right of the nose heading) — the heading the
+                // rudder is asked to close. Drives the fine bank servo AND the v0.35 yaw-weakness estimate,
+                // so it's computed up here ahead of the pitch/roll commands. Degenerate headings (nose
+                // straight up/down) zero it for this frame.
+                Vector3 aimHW  = new Vector3(aimDir.x, 0f, aimDir.z);
+                Vector3 noseHW = new Vector3(t.forward.x, 0f, t.forward.z);
+                float azErr = (aimHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
+                    ? Vector3.SignedAngle(noseHW, aimHW, Vector3.up) : 0f;
+
+                // MEASURED YAW-WEAKNESS (v0.35). Is the rudder actually CLOSING the heading? Watch the
+                // standing azimuth error and how fast it's shrinking. A small side nudge the rudder handles
+                // well (low speed) closes quickly -> weakness stays ~0, near-stock feel. The same nudge at
+                // high speed lingers, because rudder/sideslip barely turns the flight path -> weakness rises
+                // and the assist banks-and-pulls instead. Purely measured (no speed formula); the closing
+                // rate is low-passed so frame-to-frame jitter doesn't fake progress. _yawEffFilt is a raw
+                // |yawRate|/|outY| effectiveness, kept ONLY for the CSV so the estimator can be calibrated.
+                // _outY here is last frame's committed yaw output (this frame's is slewed below).
+                float yawEffInst = Mathf.Abs(_outY) > 0.1f ? Mathf.Abs(yawRate) / Mathf.Abs(_outY) : _yawEffFilt;
+                _yawEffFilt += (dt / (0.5f + dt)) * (yawEffInst - _yawEffFilt);
+
+                float closeRaw = _prevAzErrValid ? (Mathf.Abs(_prevAzErr) - Mathf.Abs(azErr)) / Mathf.Max(dt, 1e-4f) : 0f;
+                _closeRateFilt += (dt / (0.2f + dt)) * (closeRaw - _closeRateFilt);
+                bool manualNow = _engP > 0f || _engR > 0f || _engY > 0f;
+                float weakInst = 0f;
+                if (Cfg.YawAssistEnabled.Value && !manualNow && !flyLevel && Mathf.Abs(azErr) > 1.5f)
+                    weakInst = 1f - Mathf.Clamp01(_closeRateFilt / 6f); // 0 = heading closing fast, 1 = stalled
+                // Asymmetric low-pass: attack at YawAssistResponse, release ~4x slower so the estimate has
+                // MEMORY — once the rudder is shown weak in this regime, the next nudge is already assisted.
+                float wTau = weakInst > _yawWeak ? Cfg.YawAssistResponse.Value : Cfg.YawAssistResponse.Value * 4f;
+                _yawWeak = Mathf.Clamp01(_yawWeak + (dt / (wTau + dt)) * (weakInst - _yawWeak));
+                _prevAzErr = azErr; _prevAzErrValid = true;
+
+                // ASSIST FACTOR — shift this side correction into bank-and-pull, strong only when the rudder
+                // is measured weak AND we're in the small/mid regime. Fades out as bigTurn->1 (the v0.26
+                // roll-to-align law already banks-and-pulls big turns), so it targets exactly the small-nudge
+                // case that stalls on the rudder today.
+                float assist = Cfg.YawAssistEnabled.Value ? _yawWeak * (1f - bigTurn) * Cfg.YawAssistStrength.Value : 0f;
+
+                // FINE BANK SERVO target bank (v0.25), now assist-aware (v0.35): collapse the heading
+                // deadband and bank harder when the rudder is weak, so a small side nudge actually banks to
+                // turn instead of waiting on the rudder. Still capped at MaxBankAngle. Computed here (ahead
+                // of pitch) so the coordinating pull below can size itself off the commanded bank.
+                float azDz   = Cfg.FineBankDeadzone.Value * (1f - assist);
+                float azBank = Mathf.Abs(azErr) <= azDz ? 0f : (Mathf.Abs(azErr) - azDz) * Mathf.Sign(azErr);
+                // v0.36: when the rudder is measured weak, bank STEEPLY (BankAuthGain) so a small side
+                // nudge commands a loaded-turn bank instead of the shallow one that mushes. This LINEAR
+                // (bank proportional to error) servo is the low-speed / strong-yaw behaviour, left intact.
+                float bankGain   = Cfg.FineBankGain.Value * (1f + Cfg.BankAuthGain.Value * assist);
+                float linBank    = azBank * bankGain;
+                // v0.37 — THE high-speed fix. The linear servo can't serve both 150 m/s and 400 m/s with
+                // one slope: a given bank turns ~3x faster slow than fast, so the slope that nails the slow
+                // plane leaves the fast one mushing the last few degrees (12deg bank @ 400 m/s ~ 0.3deg/s).
+                // Size the bank from a target TURN-RATE instead: omega = k*azErr (rad/s), and the bank that
+                // physically holds it is phi = atan(omega*V/g). V is in the formula, so the SAME error asks
+                // for a steep loaded bank when fast and a gentle one when slow — automatically. Blend linear
+                // -> turn-rate by measured yaw-weakness*(1-bigTurn): low speed / strong yaw keep the linear
+                // servo exactly; weak-yaw/high-speed take the loaded bank. Self-rolls out as azErr -> 0.
+                //   v0.37.1: the turn-rate path sees a NEAR-RAW error (a tiny fixed noise gate only), NOT the
+                //   big anti-wobble deadzone azBank carries. With azBank the deadzone (~1-1.5deg in the tail)
+                //   was subtracted before the turn-rate math, so a real 2deg error was seen as ~0.6deg, the
+                //   commanded bank collapsed to ~25deg (max ~1.1g) and the loaded turn unwound at a CLIFF
+                //   around 2deg — the v0.37 tail plateaued there. atan() on the raw error rolls out smoothly
+                //   instead. The linear servo keeps its full deadzone (low-speed wobble guard) untouched.
+                float vMag     = aircraft.rb != null ? aircraft.rb.velocity.magnitude : 200f;
+                float azTR     = Mathf.Abs(azErr) <= 0.5f ? 0f : (Mathf.Abs(azErr) - 0.5f) * Mathf.Sign(azErr); // raw error, noise gate only
+                float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
+                float bankTR   = Mathf.Atan(omegaDes * Mathf.Max(50f, vMag) / 9.81f) * Mathf.Rad2Deg; // deg, signed
+                float bankBlend  = Cfg.YawAssistEnabled.Value ? _yawWeak * (1f - bigTurn) : 0f;
+                float targetBank = Mathf.Clamp(Mathf.Lerp(linBank, bankTR, bankBlend),
+                                               -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);
+
                 // PITCH ANTI-OVERSHOOT BRAKE (v0.25): extra rate damping that ramps in as the nose nears
                 // the target (off small) while it's still swinging, so a fast large-angle pull (takeoff
                 // climb-out) decelerates ONTO the marker instead of crossing it and settling back. Fades
@@ -1188,45 +1453,52 @@ namespace NuclearOptionMouseAim
                 // nose). In the fine cone (bigTurn->0) the gate is 1 — the old direct pull, so a gentle
                 // nose-down to a low marker is still allowed. -local.y is the pull command (nose-up = -pitch).
                 float pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
-                float tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
+                // COORDINATING PULL (v0.35, reshaped v0.36) — the "pitch INTO the bank" half of the assist
+                // and the REAL driver of the correction. Once banked, a level turn needs back-pressure or
+                // gravity just drops the nose and the bank does nothing (the v0.35 tail mushed at 0.7-0.9g
+                // with ~0 pull). Add a nose-up pull (nose-up = NEGATIVE pitch) proportional to the commanded
+                // bank, scaled by assist. v0.37: the pull stays at FULL strength outside CoordPullReleaseAngle
+                // (~2 deg) and only eases inside it — so the loaded turn holds its G right through the tail of
+                // the correction (the v0.36 taper over the whole 6 deg fine cone was already half-gone at 3 deg,
+                // so the nose mushed) and then releases cleanly onto aim. With the turn-rate bank above keeping
+                // sin(targetBank) high in the tail, this is what actually loads the G. ALWAYS a pull: clamped
+                // >= 0 (never a push/bunt) and capped (CoordPullCap). Convergent: -> 0 as azErr -> 0 (taper)
+                // and as the bank rolls out.
+                float pullTaper = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.5f, Cfg.CoordPullReleaseAngle.Value));
+                float coordPull = Mathf.Clamp(
+                    Cfg.CoordPullGain.Value * Mathf.Abs(Mathf.Sin(targetBank * Mathf.Deg2Rad))
+                    * pullTaper * assist,
+                    0f, Cfg.CoordPullCap.Value);
+                float tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
 
                 // YAW — ease rudder authority down during a big turn (the logs showed yaw pinned ±1 adding to
                 // the messy feel) so the bank + pull do the work; full authority returns in the fine cone for
-                // final alignment.
+                // final alignment. v0.36: ALSO fade the rudder P-term out as the assist rises (YawWeakFade) —
+                // when the rudder is measured weak it's pure sideslip/drag doing nothing for the heading, so
+                // commit to bank+pull instead. Keep the small capped _iYaw integrator for final low-speed
+                // alignment (assist ~ 0 there, so this is identically stock at low speed).
                 float yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
-                float tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
-
-                // World-frame azimuth error (deg, + = marker right of the nose heading). Drives the fine
-                // bank servo; degenerate headings (straight up/down) just disable the servo this frame.
-                Vector3 aimW   = aimDir;
-                Vector3 aimHW  = new Vector3(aimW.x, 0f, aimW.z);
-                Vector3 noseHW = new Vector3(t.forward.x, 0f, t.forward.z);
-                float azErr = (aimHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
-                    ? Vector3.SignedAngle(noseHW, aimHW, Vector3.up) : 0f;
+                float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
+                float tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
 
                 // ROLL (v0.26): blend the FINE wings-level/azimuth bank servo (small errors) with a BODY-
                 // FRAME roll-to-align (big turns), in matched sin-magnitude units so RollGain/RollDamping
-                // keep their meaning.
-                //   eFine  — the v0.25 bank servo error: command a target bank proportional to the heading
-                //            (azimuth) error, capped at MaxBankAngle, and null at that bank. t.right.y is the
-                //            world-up component on the right wing (0 = level, <0 = right wing down), so
+                // keep their meaning. targetBank was computed up front (assist-aware bank servo) so the
+                // coordinating pull could size off it; here it just becomes the roll error.
+                //   eFine  — the v0.25 bank servo error: a target bank proportional to the heading (azimuth)
+                //            error, capped at MaxBankAngle, null at that bank. t.right.y is the world-up
+                //            component on the right wing (0 = level, <0 = right wing down), so
                 //            (t.right.y + sin(targetBank)) is the bank error. Used inside the fine cone where
-                //            the horizon bank is meaningful and the wings should level on-heading.
+                //            the horizon bank is meaningful and the wings should level on-heading. v0.35: the
+                //            deadband/gain that built targetBank are assist-aware, so when the rudder is weak
+                //            a small side nudge banks instead of waiting on it (the wobble-guard deadband
+                //            still applies at assist 0 — normal on-heading flight is unchanged).
                 //   eAlign — roll the SHORT way to put the target at 12 o'clock: monotonic in phi (no false
                 //            equilibrium except exactly ±180°, broken by any noise), so a target straight off
                 //            the wing or below still rolls in the short way instead of pinning. This is
                 //            attitude-robust where eFine degenerates (steep nose => meaningless horizon bank).
                 // bigTurn blends fine->align; subtract the roll RATE (RollDamping) so it eases on without
                 // overshooting. As the turn completes off shrinks, bigTurn->0, and the fine servo levels out.
-                // Soft azimuth deadband (v0.29): inside FineBankDeadzone of heading error the servo
-                // commands NO bank — the wings just level (eFine collapses to t.right.y) and yaw alone
-                // does the final capture, instead of the bank servo amplifying a sub-few-degree heading
-                // hunt into a continuous roll-stick dither (the fine-cone roll wobble). The error PAST
-                // the deadband still feeds FineBankGain, so a genuine side command banks to turn as before.
-                float azDz = Cfg.FineBankDeadzone.Value;
-                float azBank = Mathf.Abs(azErr) <= azDz ? 0f : (Mathf.Abs(azErr) - azDz) * Mathf.Sign(azErr);
-                float targetBank = Mathf.Clamp(azBank * Cfg.FineBankGain.Value,
-                                               -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);
                 float eFine  = t.right.y + Mathf.Sin(targetBank * Mathf.Deg2Rad);
                 float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
                 float rollErr = Mathf.Lerp(eFine, eAlign, bigTurn);
@@ -1302,6 +1574,22 @@ namespace NuclearOptionMouseAim
                     TrackManeuver(aircraft, off, phi, bank, rollRate, dt);
                 }
 
+                // MANEUVER RECORDER (v0.35): when the user has armed a capture (RecordKey), write the live
+                // control state to the CSV at RecordRateHz. Reuses everything already computed this frame —
+                // no recompute. Throttling/IO live inside Sample(); it's a no-op when not recording.
+                if (ManeuverRecorder.IsRecording)
+                {
+                    float elevErr = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f))
+                                   - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
+                    float spdR = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
+                    float aoaR = 0f;
+                    if (aircraft.rb != null && aircraft.rb.velocity.sqrMagnitude > 4f)
+                        aoaR = TargetCalc.GetAngleOnAxis(t.forward, aircraft.rb.velocity, t.right);
+                    ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
+                        _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
+                        spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY);
+                }
+
                 // Chase trace. Normal cadence ~5/sec; inside 10deg ("fine capture") ~10/sec at higher
                 // precision — the last-few-degrees stall is exactly what we're diagnosing.
                 //   off       : nose->marker angle before this frame's command takes effect
@@ -1320,12 +1608,12 @@ namespace NuclearOptionMouseAim
                         _lastChaseLog = Time.time;
                         float pTermP = -local.y * sens * fineGain * pullGate, dTermP = pitchRate * pitchDamp; // tgtP = (P+D)*PitchGain
                         float pTermY =  local.x * sens * fineGain * yawScale, dTermY = -yawRate  * damp;       // tgtY = (P+D)*YawGain
-                        float elevE = (Mathf.Asin(Mathf.Clamp(aimW.y, -1f, 1f)) - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
+                        float elevE = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f)) - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
                         float spd  = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
                         string f = fine ? "0.000" : "0.00";
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[chase] t={Time.time:0.000} off={off:0.000}deg phi={phi:0.0} bigTurn={bigTurn:0.00} elevE={elevE:0.00} azE={azErr:0.00} noseTurn={noseTurnDeg:0.000} " +
-                            $"fineG={fineGain:0.00} pull={pullGate:0.00} yawSc={yawScale:0.00} phase={LastPhase} tgtBank={targetBank:0.0} iP/iY=({_iPitch.ToString(f)},{_iYaw.ToString(f)}){(flyLevel ? " LVL" : "")} " +
+                            $"fineG={fineGain:0.00} pull={pullGate:0.00} yawSc={yawScale:0.00} phase={LastPhase} tgtBank={targetBank:0.0} yawWeak={_yawWeak:0.00} assist={assist:0.00} coordPull={coordPull:0.000} iP/iY=({_iPitch.ToString(f)},{_iYaw.ToString(f)}){(flyLevel ? " LVL" : "")} " +
                             $"P(p/y)=({pTermP.ToString(f)},{pTermY.ToString(f)}) D(p/y)=({dTermP.ToString(f)},{dTermY.ToString(f)}) " +
                             $"tgt P/R/Y=({tgtP.ToString(f)},{tgtR.ToString(f)},{tgtY.ToString(f)}) " +
                             $"out P/R/Y=({_outP.ToString(f)},{_outR.ToString(f)},{_outY.ToString(f)}) " +
