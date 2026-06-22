@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.42.0";
+        public const string PluginVersion = "0.43.0";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft (now tagged with the active control law per row) + A/B control-law toggle [{Cfg.ControlLawKey.Value}] switching Legacy<->EvolvedLegacy in flight (v0.42: EvolvedLegacy is now the DEFAULT/graduated law = universal atan(ωV/g) bank at all speeds/regimes + final-leg align-hold so the roll-to-align contribution persists until the target is genuinely close laterally, preventing the early wings-level-and-stop-short that Legacy shows in the final few degrees; v0.42 also lowered AssistTurnRateGain 1.5->0.9 to kill the high-speed eager/back-and-forth bank limit cycle. Legacy kept as the pristine A/B reference; BankToTurn abandoned and hidden from the toggle) — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft (now tagged with the active control law per row) + A/B control-law toggle [{Cfg.ControlLawKey.Value}] switching Legacy<->EvolvedLegacy in flight (v0.42: EvolvedLegacy is now the DEFAULT/graduated law = universal atan(ωV/g) bank at all speeds/regimes + final-leg align-hold so the roll-to-align contribution persists until the target is genuinely close laterally, preventing the early wings-level-and-stop-short that Legacy shows in the final few degrees; v0.42 also lowered AssistTurnRateGain 1.5->0.9 to kill the high-speed eager/back-and-forth bank limit cycle. Legacy kept as the pristine A/B reference; BankToTurn abandoned and hidden from the toggle) + regime-aware hover handling (v0.43: on collective aircraft [helis/hover-VTOLs, takeoffDistance==0] EvolvedLegacy ramps from bank-to-turn to yaw-to-point as forward speed drops between HeliForwardSpeed and HeliHoverSpeed [or whenever the game's AutoHover is engaged] — bank is suppressed [wings level] and yaw authority raised by HeliYawScale so the tail rotor points the nose; fixed-wing unchanged) — tune live via F1).");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -364,6 +364,15 @@ namespace NuclearOptionMouseAim
         // equivalent. All other EvolvedLegacy gains reuse the existing Control/Assist binds.
         public static ConfigEntry<float> EvolvedAlignHoldDeg; // deg: |azErr| below which the align-hold releases (leveling is allowed)
 
+        // --- Hover / "flown-like-a-helicopter" regime (v0.43, EvolvedLegacy only). On collective aircraft
+        // (takeoffDistance==0) the bank-to-turn math degenerates at low forward speed, so a regime blend
+        // (heliBlend) ramps the law from bank-to-turn -> yaw-to-point as forward speed drops: bank is
+        // suppressed (roll becomes a wings-leveler) and yaw authority is raised so the tail rotor swings
+        // the nose. Forced fully on while the game's AutoHover is engaged.
+        public static ConfigEntry<float> HeliForwardSpeed; // m/s: at/above this forward speed a collective aircraft is full fixed-wing (heliBlend=0)
+        public static ConfigEntry<float> HeliHoverSpeed;   // m/s: at/below this forward speed it's full yaw-to-point hover (heliBlend=1)
+        public static ConfigEntry<float> HeliYawScale;     // yaw-authority multiplier blended in at full hover so yaw can point the nose
+
         // --- Maneuver recorder (v0.35): a hotkey dumps a bounded high-rate CSV of the control state so a
         // problem can be captured cleanly across aircraft and the assist calibrated against real data.
         public static ConfigEntry<KeyCode> RecordKey;         // start/stop the CSV capture (default F8)
@@ -547,6 +556,16 @@ namespace NuclearOptionMouseAim
                 "EvolvedLegacy law only. When the total nose-off-marker angle (off) drops inside FineAngle, Legacy immediately snaps the roll blend to pure wings-level (bigTurn->0) even if the target is still a few degrees SIDEWAYS — it stops rolling to align early and the nose parks short. This knob keeps the roll-to-align contribution alive through the final degrees: the blend weight is MAX(bigTurn, lateralHold) where lateralHold = clamp01(|azErr|/EvolvedAlignHoldDeg), so as long as |azErr| exceeds this value the law keeps rolling to put the target at 12-o'clock instead of leveling early. When BOTH off and |azErr| are near zero the law settles wings-level on target — convergent, no limit cycle. ~5 deg is a reasonable start: raise if the nose still parks short or wings-level too early; lower toward 1-2 if it over-rolls past the target in the final stage.",
                 new AcceptableValueRange<float>(0f, 15f)));
 
+            HeliForwardSpeed    = cf.Bind("Control", "HeliForwardSpeed", 60f, new ConfigDescription(
+                "EvolvedLegacy + collective aircraft (takeoffDistance==0: helicopters / hover-VTOLs) only. FORWARD airspeed (m/s, nose-direction component of velocity) at/above which the aircraft is flown as a normal fixed-wing: bank-to-turn at full strength, regime blend heliBlend=0. Between this and HeliHoverSpeed the law smoothly ramps from bank-to-turn toward yaw-to-point. Has no effect on fixed-wing airframes (they're always heliBlend=0). ~60 m/s is a sensible 'now it's really flying forward' threshold; raise if a fast-moving heli still feels like it's pedalling the nose around, lower if forward flight feels mushy/over-banked.",
+                new AcceptableValueRange<float>(20f, 150f)));
+            HeliHoverSpeed      = cf.Bind("Control", "HeliHoverSpeed", 20f, new ConfigDescription(
+                "EvolvedLegacy + collective aircraft only. FORWARD airspeed (m/s) at/below which the aircraft is flown as a pure hover: bank fully suppressed (wings level, roll axis becomes a leveler), yaw authority raised by HeliYawScale so the tail rotor swings the nose onto the marker (heliBlend=1). Must be below HeliForwardSpeed. Also forced on whenever the game's AutoHover is engaged, regardless of speed. ~20 m/s is near walking-pace translation; raise toward HeliForwardSpeed for an earlier switch to yaw-pointing, lower toward 0 to keep banking down to a crawl.",
+                new AcceptableValueRange<float>(0f, 80f)));
+            HeliYawScale        = cf.Bind("Control", "HeliYawScale", 2.0f, new ConfigDescription(
+                "EvolvedLegacy + collective aircraft only. Yaw-authority multiplier blended in (by heliBlend) at full hover so the tail rotor becomes the primary heading driver once the wings are held level. The existing yaw term already points the nose toward the marker; in hover it's the only thing turning the aircraft, so it usually needs more authority than coordinated forward flight. 1 = no boost (same yaw as fixed-wing); ~2 is a firm pedal-turn. Raise if the nose swings onto a side target too slowly; lower if the nose wags/overshoots in hover.",
+                new AcceptableValueRange<float>(0.5f, 5f)));
+
             RecordKey           = cf.Bind("Recorder", "RecordKey", KeyCode.F8,
                 "Key that starts/stops the maneuver recorder. Press once to begin capturing, fly the maneuver, press again to stop — each capture writes its own timestamped CSV (mouseaim-rec-<date-time>.csv) into the BepInEx folder next to LogOutput.log, one row per sample. A 'REC' marker shows on-screen while it's running. For diagnosing/tuning feel across different aircraft. Default F8.");
             RecordRateHz        = cf.Bind("Recorder", "RecordRateHz", 20f, new ConfigDescription(
@@ -636,7 +655,8 @@ namespace NuclearOptionMouseAim
                 $"iGain={FineIntegralGain.Value:0.00} iLeak={FineIntegralLeak.Value:0.00} iCap={FineIntegralCap.Value:0.00} " +
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
-                $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0}]");
+                $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} " +
+                $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}]");
         }
 
         // Custom F1-menu widget for ResetToDefaults: a single button instead of a checkbox.
@@ -981,8 +1001,11 @@ namespace NuclearOptionMouseAim
             {
                 _lastAircraftId = id;
                 string name = aircraft.definition != null ? aircraft.definition.name : "<unknown>";
+                bool hasHover = false;
+                try { var cfilt = aircraft.GetControlsFilter(); if (cfilt != null) hasHover = cfilt.HasAutoHover(); } catch { /* ignore */ }
                 WTMouseAimPlugin.Log.LogInfo(
-                    $"[seam] now flying '{name}' — fixedWing={fixedWing} (takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}).");
+                    $"[seam] now flying '{name}' — fixedWing={fixedWing} collective={!fixedWing} hasAutoHover={hasHover} " +
+                    $"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only).");
             }
 
             bool active = ChaseController.BeginFrame(aircraft, fixedWing, pilotStrength);
@@ -1039,7 +1062,7 @@ namespace NuclearOptionMouseAim
         // CSV header — keep in lockstep with the Sample() row below.
         private const string Header =
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
-            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw";
+            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw,heliBlend,vFwd";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -1095,7 +1118,7 @@ namespace NuclearOptionMouseAim
             float off, float azErr, float elevErr, float phi, float bigTurn, float bank, float targetBank,
             float outP, float outR, float outY, float pitchRate, float yawRate, float rollRate,
             float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
-            float engP, float engR, float engY)
+            float engP, float engR, float engY, float heliBlend, float vFwd)
         {
             if (_w == null) return;
             float now = Time.time;
@@ -1108,7 +1131,7 @@ namespace NuclearOptionMouseAim
                     $"{now:0.000},{off:0.00},{azErr:0.00},{elevErr:0.00},{phi:0.0},{bigTurn:0.000}," +
                     $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
-                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}");
+                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value},{heliBlend:0.000},{vFwd:0.0}");
                 _samples++;
             }
             catch (System.Exception e)
@@ -1211,6 +1234,15 @@ namespace NuclearOptionMouseAim
         private static bool  _prevAzErrValid;   // skip the first frame's bogus derivative
         private static float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
 
+        // Hover / "flown-like-a-helicopter" regime state (v0.43). _collective latches the airframe class
+        // (true = takeoffDistance==0 = heli/hover-VTOL) on engage; _heliBlend in [0,1] is the per-frame
+        // regime blend (0 = fixed-wing bank-to-turn, 1 = hover yaw-to-point), computed in Apply from
+        // forward airspeed + AutoHover. _vFwd/_hoverOn are surfaced for the CSV/trace. EvolvedLegacy only.
+        internal static bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
+        internal static float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
+        internal static float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
+        internal static bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
+
         public static bool IsFlying => _active;
 
         // Toggle Fly Level. On engage, latch the current horizontal heading so we hold THIS course (not
@@ -1268,6 +1300,7 @@ namespace NuclearOptionMouseAim
         public static bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
         {
             PilotStrength = pilotStrength; // surface for the overlay's G-LOC warning (runs every FixedUpdate)
+            _collective = !fixedWing;      // latch airframe class for the hover-regime blend (EvolvedLegacy)
             // NOTE: deliberately NOT gated on Guards.MenusOpen(). While a menu/map is up the sim keeps
             // running, and we want the instructor to keep flying the plane toward the frozen marker
             // (where you last aimed) instead of disengaging and flying straight. The mouse is frozen
@@ -1474,6 +1507,20 @@ namespace NuclearOptionMouseAim
                 //   around 2deg — the v0.37 tail plateaued there. atan() on the raw error rolls out smoothly
                 //   instead. The linear servo keeps its full deadzone (low-speed wobble guard) untouched.
                 float vMag     = aircraft.rb != null ? aircraft.rb.velocity.magnitude : 200f;
+
+                // HOVER REGIME BLEND (v0.43, used by EvolvedLegacy). Bank-to-turn needs forward speed to
+                // produce a turn; on a collective aircraft (heli / hover-VTOL) at low FORWARD speed it just
+                // lays the aircraft over uselessly. _heliBlend ramps 0->1 as the nose-direction speed drops
+                // from HeliForwardSpeed to HeliHoverSpeed, and is forced to 1 while the game's AutoHover owns
+                // attitude. Fixed-wing airframes are always 0 (law identical to the graduated v0.42).
+                _vFwd    = aircraft.rb != null ? Vector3.Dot(aircraft.rb.velocity, t.forward) : vMag;
+                _hoverOn = aircraft.IsAutoHoverEnabled();
+                _heliBlend = _collective
+                    ? Mathf.Clamp01((Cfg.HeliForwardSpeed.Value - _vFwd)
+                                    / Mathf.Max(1f, Cfg.HeliForwardSpeed.Value - Cfg.HeliHoverSpeed.Value))
+                    : 0f;
+                if (_hoverOn) _heliBlend = 1f;
+
                 float azTR     = Mathf.Abs(azErr) <= 0.5f ? 0f : (Mathf.Abs(azErr) - 0.5f) * Mathf.Sign(azErr); // raw error, noise gate only
                 float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
                 float bankTR   = Mathf.Atan(omegaDes * Mathf.Max(50f, vMag) / 9.81f) * Mathf.Rad2Deg; // deg, signed
@@ -1602,7 +1649,7 @@ namespace NuclearOptionMouseAim
                         aoaR = TargetCalc.GetAngleOnAxis(t.forward, aircraft.rb.velocity, t.right);
                     ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
-                        spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY);
+                        spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd);
                 }
 
                 // Chase trace. Normal cadence ~5/sec; inside 10deg ("fine capture") ~10/sec at higher
@@ -1836,6 +1883,11 @@ namespace NuclearOptionMouseAim
             float Vb     = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);                                        // airspeed floor (reuse BankToTurnVmin)
             float bankTRdeg = Mathf.Atan(omega * Vb / gAcc) * Mathf.Rad2Deg;                                // speed-correct bank, signed deg
             float tBankE = Mathf.Clamp(bankTRdeg, -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);         // universal bank target
+            // HOVER REGIME (v0.43): fade the commanded bank to zero as _heliBlend->1. This alone converts
+            // the roll axis below into a pure wings-leveler (eFine = t.right.y + sin(0) = t.right.y) and
+            // self-cancels the coordinating pull (coordPull ∝ sin(tBankE) -> 0) — no other roll/pitch edits
+            // needed. Fixed-wing => _heliBlend==0 => tBankE unchanged (identical to v0.42).
+            tBankE *= (1f - _heliBlend);
 
             // COORDINATING PULL — same structure as Legacy but sizes off tBankE (so the pull matches the
             // bank actually commanded, not the passed-in targetBank from the weakness-gated pre-compute).
@@ -1846,8 +1898,12 @@ namespace NuclearOptionMouseAim
                 0f, Cfg.CoordPullCap.Value);
             tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
 
-            // YAW — identical to Legacy.
+            // YAW — Legacy, plus the hover-regime authority boost (v0.43). With the wings held level by the
+            // bank suppression above, local.x is ~the horizontal pointing error, so the existing yaw term
+            // already points the nose at the marker; in hover it's the ONLY thing turning the aircraft, so
+            // blend the scale up toward HeliYawScale as _heliBlend->1 to give the tail rotor the authority.
             yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
+            yawScale = Mathf.Lerp(yawScale, Cfg.HeliYawScale.Value, _heliBlend);
             float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
             tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
 
