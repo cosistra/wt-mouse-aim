@@ -22,7 +22,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.37.1";
+        public const string PluginVersion = "0.42.0";
 
         internal static ManualLogSource Log;
 
@@ -43,7 +43,7 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
-            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft — tune live via F1).");
+            Logger.LogInfo($"{PluginName} v{PluginVersion} loaded (world follow-point chase w/ body-frame roll-then-pull law [roll the lift vector onto the target, then pull up into it] + signed/clamped pull gate (no bunt) + yaw ease-down on big turns + pitch anti-overshoot brake + bank-servo azimuth deadband (anti fine-cone roll wobble) + roll-rate-smoothed damping (anti high-speed roll-PIO limit cycle) + fine integrator + per-axis manual override (anomaly logging suspended while you're on the stick) + Win32 raw mouse + 3rd-person orbit-camera override w/ hysteretic pole-stable horizon leveling + RMB free-look that keeps our orbit pivot (no snap) and eases the view back to your flight direction on release + AoA-true Fly Level toggle [{Cfg.FlyLevelKey.Value}] + phase/maneuver instrumentation + anomaly logging + all-aircraft control (fixed-wing + rotorcraft/VTOL, opt-out via ControlRotorcraft) + master ON/OFF hotkey [{Cfg.ToggleKey.Value}] + clean reticle-only HUD by default (debug readouts behind ShowDebugHud) + adjustable 3rd-person camera position (distance/height/side offsets) + 'I broke it, fix it please' reset-to-defaults button + measured-reactive LOADED-turn assist [shifts a weak-rudder side correction into a steep bank + real G-pull and fades the dead rudder out; the bank target is sized from a turn-RATE so it self-scales with airspeed (a small high-speed nudge commands the steep loaded bank that actually slews the nose), self-adapting per airframe/speed, no tuning needed] + maneuver recorder hotkey [{Cfg.RecordKey.Value}] -> timestamped CSV for tuning across aircraft (now tagged with the active control law per row) + A/B control-law toggle [{Cfg.ControlLawKey.Value}] switching Legacy<->EvolvedLegacy in flight (v0.42: EvolvedLegacy is now the DEFAULT/graduated law = universal atan(ωV/g) bank at all speeds/regimes + final-leg align-hold so the roll-to-align contribution persists until the target is genuinely close laterally, preventing the early wings-level-and-stop-short that Legacy shows in the final few degrees; v0.42 also lowered AssistTurnRateGain 1.5->0.9 to kill the high-speed eager/back-and-forth bank limit cycle. Legacy kept as the pristine A/B reference; BankToTurn abandoned and hidden from the toggle) — tune live via F1).");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -80,12 +80,30 @@ namespace NuclearOptionMouseAim
                 _toastUntil = Time.time + 2f;
                 _toastOn = on; // reuse the toast: cyan "REC" on, amber off (label switched in OnGUI)
                 _toastRec = true;
+                _toastLaw = false;
             }
-            else if (Time.time >= _toastUntil) _toastRec = false;
+            // Control-law cycle (v0.38; v0.42 made it a 2-way toggle). Ungated like the other hotkeys so it
+            // always works in flight; toggles Legacy <-> EvolvedLegacy, persists ControlLawMode (logged via
+            // the SettingChanged hook), and reuses the toast — labelled with the law name in OnGUI. BankToTurn
+            // is abandoned (not working) and excluded from the cycle; if ControlLawMode somehow holds it (a
+            // stale cfg value), the toggle rescues out to Legacy. ApplyBankToTurn is retained but unreachable.
+            else if (Input.GetKeyDown(Cfg.ControlLawKey.Value))
+            {
+                var next = Cfg.ControlLawMode.Value == ControlLawMode.Legacy
+                    ? ControlLawMode.EvolvedLegacy : ControlLawMode.Legacy;
+                Cfg.ControlLawMode.Value = next;
+                _toastUntil = Time.time + 2f;
+                _toastLaw = true;
+                _toastRec = false;
+                Log.LogInfo($"[controllaw] switched to {next}.");
+            }
+            else if (Time.time >= _toastUntil) { _toastRec = false; _toastLaw = false; }
         }
 
         // True while the active toast is a recorder toast (so OnGUI labels it REC/REC OFF, not ON/OFF).
         private static bool _toastRec;
+        // True while the active toast is a control-law toast (so OnGUI names the law instead of ON/OFF).
+        private static bool _toastLaw;
 
         private void OnGUI()
         {
@@ -93,9 +111,11 @@ namespace NuclearOptionMouseAim
             if (Time.time < _toastUntil)
             {
                 var tc = GUI.color;
-                GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
-                const float tw = 220f;
-                string msg = _toastRec ? (_toastOn ? "MouseAim  REC START" : "MouseAim  REC STOP")
+                // Law toast is always cyan (informational); REC/master toasts stay cyan-on / amber-off.
+                GUI.color = (_toastLaw || _toastOn) ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
+                const float tw = 240f;
+                string msg = _toastLaw ? $"CONTROL LAW  {Cfg.ControlLawMode.Value}"
+                           : _toastRec ? (_toastOn ? "MouseAim  REC START" : "MouseAim  REC STOP")
                                        : (_toastOn ? "WT MouseAim  ON"      : "WT MouseAim  OFF");
                 GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f), msg);
                 GUI.color = tc;
@@ -161,7 +181,7 @@ namespace NuclearOptionMouseAim
                             : ChaseController.IsFlying ? "FLYING (mod owns stick)"
                             : "native";
                 GUI.Label(new Rect(12f, 12f, 560f, 22f),
-                    $"WT MouseAim  off={off:0.0}°  cone={half:0}°  [{ctrl}]");
+                    $"WT MouseAim  off={off:0.0}°  cone={half:0}°  law={Cfg.ControlLawMode.Value}  [{ctrl}]");
                 // Instructor's live stick command (what the mod is telling the plane, before manual override).
                 GUI.Label(new Rect(12f, 30f, 560f, 22f),
                     $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
@@ -254,6 +274,13 @@ namespace NuclearOptionMouseAim
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Which control law produces the per-axis stick targets (A/B switch, v0.38). Legacy is the
+    // accreted v0.37 law (default during development); BankToTurn / EvolvedLegacy are the phased
+    // rearch laws. Cycled in flight via ControlLawKey (F9); selectable live in the F1 menu. See the
+    // phased rearchitecture plan: Apply branches on this to pick ApplyLegacy/ApplyBankToTurn/ApplyEvolvedLegacy.
+    internal enum ControlLawMode { Legacy, BankToTurn, EvolvedLegacy }
+
+    // ---------------------------------------------------------------------------------------------
     // Live-tunable config (BepInEx.ConfigurationManager can edit these in-game with F1).
     internal static class Cfg
     {
@@ -268,6 +295,11 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> MaxAimAngle;      // cone half-angle (deg) the marker is clamped within
         public static ConfigEntry<float> AimDistance;      // metres ahead the aim point is placed (projection only)
         public static ConfigEntry<bool>  InvertPitch;
+
+        // --- Control-law A/B switch (v0.38). Pick which law turns the marker error into stick commands,
+        // and a hotkey that cycles it in flight so Legacy vs the rearch laws can be compared back-to-back.
+        public static ConfigEntry<ControlLawMode> ControlLawMode;  // active control law (default Legacy)
+        public static ConfigEntry<KeyCode>        ControlLawKey;   // cycle the active law in-flight (default F9)
 
         // --- Chase law (writes flight controls). Per-axis gains may be negative to flip a sign.
         public static ConfigEntry<bool>  WriteControl;        // actually drive the stick (off = overlay only)
@@ -319,6 +351,18 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> YawWeakFade;         // 0..1 how far the rudder fades out as the assist rises
         public static ConfigEntry<float> AssistTurnRateGain;  // 1/s: turn-rate-targeted bank (self-scales the loaded bank with airspeed)
         public static ConfigEntry<float> CoordPullReleaseAngle;// deg: error cone inside which the coordinating pull eases off
+
+        // --- Bank-to-turn law (Phase 1, v0.39): physics-based unified law knobs that have no Legacy
+        // equivalent. The rest of the BankToTurn law REUSES the existing Control gains (MaxBankAngle,
+        // RollGain/PitchGain/YawGain, RollDamping, RollRateSmoothing, ChaseDamping, the integrator trio,
+        // and AssistTurnRateGain as the turn-rate gain Kturn).
+        public static ConfigEntry<float> BankToTurnVmin;      // m/s: airspeed floor in atan(omega*V/g) so low-speed/hover stays sane
+        public static ConfigEntry<float> BankToTurnOmegaMax;  // rad/s: cap on the demanded turn rate (limits commanded bank + load factor)
+        public static ConfigEntry<float> BankToTurnDeadband;  // deg: pointing-error deadband on the turn-rate demand (anti on-heading wobble)
+
+        // --- EvolvedLegacy law (Phase 2, v0.40): knob for the final-leg align-hold that has no Legacy
+        // equivalent. All other EvolvedLegacy gains reuse the existing Control/Assist binds.
+        public static ConfigEntry<float> EvolvedAlignHoldDeg; // deg: |azErr| below which the align-hold releases (leveling is allowed)
 
         // --- Maneuver recorder (v0.35): a hotkey dumps a bounded high-rate CSV of the control state so a
         // problem can be captured cleanly across aircraft and the assist calibrated against real data.
@@ -384,6 +428,10 @@ namespace NuclearOptionMouseAim
             InvertPitch      = cf.Bind("Aim", "InvertPitch", false,
                 "Flips vertical mouse so the circle (and the plane) aim up vs. down. Also flips the camera-follow tilt, since both follow the same circle.");
 
+            ControlLawMode      = cf.Bind("Control", "ControlLawMode", NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy,
+                "Which control law turns the aim-marker error into stick commands (A/B switch, v0.38). EvolvedLegacy = the DEFAULT as of v0.42 (graduated): evolved Legacy with a universal atan(omega*V/g) bank at all speeds (not just when yaw-weak) + final-leg align-hold that keeps the roll-to-align contribution engaged until the target is genuinely close laterally (no early wings-level / park-short). Legacy = the accreted v0.37 law, kept as the pristine A/B reference (pick it to compare). BankToTurn = the abandoned Phase-1 experiment (not working) — HIDDEN from the F9 cycle as of v0.42; code retained but not reachable via the toggle. Cycle Legacy<->EvolvedLegacy in flight with ControlLawKey (default F9); an on-screen toast confirms the active law and the maneuver-recorder CSV tags each row with it.");
+            ControlLawKey       = cf.Bind("Control", "ControlLawKey", KeyCode.F9,
+                "Key that toggles the active control law in flight (Legacy <-> EvolvedLegacy as of v0.42; BankToTurn is excluded — abandoned), updating ControlLawMode. Default F9 (F7=Fly Level, F8=Record, F10=master toggle are taken). A brief on-screen toast names the law it switched to. Pick any single key.");
             WriteControl        = cf.Bind("Control", "WriteControl", true,
                 "Let the mod actually fly the plane (drive the stick). Off = overlay/camera only, you keep manual control — handy for A/B comparing the feel.");
             ControlRotorcraft   = cf.Bind("Control", "ControlRotorcraft", true,
@@ -480,12 +528,25 @@ namespace NuclearOptionMouseAim
             YawWeakFade         = cf.Bind("Control", "YawWeakFade", 1.0f, new ConfigDescription(
                 "How far the rudder is faded OUT as the assist rises. When the rudder is measured ineffective (high speed) it's just sideslip and drag doing nothing for the heading, so the law commits to bank-and-pull instead. At full assist the fine-regime yaw command is scaled by (1 - this), so 1.0 leaves ~30% rudder for a little coordination (never fully zero), 0 = keep full rudder alongside the bank+pull. Low speed (rudder still effective) is unaffected either way. Lower if you want some rudder retained when weak; raise to commit harder to bank+pull.",
                 new AcceptableValueRange<float>(0f, 1f)));
-            AssistTurnRateGain  = cf.Bind("Control", "AssistTurnRateGain", 1.5f, new ConfigDescription(
-                "THE high-speed fix (v0.37). The old assist banked PROPORTIONAL to the heading error, so a small nudge commanded a shallow bank that turns fast at low speed but barely at all when fast (a 12 deg bank at 400 m/s slews the nose ~0.3 deg/s — the nose mushed the last few degrees). Instead the bank is now sized from a target TURN-RATE (proportional to error, this gain in 1/s) converted to the bank that physically holds it: phi = atan(omega*V/g). Because V is in there, the SAME error commands a steep loaded bank when fast and a gentle one when slow — automatically, no per-speed tuning. Blended in by measured yaw-weakness, so low speed / strong-yaw airframes keep the old gentle servo untouched. Higher = asks for a faster turn (steeper bank, snappier, more G) for a given error; lower = gentler. ~1.5 slews a high-speed nudge onto aim in ~1 s. Lower if fast nudges now overshoot or feel violent.",
+            AssistTurnRateGain  = cf.Bind("Control", "AssistTurnRateGain", 0.9f, new ConfigDescription(
+                "THE high-speed fix (v0.37). The old assist banked PROPORTIONAL to the heading error, so a small nudge commanded a shallow bank that turns fast at low speed but barely at all when fast (a 12 deg bank at 400 m/s slews the nose ~0.3 deg/s — the nose mushed the last few degrees). Instead the bank is now sized from a target TURN-RATE (proportional to error, this gain in 1/s) converted to the bank that physically holds it: phi = atan(omega*V/g). Because V is in there, the SAME error commands a steep loaded bank when fast and a gentle one when slow — automatically, no per-speed tuning. Blended in by measured yaw-weakness, so low speed / strong-yaw airframes keep the old gentle servo untouched. Higher = asks for a faster turn (steeper bank, snappier, more G) for a given error; lower = gentler. v0.42: default lowered 1.5 -> 0.9 — on the now-default EvolvedLegacy law (which uses this atan(omega*V/g) bank UNCONDITIONALLY at all speeds, not just when yaw-weak) 1.5 made a small high-speed nudge saturate the bank to ~72-85 deg, overshoot the heading, and rock back and forth; 0.9 keeps the bank proportionate so it settles on aim without the limit cycle. Raise toward 1.2 if the last few high-speed degrees mush; lower if fast nudges still feel violent.",
                 new AcceptableValueRange<float>(0f, 4f)));
             CoordPullReleaseAngle = cf.Bind("Control", "CoordPullReleaseAngle", 2.0f, new ConfigDescription(
                 "Heading-error cone (deg) inside which the coordinating pull eases back to zero. Outside it the pull stays at full strength so the loaded turn holds its G right down through the tail of the correction (the v0.36 pull tapered over the whole 6 deg fine cone, so it was already half-gone at 3 deg and the nose mushed); inside it the pull bleeds off so the bank+pull releases cleanly onto aim instead of overshooting. ~2 deg keeps the turn loaded until the nose is nearly on, then lets go. Raise if it overshoots / balloons past aim; lower if the very last degree still creeps.",
                 new AcceptableValueRange<float>(0.5f, 8f)));
+            BankToTurnVmin      = cf.Bind("Control", "BankToTurnVmin", 50f, new ConfigDescription(
+                "Bank-to-turn law (Phase 1) only. Airspeed FLOOR (m/s) used inside the speed-correct bank/load-factor physics phi=atan(omega*V/g) and n=sqrt(1+(omega*V/g)^2). The law banks and pulls in proportion to airspeed V; at very low speed / hover V->0 would collapse the commanded bank to nothing, so V is floored at this value to keep the maths sane (a gentle, sensible bank rather than zero). Has no effect above this speed. ~50 m/s is a safe floor; raise it if low-speed turns feel too weak, lower it toward true stall speed for more honest slow-flight banking.",
+                new AcceptableValueRange<float>(10f, 150f)));
+            BankToTurnOmegaMax  = cf.Bind("Control", "BankToTurnOmegaMax", 0.6f, new ConfigDescription(
+                "Bank-to-turn law (Phase 1) only. CAP (rad/s) on the demanded turn rate omega. The law asks for a turn rate proportional to the pointing error (omega = Kturn*err, Kturn = AssistTurnRateGain), then sizes the bank phi=atan(omega*V/g) and the load factor n=sqrt(1+(omega*V/g)^2) to sustain it. This cap bounds how aggressive a large pointing error gets: it limits the steepest commanded bank and the hardest pull (more G the faster you go, since n scales with V). ~0.6 rad/s (~34 deg/s) is a firm but controlled slew. Lower for gentler maximum turns; raise if large reorientations feel sluggish (watch for over-G / energy bleed at high speed).",
+                new AcceptableValueRange<float>(0.1f, 1.5f)));
+            BankToTurnDeadband  = cf.Bind("Control", "BankToTurnDeadband", 0.5f, new ConfigDescription(
+                "Bank-to-turn law (Phase 1) only. Pointing-error DEADBAND (deg) on the turn-rate demand — the BankToTurn replacement for FineBankDeadzone. Below this nose-to-marker error the demanded turn rate is ZERO (wings level, no pull), so the law doesn't chase sub-degree noise into an on-heading roll/pitch dither; the retained fine integrator still lands the nose on the marker. Above it the demand ramps in smoothly (error past the deadband feeds the turn rate). 0 = off; raise if the wings/nose still wobble when on-heading, lower if small corrections feel like they ignore the first fraction of a degree.",
+                new AcceptableValueRange<float>(0f, 5f)));
+            EvolvedAlignHoldDeg = cf.Bind("Control", "EvolvedAlignHoldDeg", 5.0f, new ConfigDescription(
+                "EvolvedLegacy law only. When the total nose-off-marker angle (off) drops inside FineAngle, Legacy immediately snaps the roll blend to pure wings-level (bigTurn->0) even if the target is still a few degrees SIDEWAYS — it stops rolling to align early and the nose parks short. This knob keeps the roll-to-align contribution alive through the final degrees: the blend weight is MAX(bigTurn, lateralHold) where lateralHold = clamp01(|azErr|/EvolvedAlignHoldDeg), so as long as |azErr| exceeds this value the law keeps rolling to put the target at 12-o'clock instead of leveling early. When BOTH off and |azErr| are near zero the law settles wings-level on target — convergent, no limit cycle. ~5 deg is a reasonable start: raise if the nose still parks short or wings-level too early; lower toward 1-2 if it over-rolls past the target in the final stage.",
+                new AcceptableValueRange<float>(0f, 15f)));
+
             RecordKey           = cf.Bind("Recorder", "RecordKey", KeyCode.F8,
                 "Key that starts/stops the maneuver recorder. Press once to begin capturing, fly the maneuver, press again to stop — each capture writes its own timestamped CSV (mouseaim-rec-<date-time>.csv) into the BepInEx folder next to LogOutput.log, one row per sample. A 'REC' marker shows on-screen while it's running. For diagnosing/tuning feel across different aircraft. Default F8.");
             RecordRateHz        = cf.Bind("Recorder", "RecordRateHz", 20f, new ConfigDescription(
@@ -978,7 +1039,7 @@ namespace NuclearOptionMouseAim
         // CSV header — keep in lockstep with the Sample() row below.
         private const string Header =
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
-            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY";
+            "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -1047,7 +1108,7 @@ namespace NuclearOptionMouseAim
                     $"{now:0.000},{off:0.00},{azErr:0.00},{elevErr:0.00},{phi:0.0},{bigTurn:0.000}," +
                     $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
-                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0}");
+                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}");
                 _samples++;
             }
             catch (System.Exception e)
@@ -1447,77 +1508,31 @@ namespace NuclearOptionMouseAim
                 }
                 else { _iPitch = _iYaw = 0f; }
 
-                // PITCH — pull up toward the target, gated so a big turn only pulls once the lift vector is
-                // ON it (and NEVER pushes: the gate is clamped at 0, killing the negative-G bunt the old
-                // |local.y| symmetric coord term produced when a roll swung the target momentarily below the
-                // nose). In the fine cone (bigTurn->0) the gate is 1 — the old direct pull, so a gentle
-                // nose-down to a low marker is still allowed. -local.y is the pull command (nose-up = -pitch).
-                float pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
-                // COORDINATING PULL (v0.35, reshaped v0.36) — the "pitch INTO the bank" half of the assist
-                // and the REAL driver of the correction. Once banked, a level turn needs back-pressure or
-                // gravity just drops the nose and the bank does nothing (the v0.35 tail mushed at 0.7-0.9g
-                // with ~0 pull). Add a nose-up pull (nose-up = NEGATIVE pitch) proportional to the commanded
-                // bank, scaled by assist. v0.37: the pull stays at FULL strength outside CoordPullReleaseAngle
-                // (~2 deg) and only eases inside it — so the loaded turn holds its G right through the tail of
-                // the correction (the v0.36 taper over the whole 6 deg fine cone was already half-gone at 3 deg,
-                // so the nose mushed) and then releases cleanly onto aim. With the turn-rate bank above keeping
-                // sin(targetBank) high in the tail, this is what actually loads the G. ALWAYS a pull: clamped
-                // >= 0 (never a push/bunt) and capped (CoordPullCap). Convergent: -> 0 as azErr -> 0 (taper)
-                // and as the bank rolls out.
-                float pullTaper = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.5f, Cfg.CoordPullReleaseAngle.Value));
-                float coordPull = Mathf.Clamp(
-                    Cfg.CoordPullGain.Value * Mathf.Abs(Mathf.Sin(targetBank * Mathf.Deg2Rad))
-                    * pullTaper * assist,
-                    0f, Cfg.CoordPullCap.Value);
-                float tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
-
-                // YAW — ease rudder authority down during a big turn (the logs showed yaw pinned ±1 adding to
-                // the messy feel) so the bank + pull do the work; full authority returns in the fine cone for
-                // final alignment. v0.36: ALSO fade the rudder P-term out as the assist rises (YawWeakFade) —
-                // when the rudder is measured weak it's pure sideslip/drag doing nothing for the heading, so
-                // commit to bank+pull instead. Keep the small capped _iYaw integrator for final low-speed
-                // alignment (assist ~ 0 there, so this is identically stock at low speed).
-                float yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
-                float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
-                float tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
-
-                // ROLL (v0.26): blend the FINE wings-level/azimuth bank servo (small errors) with a BODY-
-                // FRAME roll-to-align (big turns), in matched sin-magnitude units so RollGain/RollDamping
-                // keep their meaning. targetBank was computed up front (assist-aware bank servo) so the
-                // coordinating pull could size off it; here it just becomes the roll error.
-                //   eFine  — the v0.25 bank servo error: a target bank proportional to the heading (azimuth)
-                //            error, capped at MaxBankAngle, null at that bank. t.right.y is the world-up
-                //            component on the right wing (0 = level, <0 = right wing down), so
-                //            (t.right.y + sin(targetBank)) is the bank error. Used inside the fine cone where
-                //            the horizon bank is meaningful and the wings should level on-heading. v0.35: the
-                //            deadband/gain that built targetBank are assist-aware, so when the rudder is weak
-                //            a small side nudge banks instead of waiting on it (the wobble-guard deadband
-                //            still applies at assist 0 — normal on-heading flight is unchanged).
-                //   eAlign — roll the SHORT way to put the target at 12 o'clock: monotonic in phi (no false
-                //            equilibrium except exactly ±180°, broken by any noise), so a target straight off
-                //            the wing or below still rolls in the short way instead of pinning. This is
-                //            attitude-robust where eFine degenerates (steep nose => meaningless horizon bank).
-                // bigTurn blends fine->align; subtract the roll RATE (RollDamping) so it eases on without
-                // overshooting. As the turn completes off shrinks, bigTurn->0, and the fine servo levels out.
-                float eFine  = t.right.y + Mathf.Sin(targetBank * Mathf.Deg2Rad);
-                float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
-                float rollErr = Mathf.Lerp(eFine, eAlign, bigTurn);
-
-                // ROLL-RATE LOW-PASS (v0.31) — fix for the high-speed roll wobble. When level on-heading the
-                // roll P-term (eFine) is ~0, so the command is essentially -rollRate*RollDamping*RollGain. The
-                // rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is
-                // responsive enough that this DELAYED rate feedback flips from damping to DRIVING at ~6-7 Hz —
-                // a self-sustaining limit cycle (logs: R=±0.05 tracking rr=±0.2, bank<0.2deg). Its amplitude is
-                // set by the loop delay, not the gain, which is why the v0.30 qScale gain-cut to 0.35x left it
-                // unchanged. Smoothing the rate (first-order LPF, time constant RollRateSmoothing) rolls off the
-                // high-freq content so the damping only opposes real low-freq roll motion — breaking the cycle
-                // while keeping turn damping. tau=0 -> raw rate (old behaviour).
-                float rollTau = Cfg.RollRateSmoothing.Value;
-                if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
-                else _rollRateFilt = rollRate;
-                float rollRateF = _rollRateFilt;
-
-                float tgtR = Mathf.Clamp((rollErr - rollRateF * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
+                // ---- PER-AXIS CONTROL LAW (A/B switch, v0.38) ----------------------------------------
+                // Branch on the active law to turn the shared pre-compute above into the three target stick
+                // values tgtP/tgtR/tgtY. Everything above (aimDir/local/off/phi/rates/azErr/flight state/
+                // yaw-weakness/targetBank/integrator) and everything below (slew, manual override, write-out,
+                // anomaly/recorder/phase) is SHARED across all laws — only the per-axis shaping differs here.
+                // pullGate/yawScale/coordPull are surfaced for the debug trace (the only post-stage consumers).
+                float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
+                switch (Cfg.ControlLawMode.Value)
+                {
+                    case NuclearOptionMouseAim.ControlLawMode.BankToTurn:
+                        ApplyBankToTurn(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
+                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
+                        break;
+                    case NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy:
+                        ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
+                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
+                        break;
+                    default: // Legacy (the hard-won v0.37 law; default during development)
+                        ApplyLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
+                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
+                        break;
+                }
 
                 // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
                 // Symmetric on all three axes. _out* stay PURE chase values — manual override blends on
@@ -1633,6 +1648,230 @@ namespace NuclearOptionMouseAim
                 LastPitch = LastYaw = LastRoll = 0f; // instructor not flying — readout reads zero
             }
             else { LastPitch = LastYaw = LastRoll = 0f; }
+        }
+
+        // ---- CONTROL LAW: LEGACY (v0.37) ---------------------------------------------------------
+        // The accreted v0.37 per-axis law, extracted VERBATIM from Apply (pure refactor, no behaviour
+        // change — with ControlLawMode=Legacy the mod is byte-for-byte identical to before). Takes the
+        // shared pre-computed locals from Apply, mutates the legacy member integrators/filters it already
+        // owned (_iPitch/_iYaw are wound above; _rollRateFilt is the roll-rate low-pass), and returns the
+        // three target stick values plus the pullGate/yawScale/coordPull terms the debug trace logs.
+        private static void ApplyLegacy(
+            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
+            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float pitchDamp, float damp, float assist, float dt,
+            out float tgtP, out float tgtR, out float tgtY,
+            out float pullGate, out float yawScale, out float coordPull)
+        {
+            // off/vMag are unused by Legacy (Phase-1 flight-state inputs added to the shared signature);
+            // it senses speed via the targetBank computed in Apply. Kept for signature parity across laws.
+            // PITCH — pull up toward the target, gated so a big turn only pulls once the lift vector is
+            // ON it (and NEVER pushes: the gate is clamped at 0, killing the negative-G bunt the old
+            // |local.y| symmetric coord term produced when a roll swung the target momentarily below the
+            // nose). In the fine cone (bigTurn->0) the gate is 1 — the old direct pull, so a gentle
+            // nose-down to a low marker is still allowed. -local.y is the pull command (nose-up = -pitch).
+            pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
+            // COORDINATING PULL (v0.35, reshaped v0.36) — the "pitch INTO the bank" half of the assist
+            // and the REAL driver of the correction. Once banked, a level turn needs back-pressure or
+            // gravity just drops the nose and the bank does nothing (the v0.35 tail mushed at 0.7-0.9g
+            // with ~0 pull). Add a nose-up pull (nose-up = NEGATIVE pitch) proportional to the commanded
+            // bank, scaled by assist. v0.37: the pull stays at FULL strength outside CoordPullReleaseAngle
+            // (~2 deg) and only eases inside it — so the loaded turn holds its G right through the tail of
+            // the correction (the v0.36 taper over the whole 6 deg fine cone was already half-gone at 3 deg,
+            // so the nose mushed) and then releases cleanly onto aim. With the turn-rate bank above keeping
+            // sin(targetBank) high in the tail, this is what actually loads the G. ALWAYS a pull: clamped
+            // >= 0 (never a push/bunt) and capped (CoordPullCap). Convergent: -> 0 as azErr -> 0 (taper)
+            // and as the bank rolls out.
+            float pullTaper = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.5f, Cfg.CoordPullReleaseAngle.Value));
+            coordPull = Mathf.Clamp(
+                Cfg.CoordPullGain.Value * Mathf.Abs(Mathf.Sin(targetBank * Mathf.Deg2Rad))
+                * pullTaper * assist,
+                0f, Cfg.CoordPullCap.Value);
+            tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
+
+            // YAW — ease rudder authority down during a big turn (the logs showed yaw pinned ±1 adding to
+            // the messy feel) so the bank + pull do the work; full authority returns in the fine cone for
+            // final alignment. v0.36: ALSO fade the rudder P-term out as the assist rises (YawWeakFade) —
+            // when the rudder is measured weak it's pure sideslip/drag doing nothing for the heading, so
+            // commit to bank+pull instead. Keep the small capped _iYaw integrator for final low-speed
+            // alignment (assist ~ 0 there, so this is identically stock at low speed).
+            yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
+            float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
+            tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
+
+            // ROLL (v0.26): blend the FINE wings-level/azimuth bank servo (small errors) with a BODY-
+            // FRAME roll-to-align (big turns), in matched sin-magnitude units so RollGain/RollDamping
+            // keep their meaning. targetBank was computed up front (assist-aware bank servo) so the
+            // coordinating pull could size off it; here it just becomes the roll error.
+            //   eFine  — the v0.25 bank servo error: a target bank proportional to the heading (azimuth)
+            //            error, capped at MaxBankAngle, null at that bank. t.right.y is the world-up
+            //            component on the right wing (0 = level, <0 = right wing down), so
+            //            (t.right.y + sin(targetBank)) is the bank error. Used inside the fine cone where
+            //            the horizon bank is meaningful and the wings should level on-heading. v0.35: the
+            //            deadband/gain that built targetBank are assist-aware, so when the rudder is weak
+            //            a small side nudge banks instead of waiting on it (the wobble-guard deadband
+            //            still applies at assist 0 — normal on-heading flight is unchanged).
+            //   eAlign — roll the SHORT way to put the target at 12 o'clock: monotonic in phi (no false
+            //            equilibrium except exactly ±180°, broken by any noise), so a target straight off
+            //            the wing or below still rolls in the short way instead of pinning. This is
+            //            attitude-robust where eFine degenerates (steep nose => meaningless horizon bank).
+            // bigTurn blends fine->align; subtract the roll RATE (RollDamping) so it eases on without
+            // overshooting. As the turn completes off shrinks, bigTurn->0, and the fine servo levels out.
+            float eFine  = t.right.y + Mathf.Sin(targetBank * Mathf.Deg2Rad);
+            float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
+            float rollErr = Mathf.Lerp(eFine, eAlign, bigTurn);
+
+            // ROLL-RATE LOW-PASS (v0.31) — fix for the high-speed roll wobble. When level on-heading the
+            // roll P-term (eFine) is ~0, so the command is essentially -rollRate*RollDamping*RollGain. The
+            // rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is
+            // responsive enough that this DELAYED rate feedback flips from damping to DRIVING at ~6-7 Hz —
+            // a self-sustaining limit cycle (logs: R=±0.05 tracking rr=±0.2, bank<0.2deg). Its amplitude is
+            // set by the loop delay, not the gain, which is why the v0.30 qScale gain-cut to 0.35x left it
+            // unchanged. Smoothing the rate (first-order LPF, time constant RollRateSmoothing) rolls off the
+            // high-freq content so the damping only opposes real low-freq roll motion — breaking the cycle
+            // while keeping turn damping. tau=0 -> raw rate (old behaviour).
+            float rollTau = Cfg.RollRateSmoothing.Value;
+            if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
+            else _rollRateFilt = rollRate;
+            float rollRateF = _rollRateFilt;
+
+            tgtR = Mathf.Clamp((rollErr - rollRateF * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
+        }
+
+        // ---- CONTROL LAW: BANK-TO-TURN (Phase 1, repaired v0.41) ---------------------------------
+        // Full-sphere point-and-pull law. ROLL the lift vector (body-up) onto the target via phi
+        // (eAlign = phi/90, clamped ±1.5 — full authority at phi=±180, no dead spot below the nose),
+        // then PULL with a speed-aware load factor; in the fine cone use a SIGNED direct nudge that
+        // allows nose-down. bigTurn blends fine<->big-turn regimes (same as Legacy). No new config
+        // added: reuses BankToTurnVmin/OmegaMax/Deadband/AssistTurnRateGain/RollGain/RollDamping/
+        // RollRateSmoothing/PitchGain/YawGain/TurnYawScale/ChaseDamping and the wound _iPitch/_iYaw.
+        private static void ApplyBankToTurn(
+            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
+            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float pitchDamp, float damp, float assist, float dt,
+            out float tgtP, out float tgtR, out float tgtY,
+            out float pullGate, out float yawScale, out float coordPull)
+        {
+            const float g = 9.81f;
+
+            // --- ROLL: lift vector onto target, full-sphere (no phi=180 dead spot) ------------------
+            // phi is the target's bearing around the boresight: 0=above/12-o'clock, ±90=off a wing,
+            // ±180=below. eAlign = phi/90 (clamped to ±1.5) rolls the SHORT way to put the target at
+            // 12 o'clock. Unlike the old sin(phi) shaping (which gave ~0 at phi=±180 and created a
+            // DEAD SPOT for below-nose targets), the linear clamp stays at full authority through
+            // phi=±180, so the aircraft rolls toward inverted to point the lift vector at a below target.
+            // In the fine cone (bigTurn~0) blend to eLevelFine (wings-level) so there's no spurious
+            // bank when nearly on target.
+            float eAlign     = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
+            float eLevelFine = t.right.y;                              // wings-level error: 0=level, <0=right wing down
+            float rollErr    = Mathf.Lerp(eLevelFine, eAlign, bigTurn);
+
+            // ROLL-RATE LOW-PASS (anti high-speed roll-PIO, identical to Legacy/EvolvedLegacy).
+            // The bank loop MUST be PD-damped; the low-pass prevents the high-freq delay from
+            // turning rate feedback into a self-sustaining limit cycle (v0.31 fix, v0.38 noted).
+            float rollTau = Cfg.RollRateSmoothing.Value;
+            if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
+            else _rollRateFilt = rollRate;
+            tgtR = Mathf.Clamp((rollErr - _rollRateFilt * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
+
+            // --- PITCH: fine = signed direct nudge (allows nose-down); big = speed-aware load-factor ---
+            // FINE CONE (bigTurn~0): -local.y*sens*fineGain is SIGNED — target above => local.y>0 =>
+            // nose-up (negative pitch); target BELOW => local.y<0 => nose-DOWN (positive pitch). This
+            // restores the nose-down capability that was broken when the old code clamped pull to >=0.
+            //
+            // BIG TURN (bigTurn~1): compute the speed-aware load factor from the pointing error past the
+            // deadband. The desired turn rate omega = Kturn*errDeg(rad/s) capped at OmegaMax; the
+            // load factor that physically holds that turn at speed V is n = sqrt(1+(omega*V/g)^2).
+            // The pull (nDes-1)*sens is gated by pullGate=clamp01(alignFrac): ROLL BEFORE PULL —
+            // the pull only engages once the lift vector faces the target (alignFrac>0). Clamped >=0
+            // so the big-turn pull is always nose-up; it is FADED OUT (bigTurn->0) before the fine
+            // signed nudge takes over, so nose-down is always available in the fine cone.
+            float offRad = Mathf.Max(0f, off - Cfg.BankToTurnDeadband.Value) * Mathf.Deg2Rad;
+            float omega  = Mathf.Min(offRad * Cfg.AssistTurnRateGain.Value, Cfg.BankToTurnOmegaMax.Value);
+            float V      = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);
+            float nDes   = Mathf.Sqrt(1f + (omega * V / g) * (omega * V / g));
+            pullGate     = Mathf.Clamp01(alignFrac);                  // roll-then-pull gate (0 when lift vector faces away)
+            float bigPull   = (nDes - 1f) * sens * pullGate;          // >=0, nose-UP in big turns
+            float finePitch = -local.y * sens * fineGain;             // SIGNED: nose-down for below target
+            coordPull = bigPull;                                       // surfaced for debug trace
+            // nose-up = NEGATIVE pitch; fine term already signed; big pull enters as -bigPull (nose-up).
+            tgtP = Mathf.Clamp((Mathf.Lerp(finePitch, -bigPull, bigTurn) + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
+
+            // --- YAW: coordination, full in fine cone, eased in big turn (same as Legacy) -----------
+            yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
+            tgtY = Mathf.Clamp((local.x * sens * fineGain * yawScale + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
+        }
+
+        // ---- CONTROL LAW: EVOLVED LEGACY (Phase 2, v0.40) ----------------------------------------
+        // NOTE: body-rate Cascade (originally planned for this slot) is deferred.
+        // This slot now holds the EvolvedLegacy law: a copy of ApplyLegacy's body with two targeted
+        // changes:
+        //   2a — Universal speed-aware bank: use atan(omega*V/g) for the bank target at ALL speeds/
+        //        regimes, not just when yaw-weakness is high. Decouples the high-speed bank sizing
+        //        from the weakness estimator (_yawWeak gating), making the loaded-turn bank the
+        //        default behaviour rather than the assist-path behaviour.
+        //   2b — Final-leg align-hold: keep the roll-to-align contribution engaged through the final
+        //        degrees until |azErr| is also small, so the law doesn't level early and park short.
+        // Everything else (pitch, yaw, fine integrator winding, roll-rate low-pass) is byte-for-byte
+        // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
+        private static void ApplyEvolvedLegacy(
+            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
+            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float pitchDamp, float damp, float assist, float dt,
+            out float tgtP, out float tgtR, out float tgtY,
+            out float pullGate, out float yawScale, out float coordPull)
+        {
+            // off/vMag are used here (unlike Legacy where vMag was unused).
+
+            // PITCH — identical to Legacy.
+            pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
+
+            // CHANGE 2a — compute the speed-aware bank target LOCALLY and unconditionally.
+            // Legacy uses the passed-in targetBank which blends linear->atan() only when _yawWeak is high.
+            // Here we always use atan(omega*V/g) — the same formula as the turn-rate path in Apply's
+            // shared pre-compute (v0.37.1: tiny noise gate on raw azErr, not the big deadzone azBank carries).
+            const float gAcc = 9.81f;
+            float azTR  = Mathf.Abs(azErr) <= 0.5f ? 0f : (Mathf.Abs(azErr) - 0.5f) * Mathf.Sign(azErr); // raw err, noise gate
+            float omega  = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;                              // rad/s, signed
+            float Vb     = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);                                        // airspeed floor (reuse BankToTurnVmin)
+            float bankTRdeg = Mathf.Atan(omega * Vb / gAcc) * Mathf.Rad2Deg;                                // speed-correct bank, signed deg
+            float tBankE = Mathf.Clamp(bankTRdeg, -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);         // universal bank target
+
+            // COORDINATING PULL — same structure as Legacy but sizes off tBankE (so the pull matches the
+            // bank actually commanded, not the passed-in targetBank from the weakness-gated pre-compute).
+            float pullTaper = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.5f, Cfg.CoordPullReleaseAngle.Value));
+            coordPull = Mathf.Clamp(
+                Cfg.CoordPullGain.Value * Mathf.Abs(Mathf.Sin(tBankE * Mathf.Deg2Rad))
+                * pullTaper * assist,
+                0f, Cfg.CoordPullCap.Value);
+            tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
+
+            // YAW — identical to Legacy.
+            yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
+            float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
+            tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
+
+            // ROLL — same eFine/eAlign structure as Legacy, with two changes:
+            //   2a: use tBankE (universal speed-aware bank) instead of passed-in targetBank for eFine.
+            //   2b: the blend weight is MAX(bigTurn, lateralHold) so the align contribution stays engaged
+            //       while |azErr| > EvolvedAlignHoldDeg, even after bigTurn has faded to 0. Convergent:
+            //       as both off->0 and azErr->0, lateralHold->0 and bigTurn->0, so rollErr->eFine (wings-
+            //       level). No residual bank once on-target; no limit cycle. yawScale already restores full
+            //       yaw authority as bigTurn->0 (legacy behaviour preserved — align-hold does NOT gate yaw).
+            float eFine  = t.right.y + Mathf.Sin(tBankE * Mathf.Deg2Rad); // 2a: tBankE (universal speed-aware)
+            float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
+            // 2b: lateral-error hold weight — stays > 0 while |azErr| > EvolvedAlignHoldDeg.
+            float lateralHold = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.01f, Cfg.EvolvedAlignHoldDeg.Value));
+            float blendWeight = Mathf.Max(bigTurn, lateralHold); // CHANGE 2b: keep align alive through final leg
+            float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
+
+            // ROLL-RATE LOW-PASS — identical to Legacy (anti high-speed roll PIO).
+            float rollTau = Cfg.RollRateSmoothing.Value;
+            if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
+            else _rollRateFilt = rollRate;
+            float rollRateF = _rollRateFilt;
+
+            tgtR = Mathf.Clamp((rollErr - rollRateF * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
         }
 
         private static void HideNativeVirtualJoystick()
