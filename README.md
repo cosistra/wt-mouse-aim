@@ -51,7 +51,10 @@ https://github.com/user-attachments/assets/00afefa5-f5c9-479c-9c92-4d6c2e1452b7
 - **Fine capture that actually centres.** A small integrator defeats the fly-by-wire's
   rate-command residual so the nose lands *on* the marker instead of parking a degree short.
 - **Per-axis manual override.** Touch the stick, keyboard, or rudder and you instantly own that
-  axis; the mouse keeps aiming the axes you're *not* touching. Release and it eases back.
+  axis; the mouse keeps aiming the axes you're *not* touching. Release and it eases back. Manual
+  input also *redefines* the flight direction: while you're flying by hand the instructor stops
+  pulling you back toward where you last aimed, and when you let go it holds the heading you ended
+  on instead of snapping back to the old aim point (toggle `ManualReorients`).
 - **Right-mouse free-look.** Hold RMB to freeze the reticle and look around (the plane keeps
   flying to the frozen point), then the view eases back when you let go.
 - **Camera follow.** The cockpit view leans toward the marker; the 3rd-person orbit camera sits

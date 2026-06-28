@@ -42,6 +42,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> PitchBrake;          // extra rate damping near the target (anti-overshoot)
         public static ConfigEntry<float> AuthorityRamp;       // engage/disengage blend speed (1/sec)
         public static ConfigEntry<bool>  ManualOverride;      // let the stick/keyboard/pedals override the chase per-axis
+        public static ConfigEntry<bool>  ManualReorients;     // manual input re-seeds the aim marker to the nose (release holds the NEW heading, not the old aim)
         public static ConfigEntry<float> ManualReturnTime;    // sec for an axis to ease back to mouse-aim after release
         public static ConfigEntry<float> ManualDeadzone;      // how far a manual axis must move before it counts as input
         public static ConfigEntry<bool>  RightClickFreeze;    // hold RMB to freeze the reticle + free-look (both views)
@@ -212,6 +213,8 @@ namespace NuclearOptionMouseAim
                 new AcceptableValueRange<float>(1f, 15f)));
             ManualOverride      = cf.Bind("Control", "ManualOverride", true,
                 "Let your stick / keyboard / rudder pedals take over PER AXIS while mouse-aim flies. Push roll and you get roll (the mod stops leveling the wings); push rudder and you get rudder — the mouse keeps aiming whatever axis you're NOT touching. Release and that axis eases back to mouse-aim. Off = the mod fully owns the stick (manual inputs ignored while flying).");
+            ManualReorients     = cf.Bind("Control", "ManualReorients", true,
+                "Manual input REDEFINES the flight direction (v0.48). While you actively hold the stick / keyboard / pedals (any axis past ManualDeadzone), the aim marker is dragged onto the nose so the instructor stops flying you back toward where you last aimed — the fix for 'I free-look with RMB, fly somewhere manually, and the plane keeps pulling back to the old aim point'. The moment you release, the marker stays parked at the heading you ended on, so the instructor eases back in and holds THAT new direction straight ahead instead of snapping back to the original aim. Off = the old behaviour (the frozen aim point is preserved; releasing the stick flies you back to it). Requires ManualOverride.");
             ManualReturnTime    = cf.Bind("Control", "ManualReturnTime", 0.25f, new ConfigDescription(
                 "How long (seconds) a released axis takes to ease back to mouse-aim after you let go of it. Lower = snaps back to the mouse fast; higher = hands the axis back gently. Manual takeover itself is always instant.",
                 new AcceptableValueRange<float>(0.05f, 1f)));

@@ -52,6 +52,12 @@ namespace NuclearOptionMouseAim
 
         public static Vector3 AimForward => _aimForward;
         public static Vector3 MouseAimPos(Aircraft ac) => ac.transform.position + _aimForward * Cfg.AimDistance.Value;
+        // Re-seed the world-locked marker to an arbitrary world direction (v0.48). Used by the chase to
+        // drag the marker onto the nose while you fly manually, so releasing the stick leaves the
+        // instructor holding the heading you ended on (see ChaseController manual block). During manual
+        // free-look Update() is frozen (not aimCapture), so this is the only writer of _aimForward that
+        // frame and the cone clamp is a no-op when the marker sits on the nose. Ignores a zero vector.
+        public static void SetAimForward(Vector3 dir) { if (dir.sqrMagnitude > 1e-6f) _aimForward = dir.normalized; }
         // Smoothed mouse delta during 3rd-person free-look (same units/smoothing as the aim), zero otherwise.
         // CameraOrbitPatch multiplies it by MouseSensitivity so free-look feel == aim feel.
         internal static Vector2 LookDelta => _lookDelta;

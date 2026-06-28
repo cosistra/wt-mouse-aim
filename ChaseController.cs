@@ -474,12 +474,27 @@ namespace NuclearOptionMouseAim
                     {
                         float dz  = Cfg.ManualDeadzone.Value;
                         float ret = Cfg.ManualReturnTime.Value;
-                        pOut = BlendManual(pl.GetAxis("Pitch"), _outP, ref _engP, ref _mApplyP, dz, ret, dt);
-                        rOut = BlendManual(pl.GetAxis("Roll"),  _outR, ref _engR, ref _mApplyR, dz, ret, dt);
-                        yOut = BlendManual(pl.GetAxis("Yaw"),   _outY, ref _engY, ref _mApplyY, dz, ret, dt);
+                        float axP = pl.GetAxis("Pitch"), axR = pl.GetAxis("Roll"), axY = pl.GetAxis("Yaw");
+                        pOut = BlendManual(axP, _outP, ref _engP, ref _mApplyP, dz, ret, dt);
+                        rOut = BlendManual(axR, _outR, ref _engR, ref _mApplyR, dz, ret, dt);
+                        yOut = BlendManual(axY, _outY, ref _engY, ref _mApplyY, dz, ret, dt);
                         // A stick/pedal nudge drops Fly Level — you've taken the controls back.
                         if (FlyLevelActive && (_engP >= 1f || _engR >= 1f || _engY >= 1f))
                             ToggleFlyLevel(aircraft);
+                        // MANUAL RE-SEEDS THE AIM DIRECTION (v0.48). While you're ACTIVELY holding an axis
+                        // past the deadzone, drag the world-locked marker onto the current nose so the
+                        // instructor's command collapses to ~0 — it stops fighting your input (the untouched
+                        // axes no longer pull back toward the old frozen aim point, the complaint with
+                        // RMB free-look + manual stick) and instead "redefines" the flight direction to
+                        // wherever you're flying it. The instant you release (axis back inside the deadzone)
+                        // the marker stops following and stays parked at the heading you ended on, so the
+                        // chase eases back in holding THAT new direction straight ahead. Gated to the raw
+                        // axis being actively held, NOT _eng* (which lingers through the ManualReturnTime
+                        // ease-back) — using eng would keep the marker glued to the nose during the return
+                        // and the instructor could never settle and hold a heading.
+                        if (Cfg.ManualReorients.Value &&
+                            (Mathf.Abs(axP) > dz || Mathf.Abs(axR) > dz || Mathf.Abs(axY) > dz))
+                            AimRig.SetAimForward(t.forward);
                     }
                 }
                 else { _engP = _engR = _engY = 0f; }
