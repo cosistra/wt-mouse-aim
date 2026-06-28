@@ -110,6 +110,7 @@ namespace NuclearOptionMouseAim
         internal static bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
         internal static float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
         internal static float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
+        internal static float _speed;           // total airspeed magnitude (m/s) — surfaced for the debug HUD
         internal static bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
 
         public static bool IsFlying => _active;
@@ -376,6 +377,7 @@ namespace NuclearOptionMouseAim
                 //   around 2deg — the v0.37 tail plateaued there. atan() on the raw error rolls out smoothly
                 //   instead. The linear servo keeps its full deadzone (low-speed wobble guard) untouched.
                 float vMag     = aircraft.rb != null ? aircraft.rb.velocity.magnitude : 200f;
+                _speed = vMag;  // surface total airspeed for the debug HUD
 
                 // HOVER REGIME BLEND (v0.43, used by EvolvedLegacy). Bank-to-turn needs forward speed to
                 // produce a turn; on a collective aircraft (heli / hover-VTOL) at low FORWARD speed it just
@@ -754,10 +756,11 @@ namespace NuclearOptionMouseAim
             float Vb     = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);                                        // airspeed floor (reuse BankToTurnVmin)
             float bankTRdeg = Mathf.Atan(omega * Vb / gAcc) * Mathf.Rad2Deg;                                // speed-correct bank, signed deg
             float tBankE = Mathf.Clamp(bankTRdeg, -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);         // universal bank target
-            // HOVER REGIME (v0.43): fade the commanded bank to zero as _heliBlend->1. This alone converts
-            // the roll axis below into a pure wings-leveler (eFine = t.right.y + sin(0) = t.right.y) and
-            // self-cancels the coordinating pull (coordPull ∝ sin(tBankE) -> 0) — no other roll/pitch edits
-            // needed. Fixed-wing => _heliBlend==0 => tBankE unchanged (identical to v0.42).
+            // HOVER REGIME (v0.43): fade the commanded bank to zero as _heliBlend->1. This neutralises the
+            // eFine leveler base (eFine = t.right.y + sin(0) = t.right.y) and self-cancels the coordinating
+            // pull (coordPull ∝ sin(tBankE) -> 0). NOTE: it does NOT by itself stop roll — the eAlign
+            // roll-to-marker branch below is gated separately by _heliBlend (v0.46 fix); both gates are
+            // needed for a true wings-level hover. Fixed-wing => _heliBlend==0 => tBankE unchanged (v0.42).
             tBankE *= (1f - _heliBlend);
 
             // COORDINATING PULL — same structure as Legacy but sizes off tBankE (so the pull matches the
@@ -785,11 +788,18 @@ namespace NuclearOptionMouseAim
             //       as both off->0 and azErr->0, lateralHold->0 and bigTurn->0, so rollErr->eFine (wings-
             //       level). No residual bank once on-target; no limit cycle. yawScale already restores full
             //       yaw authority as bigTurn->0 (legacy behaviour preserved — align-hold does NOT gate yaw).
+            //   HOVER REGIME (v0.46 fix): zeroing tBankE above only neutralises eFine. The eAlign branch
+            //       (roll-TO-the-marker = bank-to-turn) is independent of it, so in hover it kept banking
+            //       the heli toward the target while the boosted yaw also swung the nose = roll+yaw at once
+            //       (confirmed in mouseaim-rec 20260628-100746: heliBlend=1 yet |outR|>|outY|, bank->46deg).
+            //       Gate blendWeight by (1-_heliBlend) so at full hover blendWeight->0 => rollErr=eFine=
+            //       t.right.y = pure wings-leveler; yaw alone points the nose. Fixed-wing (_heliBlend==0)
+            //       is byte-identical to before.
             float eFine  = t.right.y + Mathf.Sin(tBankE * Mathf.Deg2Rad); // 2a: tBankE (universal speed-aware)
             float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
             // 2b: lateral-error hold weight — stays > 0 while |azErr| > EvolvedAlignHoldDeg.
             float lateralHold = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.01f, Cfg.EvolvedAlignHoldDeg.Value));
-            float blendWeight = Mathf.Max(bigTurn, lateralHold); // CHANGE 2b: keep align alive through final leg
+            float blendWeight = Mathf.Max(bigTurn, lateralHold) * (1f - _heliBlend); // 2b + hover gate: kill roll-to-align in hover
             float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
 
             // ROLL-RATE LOW-PASS — identical to Legacy (anti high-speed roll PIO).
