@@ -13,6 +13,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<bool>  ShowDebugHud; // show the diagnostic text readouts (off = clean reticle-only HUD)
         public static ConfigEntry<bool>  DebugLogging; // periodic BepInEx-log dump of mouse/aim/chase state (verbose)
         public static ConfigEntry<bool>  AnomalyLogging; // event-only log: fires one line when a command misbehaves
+        public static ConfigEntry<bool>  CursorLogging;  // focused [cursor] transition log: our cursor state vs the game's CursorManager cache
         public static ConfigEntry<float> MouseSensitivity; // degrees of aim offset per unit of mouse delta
         public static ConfigEntry<float> MouseSmoothing;   // 0..1 one-pole smoothing on the mouse delta
         public static ConfigEntry<float> MaxAimAngle;      // cone half-angle (deg) the marker is clamped within
@@ -144,6 +145,8 @@ namespace NuclearOptionMouseAim
                 "VERBOSE periodic trace: dumps mouse delta, marker-vs-nose angle, camera-vs-nose angle and chase outputs to the BepInEx log every ~0.1-0.2 s. Token-heavy — leave OFF normally and rely on AnomalyLogging. Flip it on for one run only when a problem feels wrong but the anomaly log stays quiet.");
             AnomalyLogging   = cf.Bind("HUD", "AnomalyLogging", true,
                 "Event-only logging: stays silent until a command misbehaves, then writes ONE compact [anomaly] line — overshoot (nose crosses the marker), over-roll (banks past what the turn needs), hunt (output sign-flapping), or persistent-miss (saturated but not closing). Cheap to hand back, unlike the verbose DebugLogging trace. On by default.");
+            CursorLogging    = cf.Bind("HUD", "CursorLogging", false,
+                "Focused cursor instrument: writes one [cursor] line ONLY when the cursor regime changes (enter/exit mouse-aim, free-look, menu, mod toggle), showing our Cursor.visible/lockState next to the game CursorManager's cached visibility + flags. Use it to diagnose the OS pointer popping over the game on a mod toggle — when our visibility and the game's cache disagree, the game's Refresh() can't fix the pointer. Low-volume (transition-only); leave OFF normally.");
 
             MouseSensitivity = cf.Bind("Aim", "MouseSensitivity", 0.30f, new ConfigDescription(
                 "Degrees the aim circle moves per unit of mouse motion. The raw Win32 delta is normalised to Unity's legacy axis scale (x0.1) so this number is read-backend independent. ~0.3 is a sane start; drag the slider for feel. Higher = the circle races with small hand movements; lower = finer, calmer aiming.",

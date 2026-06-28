@@ -35,6 +35,9 @@ namespace NuclearOptionMouseAim
         private static bool _captureFresh;                 // true on the frame aiming begins (drop the recenter-warp jump)
         private static bool _managing;                     // we are currently driving the cursor regime at all
         private static Vector2 _lookDelta;                 // smoothed mouse delta exposed for 3p free-look (same units as aim)
+        private static System.Reflection.FieldInfo _cmVisibleField; // CursorManager's private static `visible` cache (read for [cursor] log, written to resync on release)
+        private static bool _cmReflectWarned;              // logged the one-time warning that the CursorManager cache field couldn't be reflected
+        private static string _lastCursorSig;              // last logged cursor signature, so [cursor] only fires on a regime CHANGE
 
         // Win32 raw mouse: GetCursorPos gives a true hardware delta from frame 1, immune to Unity's
         // focus-gated legacy "Mouse X/Y" axis (which stays dead until the window gets a focus event,
@@ -243,18 +246,81 @@ namespace NuclearOptionMouseAim
                 Cursor.lockState = CursorLockMode.None;
                 Cursor.visible = true;
             }
+            LogCursor("regime", flyHidden, aimCapture);
         }
 
         // Hand the cursor back to the game when we stop managing it (no aircraft / mod off / scene change).
-        // Leave a normal pointer as a safe default, then let CursorManager re-assert its own state.
+        // Restore the game's ACTUAL intended state — NOT an unconditional visible pointer. While we're
+        // flying (no menu / pause / UI flag) the cursor must stay hidden+locked; only a real menu wants it
+        // shown. The old code set Cursor.visible=true here, which popped the Windows pointer over the game
+        // every time the mod was toggled off mid-flight — and CursorManager.Refresh() could NOT undo it:
+        // its cached `visible` was already false (the flight state), so its change-gated setter short-
+        // circuited and never re-hid/re-locked the cursor (see decompiled CursorManager.Visible). We apply
+        // the right state directly (works even if the reflection below fails), then resync CursorManager's
+        // private cache so its later Refresh()es reconcile to reality instead of no-opping against a stale
+        // value, then call Refresh() to let the game have the final say.
         private static void ReleaseCursor()
         {
             if (!_managing) return;
             _managing = false;
             _captured = false;
-            Cursor.lockState = CursorLockMode.None;
-            Cursor.visible = true;
-            CursorManager.Refresh();
+            bool wantVisible = Guards.MenusOpen() || CursorManager.GetFlags() != CursorFlags.None;
+            Cursor.visible   = wantVisible;
+            Cursor.lockState = wantVisible ? CursorLockMode.None : CursorLockMode.Locked;
+            SetCmCachedVisible(wantVisible); // keep the game's cache in lock-step with what we just applied
+            CursorManager.Refresh();         // game has final say; cache now matches so no stale no-op fights it
+            LogCursor("release", !wantVisible, false);
+        }
+
+        // --- CursorManager cache plumbing (diagnose + repair the visible-pointer-on-toggle bug) ---
+        // The game's CursorManager keeps a private static `visible` cache and only re-applies
+        // Cursor.visible/lockState when it CHANGES. While aiming we set Cursor directly behind that cache's
+        // back, so it goes stale; reading it powers the [cursor] log, and writing it (on release) lets the
+        // game's own Refresh() work again instead of short-circuiting against the wrong cached value.
+        private static System.Reflection.FieldInfo CmVisibleField()
+        {
+            if (_cmVisibleField == null)
+            {
+                _cmVisibleField = typeof(CursorManager).GetField("visible",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                if (_cmVisibleField == null && !_cmReflectWarned)
+                {
+                    _cmReflectWarned = true; // game internals changed: log once, then degrade gracefully
+                    WTMouseAimPlugin.Log.LogWarning(
+                        "[cursor] could not reflect CursorManager.visible — cache resync disabled (direct Cursor set still applies).");
+                }
+            }
+            return _cmVisibleField;
+        }
+
+        // Game's cached cursor visibility, or -1 if it couldn't be read (for the [cursor] diagnostic line).
+        private static int CmCachedVisible()
+        {
+            var f = CmVisibleField();
+            if (f == null) return -1;
+            try { return (bool)f.GetValue(null) ? 1 : 0; } catch { return -1; }
+        }
+
+        // Force the game's cached visibility so its next Refresh() reconciles against reality, not a stale value.
+        private static void SetCmCachedVisible(bool v)
+        {
+            var f = CmVisibleField();
+            if (f == null) return;
+            try { f.SetValue(null, v); } catch { /* best-effort; the direct Cursor set above already applied */ }
+        }
+
+        // Focused cursor-regime instrument (Cfg.CursorLogging). Emits a [cursor] line ONLY when the regime
+        // signature changes, so it's quiet in steady state. Surfaces the exact desync behind the bug: our
+        // Cursor.visible vs CursorManager's cached visibility — when they disagree, the game can't fix the
+        // pointer. `where` distinguishes the regime apply from the release handoff.
+        private static void LogCursor(string where, bool flyHidden, bool aimCapture)
+        {
+            if (!Cfg.CursorLogging.Value) return;
+            string sig = $"{where} mng={(_managing ? 1 : 0)} cap={(aimCapture ? 1 : 0)} fly={(flyHidden ? 1 : 0)} " +
+                         $"vis={(Cursor.visible ? 1 : 0)} lock={Cursor.lockState} cmVis={CmCachedVisible()} flags={CursorManager.GetFlags()}";
+            if (sig == _lastCursorSig) return;
+            _lastCursorSig = sig;
+            WTMouseAimPlugin.Log.LogInfo($"[cursor] {sig}");
         }
 
         // Is the aim reticle currently frozen? True while the player holds the game's bound "Free Look"
