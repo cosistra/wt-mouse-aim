@@ -15,3 +15,7 @@ desktop.ini
 
 # Local dev/agent notes (machine-specific paths)
 CLAUDE.md
+
+# Local Claude Code hooks + settings (machine-specific deploy paths)
+.claude/settings.local.json
+.claude/hooks/
