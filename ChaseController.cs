@@ -34,6 +34,15 @@ namespace NuclearOptionMouseAim
         private static float _mApplyP, _mApplyR, _mApplyY;
         private static Player _rewired;   // cached Rewired player 0 (same one PilotPlayerState reads)
 
+        // Global hard-handoff state (v0.49). When ManualHandoffTime > 0 the per-axis blend is replaced
+        // by a whole-instructor switch: ANY axis past the deadzone fully disables the chase on ALL three
+        // axes (you fly the plane directly) and resets _manualHold to ManualHandoffTime; the instructor
+        // only re-engages once _manualHold counts back down to 0 (i.e. that many seconds after your last
+        // input). _gEng in [0,1] is the global manual->instructor blend (1 = you own it, eases to 0 as
+        // the chase takes back over) — the global twin of the per-axis _eng*.
+        private static float _manualHold;  // seconds the instructor stays off after the last manual input
+        private static float _gEng;        // 1 = full manual on all axes, 0 = full instructor
+
         // Fine-regime integrator state (v0.24). The game's FBW is a rate-command law, so a proportional
         // outer loop asymptotes and parks short; these wind in the steady bias that closes the last bit.
         private static float _iPitch, _iYaw;
@@ -198,6 +207,7 @@ namespace NuclearOptionMouseAim
                 _yawWagFlips = 0; _prevSignYW = 0f; _yawWagWinStart = 0f;
                 _wobbleFlips = 0; _prevSignRW = 0f; _wobbleWinStart = 0f;
                 _manvActive = false; _manvSettle = 0f; _manvOvershot = false; LastPhase = ""; // fresh maneuver tracker
+                _manualHold = 0f; _gEng = 0f; // fresh global hard-handoff state (no stale manual hold)
                 _ringHead = _ringCount = 0; // clear the context buffer for this command
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
@@ -475,29 +485,70 @@ namespace NuclearOptionMouseAim
                         float dz  = Cfg.ManualDeadzone.Value;
                         float ret = Cfg.ManualReturnTime.Value;
                         float axP = pl.GetAxis("Pitch"), axR = pl.GetAxis("Roll"), axY = pl.GetAxis("Yaw");
-                        pOut = BlendManual(axP, _outP, ref _engP, ref _mApplyP, dz, ret, dt);
-                        rOut = BlendManual(axR, _outR, ref _engR, ref _mApplyR, dz, ret, dt);
-                        yOut = BlendManual(axY, _outY, ref _engY, ref _mApplyY, dz, ret, dt);
-                        // A stick/pedal nudge drops Fly Level — you've taken the controls back.
-                        if (FlyLevelActive && (_engP >= 1f || _engR >= 1f || _engY >= 1f))
-                            ToggleFlyLevel(aircraft);
-                        // MANUAL RE-SEEDS THE AIM DIRECTION (v0.48). While you're ACTIVELY holding an axis
-                        // past the deadzone, drag the world-locked marker onto the current nose so the
-                        // instructor's command collapses to ~0 — it stops fighting your input (the untouched
-                        // axes no longer pull back toward the old frozen aim point, the complaint with
-                        // RMB free-look + manual stick) and instead "redefines" the flight direction to
-                        // wherever you're flying it. The instant you release (axis back inside the deadzone)
-                        // the marker stops following and stays parked at the heading you ended on, so the
-                        // chase eases back in holding THAT new direction straight ahead. Gated to the raw
-                        // axis being actively held, NOT _eng* (which lingers through the ManualReturnTime
-                        // ease-back) — using eng would keep the marker glued to the nose during the return
-                        // and the instructor could never settle and hold a heading.
-                        if (Cfg.ManualReorients.Value &&
-                            (Mathf.Abs(axP) > dz || Mathf.Abs(axR) > dz || Mathf.Abs(axY) > dz))
-                            AimRig.SetAimForward(t.forward);
+                        float handoff = Cfg.ManualHandoffTime.Value;
+                        bool anyInput = Mathf.Abs(axP) > dz || Mathf.Abs(axR) > dz || Mathf.Abs(axY) > dz;
+
+                        if (handoff > 0f)
+                        {
+                            // GLOBAL HARD HANDOFF (v0.49) — "my controls / your controls". The complaint
+                            // with the per-axis blend was that the instructor still carried some control
+                            // (the untouched axes kept chasing, and even touched axes only blended). Here a
+                            // single touch on ANY axis switches the WHOLE instructor OFF: you fly the plane
+                            // directly on all three axes. We hold it off for ManualHandoffTime seconds after
+                            // your LAST input (_manualHold), so a quick stick-stir doesn't let the chase grab
+                            // back between nudges. While you hold, the marker is dragged onto the nose so the
+                            // instant the instructor DOES re-engage it flies straight ahead on the heading
+                            // you ended on — not back to the old aim point. When the timer expires the chase
+                            // eases in (_gEng 1->0 over ManualReturnTime) from your released (≈neutral) stick.
+                            if (anyInput)
+                            {
+                                _manualHold = handoff;
+                                _gEng = 1f;
+                                AimRig.SetAimForward(t.forward);          // resume on the NEW heading
+                                if (FlyLevelActive) ToggleFlyLevel(aircraft); // a nudge drops Fly Level
+                            }
+                            else _manualHold = Mathf.Max(0f, _manualHold - dt);
+
+                            if (_manualHold > 0f)
+                            {
+                                // Manual phase: instructor fully off, you own every axis (untouched axes
+                                // sit at your neutral stick, so a hands-off pause just coasts the plane).
+                                _gEng = 1f;
+                                pOut = Mathf.Clamp(axP, -1f, 1f);
+                                rOut = Mathf.Clamp(axR, -1f, 1f);
+                                yOut = Mathf.Clamp(axY, -1f, 1f);
+                            }
+                            else
+                            {
+                                // Re-engaging: ease the chase back in from the (released ≈ neutral) stick.
+                                _gEng = Mathf.MoveTowards(_gEng, 0f, dt / Mathf.Max(0.01f, ret));
+                                pOut = Mathf.Lerp(_outP, Mathf.Clamp(axP, -1f, 1f), _gEng);
+                                rOut = Mathf.Lerp(_outR, Mathf.Clamp(axR, -1f, 1f), _gEng);
+                                yOut = Mathf.Lerp(_outY, Mathf.Clamp(axY, -1f, 1f), _gEng);
+                            }
+                            // Mirror the global blend onto the per-axis _eng* so the integrator suspend,
+                            // yaw-weakness gate, HUD man=() readout and recorder all see "manual active".
+                            _engP = _engR = _engY = _gEng;
+                        }
+                        else
+                        {
+                            // LEGACY PER-AXIS BLEND (v0.05..v0.48). Touch an axis and you instantly own
+                            // just that axis; the mouse keeps flying the others. Release and it eases back.
+                            pOut = BlendManual(axP, _outP, ref _engP, ref _mApplyP, dz, ret, dt);
+                            rOut = BlendManual(axR, _outR, ref _engR, ref _mApplyR, dz, ret, dt);
+                            yOut = BlendManual(axY, _outY, ref _engY, ref _mApplyY, dz, ret, dt);
+                            // A stick/pedal nudge drops Fly Level — you've taken the controls back.
+                            if (FlyLevelActive && (_engP >= 1f || _engR >= 1f || _engY >= 1f))
+                                ToggleFlyLevel(aircraft);
+                            // MANUAL RE-SEEDS THE AIM DIRECTION (v0.48). While you ACTIVELY hold an axis,
+                            // drag the marker onto the nose so releasing leaves the instructor holding the
+                            // heading you ended on instead of pulling back to the old frozen aim point.
+                            if (Cfg.ManualReorients.Value && anyInput)
+                                AimRig.SetAimForward(t.forward);
+                        }
                     }
                 }
-                else { _engP = _engR = _engY = 0f; }
+                else { _engP = _engR = _engY = 0f; _gEng = 0f; _manualHold = 0f; }
 
                 ci.pitch = Mathf.Clamp(pOut, -1f, 1f);
                 ci.roll  = Mathf.Clamp(rOut, -1f, 1f);
