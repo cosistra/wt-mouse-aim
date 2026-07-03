@@ -36,7 +36,8 @@ namespace NuclearOptionMouseAim
 
         // Global hard-handoff state (v0.49). When ManualHandoffTime > 0 the per-axis blend is replaced
         // by a whole-instructor switch: ANY axis past the deadzone fully disables the chase on ALL three
-        // axes (you fly the plane directly) and resets _manualHold to ManualHandoffTime; the instructor
+        // axes (you fly the plane directly) and resets _manualHold to ManualHandoffTime while free-looking
+        // or ManualHandoffAimTime while aiming (v0.50 — see the regime comment in Apply); the instructor
         // only re-engages once _manualHold counts back down to 0 (i.e. that many seconds after your last
         // input). _gEng in [0,1] is the global manual->instructor blend (1 = you own it, eases to 0 as
         // the chase takes back over) — the global twin of the per-axis _eng*.
@@ -494,22 +495,30 @@ namespace NuclearOptionMouseAim
                             // with the per-axis blend was that the instructor still carried some control
                             // (the untouched axes kept chasing, and even touched axes only blended). Here a
                             // single touch on ANY axis switches the WHOLE instructor OFF: you fly the plane
-                            // directly on all three axes. We hold it off for ManualHandoffTime seconds after
-                            // your LAST input (_manualHold), so a quick stick-stir doesn't let the chase grab
-                            // back between nudges. While you hold, the marker is dragged onto the nose so the
-                            // instant the instructor DOES re-engage it flies straight ahead on the heading
-                            // you ended on — not back to the old aim point. When the timer expires the chase
-                            // eases in (_gEng 1->0 over ManualReturnTime) from your released (≈neutral) stick.
+                            // directly on all three axes. We hold it off after your LAST input (_manualHold),
+                            // so a quick stick-stir doesn't let the chase grab back between nudges. When the
+                            // timer expires the chase eases in (_gEng 1->0 over ManualReturnTime) from your
+                            // released (≈neutral) stick.
+                            //
+                            // TWO REGIMES (v0.50, the Frozander/MrBallsOfSteel report): while FREE-LOOKING
+                            // (RMB / Free Look held — the marker is frozen, you can't aim) manual input is
+                            // steering, so it drags the marker onto the nose (ManualReorients) and holds the
+                            // instructor off for ManualHandoffTime. While AIMING (marker live under the
+                            // mouse) manual input is a temporary correction: the marker STAYS on your target
+                            // and the instructor resumes toward it ManualHandoffAimTime (default 0) after
+                            // release — WT-style roll corrections / elevator pulls that never lose the aim.
+                            bool frozen = AimRig.AimFrozen();
                             if (anyInput)
                             {
-                                _manualHold = handoff;
+                                _manualHold = frozen ? handoff : Cfg.ManualHandoffAimTime.Value;
                                 _gEng = 1f;
-                                AimRig.SetAimForward(t.forward);          // resume on the NEW heading
+                                if (frozen && Cfg.ManualReorients.Value)
+                                    AimRig.SetAimForward(t.forward);      // resume on the NEW heading
                                 if (FlyLevelActive) ToggleFlyLevel(aircraft); // a nudge drops Fly Level
                             }
                             else _manualHold = Mathf.Max(0f, _manualHold - dt);
 
-                            if (_manualHold > 0f)
+                            if (anyInput || _manualHold > 0f)
                             {
                                 // Manual phase: instructor fully off, you own every axis (untouched axes
                                 // sit at your neutral stick, so a hands-off pause just coasts the plane).
@@ -540,10 +549,9 @@ namespace NuclearOptionMouseAim
                             // A stick/pedal nudge drops Fly Level — you've taken the controls back.
                             if (FlyLevelActive && (_engP >= 1f || _engR >= 1f || _engY >= 1f))
                                 ToggleFlyLevel(aircraft);
-                            // MANUAL RE-SEEDS THE AIM DIRECTION (v0.48). While you ACTIVELY hold an axis,
-                            // drag the marker onto the nose so releasing leaves the instructor holding the
-                            // heading you ended on instead of pulling back to the old frozen aim point.
-                            if (Cfg.ManualReorients.Value && anyInput)
+                            // MANUAL RE-SEEDS THE AIM DIRECTION (v0.48; v0.50: only while free-looking —
+                            // when you're aiming, a manual correction must not move your mouse target).
+                            if (Cfg.ManualReorients.Value && anyInput && AimRig.AimFrozen())
                                 AimRig.SetAimForward(t.forward);
                         }
                     }

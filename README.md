@@ -51,12 +51,18 @@ https://github.com/user-attachments/assets/00afefa5-f5c9-479c-9c92-4d6c2e1452b7
 - **Fine capture that actually centres.** A small integrator defeats the fly-by-wire's
   rate-command residual so the nose lands *on* the marker instead of parking a degree short.
 - **Manual override — "my controls / your controls".** Touch the stick, keyboard, or rudder and the
-  instructor hands you the plane: by default (`ManualHandoffTime`, 1 s) *any* input switches the whole
-  instructor **off on every axis** so you fly it directly, and it stays off until a second after your
-  last input — then it re-engages flying straight ahead on the heading you ended on, never pulling back
-  to the old aim point. Set `ManualHandoffTime` to 0 for the classic **per-axis** blend instead (you own
-  only the axis you touch; the mouse keeps aiming the rest, with `ManualReorients` redefining the heading
-  on release).
+  instructor hands you the plane: *any* input switches the whole instructor **off on every axis** so you
+  fly it directly. What happens on release depends on what you were doing, WT-style:
+  - **Aiming** (marker live under your mouse): your input is a *correction* — roll adjustments, a full
+    elevator pull — and it **never moves your aim marker**. Let go and the instructor resumes flying
+    toward the target you kept aimed (immediately by default; `ManualHandoffAimTime` adds a hands-off
+    pause).
+  - **Free-looking** (RMB / Free Look held): your input is *steering* — the marker is dragged onto the
+    nose, and after release (`ManualHandoffTime`, 1 s after your last input) the instructor re-engages
+    holding the new heading instead of pulling back to the old aim point.
+
+  Set `ManualHandoffTime` to 0 for the classic **per-axis** blend instead (you own only the axis you
+  touch; the mouse keeps aiming the rest).
 - **Right-mouse free-look.** Hold RMB to freeze the reticle and look around (the plane keeps
   flying to the frozen point), then the view eases back when you let go.
 - **Camera follow.** The cockpit view leans toward the marker; the 3rd-person orbit camera sits
