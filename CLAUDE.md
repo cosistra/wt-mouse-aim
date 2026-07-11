@@ -58,6 +58,16 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   Leave `AnomalyLogging` **on**; it's cheap and it's the primary bug-report artifact.
 - **Verbose trace.** `DebugLogging` dumps per-tick detail — very noisy; turn it on only when
   chasing a specific issue, off otherwise.
+- **Offline recording tool.** `python debugtests/analyze-wobble.py <rec.csv>...` (stdlib-only) has
+  two modes. **Default** scores any maneuver-recorder CSV for the death-wobble signature:
+  oscillation episodes with frequency/amplitude/trend, roll-rail %, targetBank clamp %, and the
+  bank-vs-command lag (built from the v0.51 investigation — see `WOBBLE-FINDINGS.md`).
+  **`--digest <rec.csv>`** collapses the 900-row-ish capture into a ~30-line phase-segmented
+  timeline (per segment: duration, the signals that moved, per-axis stick sign-flip counts, and any
+  `# cfg` change / `[anomaly]` from the sibling `mouseaim-anomalies-<session>.log`). **To read a
+  recording, run `--digest` first and only open raw rows for a segment it flags** — feeding raw CSV
+  to an LLM is expensive and mostly steady-state redundancy. `--selftest` runs the in-memory asserts.
+  Run this on user-reported recordings before theorizing.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
   (hidden by default). Use it to watch the control law react in real time while flying.
 - **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**

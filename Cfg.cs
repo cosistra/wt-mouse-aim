@@ -78,6 +78,9 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> YawWeakFade;         // 0..1 how far the rudder fades out as the assist rises
         public static ConfigEntry<float> AssistTurnRateGain;  // 1/s: turn-rate-targeted bank (self-scales the loaded bank with airspeed)
         public static ConfigEntry<float> CoordPullReleaseAngle;// deg: error cone inside which the coordinating pull eases off
+        public static ConfigEntry<float> TurnLeadTime;        // s: anticipatory lead on the turn-rate bank command (v0.51 death-wobble fix)
+        public static ConfigEntry<float> AssistOffPitchScale; // flat pitch scale while the game's flight-assist is OFF (v0.51 AoA-divergence guard)
+        public static ConfigEntry<float> BankSlewRate;        // deg/s: rate limit on EvolvedLegacy's bank target (v0.54 anti-relay)
 
         // --- Bank-to-turn law (Phase 1, v0.39): physics-based unified law knobs that have no Legacy
         // equivalent. The rest of the BankToTurn law REUSES the existing Control gains (MaxBankAngle,
@@ -280,6 +283,15 @@ namespace NuclearOptionMouseAim
             CoordPullReleaseAngle = cf.Bind("Control", "CoordPullReleaseAngle", 2.0f, new ConfigDescription(
                 "Heading-error cone (deg) inside which the coordinating pull eases back to zero. Outside it the pull stays at full strength so the loaded turn holds its G right down through the tail of the correction (the v0.36 pull tapered over the whole 6 deg fine cone, so it was already half-gone at 3 deg and the nose mushed); inside it the pull bleeds off so the bank+pull releases cleanly onto aim instead of overshooting. ~2 deg keeps the turn loaded until the nose is nearly on, then lets go. Raise if it overshoots / balloons past aim; lower if the very last degree still creeps.",
                 new AcceptableValueRange<float>(0.5f, 8f)));
+            TurnLeadTime        = cf.Bind("Control", "TurnLeadTime", 0.65f, new ConfigDescription(
+                "THE death-wobble fix (v0.51). Recordings from 8 wobble reports showed the achieved bank lags the atan(omega*V/g) turn-rate bank command by a constant ~0.68-0.71 s, and that command was pure-proportional in the heading error — at the observed 0.3-0.85 Hz oscillation that lag is ~90-180 deg of phase, so the loop self-sustained a limit cycle (bank rocking +/-80 deg from a +/-6 deg aim error, roll stick railed, at ALL speeds — worse the faster you fly). This subtracts noseHeadingRate*TurnLeadTime from the azimuth error BEFORE it becomes a bank target, so the bank rolls out EARLY, anticipating where the nose will be when the bank catches up — including a brief counter-bank that brakes the turn. 0 = exact old behaviour (the wobble). Default 0.65 deliberately sits just under the measured lag. Raise toward 0.7-0.8 if high-speed corrections still overshoot/rock; lower if turns roll out early and park short of the marker.",
+                new AcceptableValueRange<float>(0f, 2f)));
+            AssistOffPitchScale = cf.Bind("Control", "AssistOffPitchScale", 0.5f, new ConfigDescription(
+                "Flat pitch-command scale applied while the game's own flight-assist (AoA limiter) is OFF (v0.51). With assist off at low-to-mid speed the game FBW's stick-to-pitch-rate gain roughly doubles-triples (decompiled: targetPitchAngVel becomes stick*maxPitchAngularVel instead of the G-limited formula), so the mod's fixed pitch gains overshoot violently — a recorded FS-12 run railed the elevator and swung AoA -29..+52 deg. ~0.5 is a rough compensating cut, NOT a physically-derived per-airframe match (that would need reflecting private FBW fields and reconstructing the game's dynamic-pressure blend — deferred). 1 = no change (old behaviour, can rail AoA with assist off). No effect while flight-assist is on.",
+                new AcceptableValueRange<float>(0.2f, 1f)));
+            BankSlewRate        = cf.Bind("Control", "BankSlewRate", 60f, new ConfigDescription(
+                "EvolvedLegacy law only (v0.54). Rate limit (deg/s) on the atan(omega*V/g) bank target the roll servo chases. Nineteen v0.53 recordings (KR67 + AB4 Alcyon, 450-536 m/s) showed the brake-clamped lead rectifying heading-rate ripple into a bank target that BANGED 0<->48-65 deg at ~1.5 Hz from a 1-3 deg aim error — the roll servo faithfully chased it (corr 0.79-0.96) and the wings rocked +/-14-30 deg while station-keeping. A target that can only move this fast can't flap above the airframe's own roll response, and a slower-moving target also shrinks the 15-20 deg bank overshoot that sustained the slower 0.5 Hz cycle in big turns. 60 deg/s still reaches the full 72 deg bank in ~1.2 s (about what a real roll-in takes). 0 = off (instant target, old behaviour). Lower toward 40 if the wings still rock; raise toward 90-120 if turn entry feels lazy.",
+                new AcceptableValueRange<float>(0f, 360f)));
             BankToTurnVmin      = cf.Bind("Control", "BankToTurnVmin", 50f, new ConfigDescription(
                 "Bank-to-turn law (Phase 1) only. Airspeed FLOOR (m/s) used inside the speed-correct bank/load-factor physics phi=atan(omega*V/g) and n=sqrt(1+(omega*V/g)^2). The law banks and pulls in proportion to airspeed V; at very low speed / hover V->0 would collapse the commanded bank to nothing, so V is floored at this value to keep the maths sane (a gentle, sensible bank rather than zero). Has no effect above this speed. ~50 m/s is a safe floor; raise it if low-speed turns feel too weak, lower it toward true stall speed for more honest slow-flight banking.",
                 new AcceptableValueRange<float>(10f, 150f)));
@@ -397,6 +409,7 @@ namespace NuclearOptionMouseAim
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
                 $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
+                $"leadT={TurnLeadTime.Value:0.00} aOffP={AssistOffPitchScale.Value:0.00} bankSlew={BankSlewRate.Value:0} " +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
         }
 

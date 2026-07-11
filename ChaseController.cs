@@ -101,6 +101,13 @@ namespace NuclearOptionMouseAim
         private static int   _ringCount;    // valid entries (<= _ring.Length)
         private static float _lastTrailT;   // one trail dump per second across all anomaly types
         private static float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
+        private static float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
+                                               // v0.51 anticipatory lead on the turn-rate bank command (azErrPred in Apply). Nose-only
+                                               // (marker-independent), so the lead can never fight a mouse flick.
+        private static float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
+        internal static float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
+                                               // (the recorded targetBank is the shared yawWeak-gated blend, which EvolvedLegacy does
+                                               // NOT fly; reading it cost two red herrings in the v0.53 analysis)
 
         // Measured-reactive yaw-weakness estimate (v0.35). _yawEffFilt is a low-passed raw measure of how
         // much nose-yaw rate each unit of yaw command is buying (deg/s per stick); _yawWeak in [0,1] rises
@@ -212,6 +219,7 @@ namespace NuclearOptionMouseAim
                 _ringHead = _ringCount = 0; // clear the context buffer for this command
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
+                _headingRateFilt = 0f; _tBankSlewed = 0f; // fresh heading-rate lead (v0.51) + bank-target slew (v0.54)
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -273,6 +281,8 @@ namespace NuclearOptionMouseAim
                 // components: how fast the nose is currently pitching up and yawing right. This is the
                 // PLANE'S own motion (independent of the mouse), so damping on it never fights a flick.
                 float pitchRate = 0f, yawRate = 0f, rollRate = 0f, noseTurnDeg = 0f;
+                Vector3 prevFwdForHdg = _prevFwd;    // captured before the overwrite below — feeds the
+                bool hadPrevFwd = _prevFwdValid;     // heading-rate measurement further down (v0.51)
                 if (_prevFwdValid && dt > 1e-5f)
                 {
                     Vector3 noseRate = (t.forward - _prevFwd) / dt;
@@ -332,6 +342,24 @@ namespace NuclearOptionMouseAim
                 Vector3 noseHW = new Vector3(t.forward.x, 0f, t.forward.z);
                 float azErr = (aimHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
                     ? Vector3.SignedAngle(noseHW, aimHW, Vector3.up) : 0f;
+
+                // NOSE HEADING RATE (v0.51) — how fast the nose's world heading is swinging (deg/s,
+                // + = right), low-passed. Feeds the anticipatory lead on the turn-rate bank command
+                // below. Nose-only (no marker term), so it can never fight a mouse flick — same
+                // principle as the pitch/yaw rate damping above. Degenerate frames (nose near
+                // vertical, heading undefined) hold the last filtered value.
+                if (hadPrevFwd && dt > 1e-5f)
+                {
+                    Vector3 prevNoseHW = new Vector3(prevFwdForHdg.x, 0f, prevFwdForHdg.z);
+                    if (prevNoseHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
+                    {
+                        float rawHR = Vector3.SignedAngle(prevNoseHW, noseHW, Vector3.up) / dt;
+                        const float hrTau = 0.35f; // v0.54: raised 0.18->0.35 — the ±3 deg/s ripple at 1.3-1.5 Hz was feeding the
+                                                   // brake-clamp rectifier (WOBBLE-FINDINGS UPDATE 4); ~2x more attenuation there
+                                                   // costs ~0.2 s of rollout timing. Still ponytail-fixed; promote to Cfg if tuning wants it.
+                        _headingRateFilt += (dt / (hrTau + dt)) * (rawHR - _headingRateFilt);
+                    }
+                }
 
                 // MEASURED YAW-WEAKNESS (v0.35). Is the rudder actually CLOSING the heading? Watch the
                 // standing azimuth error and how fast it's shrinking. A small side nudge the rudder handles
@@ -403,7 +431,35 @@ namespace NuclearOptionMouseAim
                     : 0f;
                 if (_hoverOn) _heliBlend = 1f;
 
-                float azTR     = Mathf.Abs(azErr) <= 0.5f ? 0f : (Mathf.Abs(azErr) - 0.5f) * Mathf.Sign(azErr); // raw error, noise gate only
+                // ANTICIPATORY LEAD (v0.51) — THE death-wobble fix. bankTR below is pure-proportional
+                // in azErr, and 8 user recordings showed the achieved bank lags that command by a
+                // constant ~0.7 s and overshoots it — at the observed 0.3–0.85 Hz that lag is ~90–180°
+                // of phase, so the P-only loop self-sustains a limit cycle (±88° bank from ±6° azErr,
+                // roll railed, at ALL speeds; violence scales with V). Command the bank for where the
+                // heading WILL be instead: subtract headingRate·TurnLeadTime so the bank rolls out
+                // EARLY, decelerating onto the marker instead of overshooting it.
+                // Feeds ONLY the turn-rate bank paths (here + ApplyEvolvedLegacy's local copy); the
+                // linear servo (azBank/linBank above) and the coordPull release taper keep RAW azErr —
+                // release timing must track real arrival, not the prediction (v0.36→v0.37 mush lesson).
+                float azErrPred = azErr - _headingRateFilt * Cfg.TurnLeadTime.Value;
+                // BRAKE-ONLY LEAD (v0.52). Unclamped, the lead term closed its own fast loop: near
+                // boresight azErrPred is DOMINATED by -headingRate·lead (v51 recordings: 2.1-2.7× the
+                // real error), and the V-scaled atan slope (~44° bank/° at 470 m/s) turned that ±2°
+                // rate ripple into a ±65° bank relay → a new 1.1-1.35 Hz limit cycle in HOLD phase.
+                // Clamp the prediction to [0, azErr]: the lead may shrink the error toward zero (early
+                // rollout — what killed the slow wobble) but never flip its sign or exceed it, so the
+                // commanded bank is always bounded by the REAL error and the relay can't self-sustain.
+                // PROPORTIONAL FLOOR (v0.54). Floored at 0, the brake was a RECTIFIER: heading-rate
+                // ripple pinned azErrPred to exactly 0 while 1.5-5.7 deg of real error remained (19
+                // v0.53 recordings), commanding full wings-level mid-correction — the nose drifted, the
+                // error regrew, and at speed the ~44 deg-bank-per-deg atan slope turned that sawtooth
+                // into a bank target banging 0<->65 deg at ~1.5 Hz. Floor the prediction at a fraction
+                // of the real error instead: rollout still starts early (the lead's job), but level
+                // flight is never commanded while error remains; the floor self-releases as azErr -> 0.
+                const float predFloor = 0.30f; // ponytail: fixed fraction, promote to Cfg if flight tuning wants it
+                azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
+                                        : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
+                float azTR     = Mathf.Abs(azErrPred) <= 0.5f ? 0f : (Mathf.Abs(azErrPred) - 0.5f) * Mathf.Sign(azErrPred); // noise gate only
                 float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
                 float bankTR   = Mathf.Atan(omegaDes * Mathf.Max(50f, vMag) / 9.81f) * Mathf.Rad2Deg; // deg, signed
                 float bankBlend  = Cfg.YawAssistEnabled.Value ? _yawWeak * (1f - bigTurn) : 0f;
@@ -444,24 +500,31 @@ namespace NuclearOptionMouseAim
                 // anomaly/recorder/phase) is SHARED across all laws — only the per-axis shaping differs here.
                 // pullGate/yawScale/coordPull are surfaced for the debug trace (the only post-stage consumers).
                 float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
+                _tBankFlown = targetBank; // Legacy/BankToTurn fly the shared target; EvolvedLegacy overwrites with its slewed tBankE
                 switch (Cfg.ControlLawMode.Value)
                 {
                     case NuclearOptionMouseAim.ControlLawMode.BankToTurn:
-                        ApplyBankToTurn(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                        ApplyBankToTurn(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
                             phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
                             out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
                         break;
                     case NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy:
-                        ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                        ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
                             phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
                             out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
                         break;
                     default: // Legacy (the hard-won v0.37 law; default during development)
-                        ApplyLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr,
+                        ApplyLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
                             phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt,
                             out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
                         break;
                 }
+
+                // ASSIST-OFF PITCH SCALE (v0.51). With the game's flight-assist OFF its FBW maps pitch
+                // stick to a ~2-3x hotter target rate (see the AssistOffPitchScale bind), and the mod's
+                // fixed pitch gains then diverge (recorded: elevator railed, AoA -29..+52 deg). Flat
+                // compensating cut on the instructor's pitch command only; manual input is untouched.
+                if (!aircraft.flightAssist) tgtP *= Cfg.AssistOffPitchScale.Value;
 
                 // Slew-rate-limit the chase outputs (anti-jerk against mouse jitter / a fresh flick).
                 // Symmetric on all three axes. _out* stay PURE chase values — manual override blends on
@@ -595,7 +658,7 @@ namespace NuclearOptionMouseAim
                     ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
                         spdR, aoaR, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
-                        _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend);
+                        _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown);
                 }
 
                 // Chase trace. Normal cadence ~2.5/sec; inside 10deg ("fine capture") ~5/sec at higher
@@ -621,7 +684,7 @@ namespace NuclearOptionMouseAim
                         float spd  = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
                         string f = fine ? "0.000" : "0.00";
                         WTMouseAimPlugin.Log.LogInfo(
-                            $"[chase] t={Time.time:0.000} off={off:0.000}deg phi={phi:0.0} bigTurn={bigTurn:0.00} elevE={elevE:0.00} azE={azErr:0.00} noseTurn={noseTurnDeg:0.000} " +
+                            $"[chase] t={Time.time:0.000} off={off:0.000}deg phi={phi:0.0} bigTurn={bigTurn:0.00} elevE={elevE:0.00} azE={azErr:0.00} azPred={azErrPred:0.00} noseTurn={noseTurnDeg:0.000} " +
                             $"fineG={fineGain:0.00} pull={pullGate:0.00} yawSc={yawScale:0.00} phase={LastPhase} tgtBank={targetBank:0.0} yawWeak={_yawWeak:0.00} assist={assist:0.00} coordPull={coordPull:0.000} iP/iY=({_iPitch.ToString(f)},{_iYaw.ToString(f)}){(flyLevel ? " LVL" : "")} " +
                             $"P(p/y)=({pTermP.ToString(f)},{pTermY.ToString(f)}) D(p/y)=({dTermP.ToString(f)},{dTermY.ToString(f)}) " +
                             $"tgt P/R/Y=({tgtP.ToString(f)},{tgtR.ToString(f)},{tgtY.ToString(f)}) " +
@@ -652,13 +715,13 @@ namespace NuclearOptionMouseAim
         // three target stick values plus the pullGate/yawScale/coordPull terms the debug trace logs.
         private static void ApplyLegacy(
             Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
         {
-            // off/vMag are unused by Legacy (Phase-1 flight-state inputs added to the shared signature);
-            // it senses speed via the targetBank computed in Apply. Kept for signature parity across laws.
+            // off/vMag/azErrPred are unused by Legacy (shared-signature parity; the lead already shaped
+            // the targetBank computed in Apply, which is all the speed/lead awareness Legacy sees).
             // PITCH — pull up toward the target, gated so a big turn only pulls once the lift vector is
             // ON it (and NEVER pushes: the gate is clamped at 0, killing the negative-G bunt the old
             // |local.y| symmetric coord term produced when a roll swung the target momentarily below the
@@ -741,11 +804,12 @@ namespace NuclearOptionMouseAim
         // RollRateSmoothing/PitchGain/YawGain/TurnYawScale/ChaseDamping and the wound _iPitch/_iYaw.
         private static void ApplyBankToTurn(
             Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
         {
+            // azErrPred unused here (parity only): BankToTurn sizes its pull off `off`, not azErr.
             const float g = 9.81f;
 
             // --- ROLL: lift vector onto target, full-sphere (no phi=180 dead spot) ------------------
@@ -810,7 +874,7 @@ namespace NuclearOptionMouseAim
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
         private static void ApplyEvolvedLegacy(
             Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float phi, float pitchRate, float yawRate, float rollRate,
+            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
@@ -825,7 +889,10 @@ namespace NuclearOptionMouseAim
             // Here we always use atan(omega*V/g) — the same formula as the turn-rate path in Apply's
             // shared pre-compute (v0.37.1: tiny noise gate on raw azErr, not the big deadzone azBank carries).
             const float gAcc = 9.81f;
-            float azTR  = Mathf.Abs(azErr) <= 0.5f ? 0f : (Mathf.Abs(azErr) - 0.5f) * Mathf.Sign(azErr); // raw err, noise gate
+            // v0.51: PREDICTED error (azErr - headingRate*TurnLeadTime, computed in Apply), not raw —
+            // the anticipatory lead that kills the death-wobble limit cycle. This local copy and the
+            // shared bankTR block in Apply MUST stay in lockstep on which error they see.
+            float azTR  = Mathf.Abs(azErrPred) <= 0.5f ? 0f : (Mathf.Abs(azErrPred) - 0.5f) * Mathf.Sign(azErrPred); // noise gate
             float omega  = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;                              // rad/s, signed
             float Vb     = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);                                        // airspeed floor (reuse BankToTurnVmin)
             float bankTRdeg = Mathf.Atan(omega * Vb / gAcc) * Mathf.Rad2Deg;                                // speed-correct bank, signed deg
@@ -836,6 +903,17 @@ namespace NuclearOptionMouseAim
             // roll-to-marker branch below is gated separately by _heliBlend (v0.46 fix); both gates are
             // needed for a true wings-level hover. Fixed-wing => _heliBlend==0 => tBankE unchanged (v0.42).
             tBankE *= (1f - _heliBlend);
+            // SLEW LIMIT (v0.54). At 500 m/s the atan slope is ~44 deg of bank per degree of error, so
+            // prediction ripple made this target BANG 0<->48-65 deg at ~1.5 Hz — and the roll servo below
+            // faithfully chased it (outR tracks bankTR-bank at corr 0.79-0.96 in the v0.53 chatter files;
+            // wings rocked ±14-30 deg from a 1-3 deg error). A target that can only move BankSlewRate
+            // deg/s can't flap above the airframe's own roll response, and a slower-moving target also
+            // shrinks the 15-20 deg servo overshoot that sustained the slow 0.5 Hz big-turn cycle.
+            // Applied BEFORE coordPull so the pull sizes off the bank actually being commanded.
+            float slewR = Cfg.BankSlewRate.Value;
+            if (slewR > 0f) tBankE = Mathf.MoveTowards(_tBankSlewed, tBankE, slewR * dt);
+            _tBankSlewed = tBankE;
+            _tBankFlown  = tBankE; // recorder: the target this law's roll servo really flies
 
             // COORDINATING PULL — same structure as Legacy but sizes off tBankE (so the pull matches the
             // bank actually commanded, not the passed-in targetBank from the weakness-gated pre-compute).
@@ -872,7 +950,15 @@ namespace NuclearOptionMouseAim
             float eFine  = t.right.y + Mathf.Sin(tBankE * Mathf.Deg2Rad); // 2a: tBankE (universal speed-aware)
             float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
             // 2b: lateral-error hold weight — stays > 0 while |azErr| > EvolvedAlignHoldDeg.
-            float lateralHold = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.01f, Cfg.EvolvedAlignHoldDeg.Value));
+            //   v0.53: subtract FineBankDeadzone first (same guard the linear bank servo has at azBank).
+            //   Near boresight phi snaps ±90° with the SIGN of a sub-degree azErr — eAlign is a full-scale
+            //   directional relay there — so an unguarded |azErr|/alignHold weight injected ±0.2 roll stick
+            //   per degree of raw error: a second proportional az→roll loop with no lead/deadzone that
+            //   bypassed the v0.52-clamped bank pipeline. At 570+ m/s roll authority that self-sustained a
+            //   ±30° wing-rock at ~1.2 Hz while targetBank sat at 0 (v52 KR67 recordings, HOLD phase).
+            //   Inside the fine cone roll is now eFine only (wings-level + the braked/clamped tBankE).
+            float azAl = Mathf.Max(0f, Mathf.Abs(azErr) - Cfg.FineBankDeadzone.Value);
+            float lateralHold = Mathf.Clamp01(azAl / Mathf.Max(0.01f, Cfg.EvolvedAlignHoldDeg.Value));
             float blendWeight = Mathf.Max(bigTurn, lateralHold) * (1f - _heliBlend); // 2b + hover gate: kill roll-to-align in hover
             float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
 

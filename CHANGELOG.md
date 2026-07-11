@@ -3,6 +3,105 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.54.0
+
+- **De-rectified turn lead + slew-limited bank target — the ~1.5 Hz wing rock and the
+  "self-leveling fights the turn" drift.** Nineteen v0.53 recordings (KR67 EFRET 450–536 m/s, AB4
+  Alcyon 226–518 m/s) verified the v0.53 deadzone (the eAlign relay is dead — `outR` no longer
+  tracks `sign(azErr)` anywhere) but exposed the next loop underneath: the v0.52 brake-clamp is a
+  **rectifier**. Bank oscillation ripples the filtered heading rate ±3°/s; `azErrPred =
+  clamp(azErr − hRF·leadT, [0, azErr])` therefore slams between exactly 0 and full `azErr` every
+  half-cycle, and the ~44°-bank-per-degree atan slope at 500 m/s amplifies that sawtooth into a
+  bank target banging 0↔48–65° at ~1.5 Hz from a 1–3° error that never changes sign. The roll
+  servo chased it faithfully (corr `outR` vs `bankTR−bank` = 0.79–0.96) — wings rocking ±14–30°.
+  The slow 0.5 Hz big-turn cycle is the same rectification at scale: the prediction pinned to 0
+  while 1.5–5.7° of real error remained, commanding full wings-level mid-correction (the
+  user-reported self-leveling drift), sustained by the bank overshooting the collapsing target by
+  15–20°. Three fixes in the same pipeline:
+  - **Proportional floor on the brake-clamp**: `azErrPred` now floors at `0.30·azErr` instead of
+    0 — early rollout (the lead's job) still happens, but level flight is never commanded while
+    real error remains; the floor self-releases as `azErr → 0`.
+  - **`hrTau` 0.18 → 0.35** (hardcoded): ~2× more attenuation of the 1.3–1.5 Hz ripple feeding the
+    rectifier, at a cost of ~0.2 s of rollout timing.
+  - **New knob `BankSlewRate` (default 60°/s, 0 = off)**: rate-limits EvolvedLegacy's bank target
+    so it physically can't flap above the airframe's own roll response; also shrinks the servo
+    overshoot that sustained the slow cycle. Applied before `coordPull` so the pull sizes off the
+    bank actually commanded.
+- **New CSV column `tBankE`** — the bank target EvolvedLegacy's roll servo *actually* flies
+  (slew-limited). The existing `targetBank` column is the shared yawWeak-gated blend, which this
+  law does not fly; reading it produced two red herrings in the v0.53 analysis.
+- Analysis: `WOBBLE-FINDINGS.md` UPDATE 4. The "yaws instead of banking" report was refuted for
+  large diagonal snaps (roll rails within ~120 ms, yaw never exceeds 0.46 across all 19 files) —
+  the real small-error mechanism was the flapping bank target never *holding* a bank.
+
+## 0.53.0
+
+- **Fine-cone deadzone on the align-hold roll weight — kills the KR67-class 570 m/s wing-rock.**
+  Twelve v0.52 recordings (KR67 EFRET at 480–588 m/s + Trainer) confirmed the v0.52 clamp works —
+  `targetBank` stays inside ±3° while station-keeping — yet the wings still rocked ±20–33° with the
+  roll stick flipping at ~1.2 Hz (worst file: 14 s of sustained chatter). The driver was a **second,
+  unguarded azimuth→roll path**: near boresight `phi` snaps between ±90° with the *sign* of a
+  sub-degree error, making `eAlign = phi/90` a full-scale directional relay, and the v0.42
+  align-hold blend weight (`|azErr| / EvolvedAlignHoldDeg`) fed it with **raw** error — ±0.2 of
+  roll stick per degree, no lead, no deadzone, bypassing the entire atan/lead/clamp bank pipeline.
+  At 570+ m/s roll authority that loop self-sustains. Fix: the blend weight now subtracts
+  `FineBankDeadzone` (2.5°) from `|azErr|` first — the exact guard the linear bank servo has had
+  since v0.29 (`azBank`). Inside the fine cone the roll servo is purely the wings-leveler + the
+  braked/clamped `tBankE`; big turns unchanged (`bigTurn` still dominates the blend), medium
+  errors reach full align weight at ~7.5° instead of 5°.
+
+## 0.52.0
+
+- **Brake-only lead — fixes the fast chatter the v0.51 lead introduced.** Sixteen v0.51 recordings
+  (Ifrit + Compass, 108–508 m/s) showed the old slow 0.3–0.85 Hz wobble genuinely gone, but a NEW
+  ~1.1–1.35 Hz bank/roll-stick chatter appeared while station-keeping (HOLD phase, aim error under
+  ~2°), from ~280 m/s up. Cause (confirmed by phase analysis): near boresight the v0.51 prediction
+  `azErr − headingRate·TurnLeadTime` was **dominated by the heading-rate term** (2.1–2.7× the real
+  error), and the speed-scaled bank slope (~44° of bank per degree of error at 470 m/s) turned
+  ±2°/s of nose-rate ripple into a ±65° bank relay — the lead had closed its own faster loop
+  through the roll actuator (heading rate measurably *led* bank, the causal smoking gun). Fix:
+  `azErrPred` is now **clamped to [0, azErr]** — the lead may shrink the error toward zero (the
+  early rollout that killed the slow wobble) but can never flip its sign or exceed it, so the
+  commanded bank is always bounded by the *real* aim error and the chatter loop can't self-sustain.
+  Genuine big turns are unchanged (the clamp only engages when the rate term outruns the error);
+  offline replay of the 16 recordings shows the chatter files' mean bank command dropping ~60–90%
+  with the deliberate-turn files byte-identical. Side benefit: `TurnLeadTime` is now safe to raise
+  (more anticipation can only advance the rollout, not feed the relay).
+- `debugtests/analyze-wobble.py`: FAIL band widened 0.3–0.9 → 0.25–2.0 Hz (it was passing the new
+  fast mode) + a roll-stick chatter criterion (≥0.8 Hz rail-to-rail). Note: recordings from this
+  session were 5 Hz — check `Recorder/RecordRateHz` (should be 20) for better diagnosis data.
+
+## 0.51.0
+
+- **THE death-wobble fix: anticipatory lead on the turn-rate bank command.** Ten user recordings
+  (Kryrins, Draken — thanks!) pinned the reported fixed-wing "death wobble" to a single mechanism:
+  the `atan(ω·V/g)` azimuth→bank command was **pure proportional** in the heading error while the
+  achieved bank **lags that command by a constant ~0.7 s** (measured by cross-correlation,
+  identical across airframes) — at the observed 0.3–0.85 Hz oscillation that lag is ~90–180° of
+  phase, so the loop self-sustained a limit cycle: ±88° of bank from a ±6° aim error, roll stick
+  railed for 47 s straight, **at every speed tested (70–390 m/s)** — speed only set the violence.
+  The bank target is now computed from the *predicted* heading error
+  `azErrPred = azErr − noseHeadingRate·TurnLeadTime` (new knob, default **0.65 s**, just under the
+  measured lag; `0` = old behaviour), so the bank rolls out *early* — including a brief
+  anticipatory counter-bank that brakes the turn — instead of after the overshoot. Nose-only rate
+  (marker-independent), so the lead can never fight a mouse flick. Applied to both copies of the
+  turn-rate bank math (shared pre-compute + EvolvedLegacy); the linear low-speed servo and the
+  coordinating-pull release taper deliberately keep the *raw* error (release timing must track
+  real arrival). This is the v0.38 fix `WOBBLE-FINDINGS.md` planned and never shipped.
+- **Assist-off pitch guard.** With the game's own flight-assist (AoA limiter) OFF, the game FBW's
+  stick→pitch-rate gain roughly doubles-triples (decompiled `ControlsFilter.FlyByWire`), and the
+  mod's fixed pitch gains then diverged (recorded FS-12: elevator railed, AoA −29°→+52°). New knob
+  `AssistOffPitchScale` (default **0.5**, `1` = old behaviour) flatly scales the instructor's pitch
+  command while flight-assist is off. A rough compensating cut, not a per-airframe FBW inversion
+  (that's deferred — see WOBBLE-FINDINGS).
+- **Instrumentation:** recorder CSVs gain trailing `headingRateFilt,azErrPred` columns; the config
+  snapshot gains `leadT=`/`aOffP=`; the `[chase]` trace logs `azPred=`. New
+  `debugtests/analyze-wobble.py` (stdlib-only) scores any recording for the wobble signature
+  (episodes, frequencies, rail %, the 0.7 s lag) — it flags the two violent baseline recordings
+  FAIL and the mild one PASS.
+- Known remaining (parked, in `WOBBLE-FINDINGS.md`): helicopter sideways wobble (distinct ~1.15 Hz
+  yaw-loop cycle at hover), full per-airframe FBW pitch-gain inversion, motion-profile shaping.
+
 ## 0.44.0
 
 - **Recordings are now self-describing.** Each maneuver-recorder CSV (`F8`) starts with a `#` comment

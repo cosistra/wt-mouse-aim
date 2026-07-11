@@ -26,7 +26,7 @@ namespace NuclearOptionMouseAim
         private const string Header =
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
             "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw," +
-            "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend";
+            "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend,headingRateFilt,azErrPred,tBankE";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -106,7 +106,8 @@ namespace NuclearOptionMouseAim
             float outP, float outR, float outY, float pitchRate, float yawRate, float rollRate,
             float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
             float engP, float engR, float engY, float heliBlend, float vFwd,
-            float rollRateF, float iPitch, float iYaw, float bankTR, float bankBlend)
+            float rollRateF, float iPitch, float iYaw, float bankTR, float bankBlend,
+            float headingRateFilt, float azErrPred, float tBankE)
         {
             if (_w == null) return;
             float now = Time.time;
@@ -120,7 +121,8 @@ namespace NuclearOptionMouseAim
                     $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
                     $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}," +
-                    $"{heliBlend:0.000},{vFwd:0.0},{rollRateF:0.000},{iPitch:0.000},{iYaw:0.000},{bankTR:0.0},{bankBlend:0.000}");
+                    $"{heliBlend:0.000},{vFwd:0.0},{rollRateF:0.000},{iPitch:0.000},{iYaw:0.000},{bankTR:0.0},{bankBlend:0.000}," +
+                    $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0}");
                 _samples++;
             }
             catch (System.Exception e)
