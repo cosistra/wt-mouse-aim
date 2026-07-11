@@ -99,7 +99,10 @@ if ($exists) {
 Step "Updating NOMNOM manifest ($manifest)"
 $downloadUrl = "https://github.com/$repoSlug/releases/download/$tag/NuclearOption-MouseAim.dll"
 $text = Get-Content -Raw -LiteralPath $manifest
-$text = [regex]::Replace($text, '("version":\s*")[^"]*(")', "`${1}$version`${2}", 1)
+# Static [regex]::Replace has no count overload (a trailing 1 is parsed as RegexOptions.IgnoreCase
+# and replaces ALL matches — that clobbered the dependency's version up to v0.50). Instance .Replace
+# does take a count.
+$text = ([regex]'("version":\s*")[^"]*(")').Replace($text, "`${1}$version`${2}", 1)
 $text = [regex]::Replace($text, '("downloadUrl":\s*")[^"]*(")', "`${1}$downloadUrl`${2}")
 $text = [regex]::Replace($text, '("hash":\s*")[^"]*(")', "`${1}sha256:$hash`${2}")
 Set-Content -LiteralPath $manifest -Value $text -Encoding UTF8 -NoNewline
