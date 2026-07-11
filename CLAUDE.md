@@ -1,0 +1,117 @@
+# Dev notes — WT Mouse Aim
+
+User-facing docs are in [README.md](README.md). **This file is the context for Claude Code / any
+coding agent working in this repo**: how the code is laid out, how to build/deploy/test, how to
+debug in-game, and how to read the decompiled game source. Committed on purpose — a fresh checkout
+should be enough to get productive.
+
+Machine-specific paths are written as placeholders:
+- `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`), with
+  **BepInEx 5 (Mono x64)** installed into it. This is set **once** in the csproj — see setup below.
+
+## First-time setup (one edit)
+1. Install [BepInEx 5 Mono x64](https://github.com/BepInEx/BepInEx/releases) into `<game>` and run
+   the game once so it generates `BepInEx/`.
+2. Point the build at your install: edit `<GamePath>` at the top of
+   [`NuclearOption-MouseAim.csproj`](NuclearOption-MouseAim.csproj) to your `<game>` folder. That
+   one property is the **single source of truth for paths** — every reference (`Assembly-CSharp`,
+   BepInEx core, Unity modules) derives from it.
+3. `dotnet build -c Release` and confirm 0 errors (the `MSB3277` warning is harmless).
+
+## Layout
+- **Mod code is split one file per concern** (all at repo root, single namespace
+  `NuclearOptionMouseAim`). The `.csproj` (`Microsoft.NET.Sdk`) globs every `*.cs` automatically —
+  no project edits when adding/splitting a file. Files:
+  - `WTMouseAimPlugin.cs` — `WTMouseAimPlugin` (Awake/OnGUI overlay). Holds `PluginVersion`, the version SoT.
+  - `Cfg.cs` — `Cfg` (all config binds) + `ConfigurationManagerAttributes`.
+  - `AimRig.cs` — `AimRig` (world-locked marker + Win32 raw mouse) + `Guards`.
+  - `ChaseController.cs` — `ControlLawMode` enum + `ChaseController` (the control law in `Apply`, nested
+    `AnFrame`; also `DetectAnomalies`/`TrackManeuver`) + `PilotPlayerStatePatch` (Harmony seam on
+    `PilotPlayerState.PlayerAxisControls`).
+  - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
+  - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
+- Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
+
+## Paths (all under `<game>`)
+- Build reference DLLs: `<game>\NuclearOption_Data\Managed\` and `<game>\BepInEx\core\`.
+- Deploy target: `<game>\BepInEx\plugins\WTMouseAim\NuclearOption-MouseAim.dll`.
+- BepInEx log (read after a flight): `<game>\BepInEx\LogOutput.log`.
+- Live config: `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
+
+## Build / deploy / test loop
+**Deploying IS part of testing.** A change is not "tested" — or even testable — until the DLL is
+built AND copied into the BepInEx plugins folder; the source tree alone never runs in-game. So
+after every code change do both steps below (don't stop at a green build), then have the user fly
+it.
+```
+dotnet build NuclearOption-MouseAim.csproj -c Release          # expect 0 errors; MSB3277 warning is harmless
+cp bin/Release/NuclearOption-MouseAim.dll "<game>/BepInEx/plugins/WTMouseAim/"   # game must be closed to overwrite
+```
+> **Local automation:** this repo's maintainer has git-ignored Claude Code hooks under `.claude/hooks/`
+> that auto build+deploy on any `*.cs` edit. A fresh checkout has **no** hooks — run the two commands
+> above manually (the DLL is locked while the game is running, so close it first).
+
+## Debugging in-game
+Diagnostics are **instrument-first** — the mod tells you what it did rather than you guessing:
+- **Anomaly log.** When a commanded stick output looks wrong the mod writes one compact line to
+  `LogOutput.log`. Grep it after a flight for `[anomaly]`, `[anomaly:trail]`, and `[maneuver]`.
+  Leave `AnomalyLogging` **on**; it's cheap and it's the primary bug-report artifact.
+- **Verbose trace.** `DebugLogging` dumps per-tick detail — very noisy; turn it on only when
+  chasing a specific issue, off otherwise.
+- **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
+  (hidden by default). Use it to watch the control law react in real time while flying.
+- **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**
+  opens every `Cfg` knob in-game — change a gain, feel it immediately, then write the good value
+  back into `Cfg.cs` defaults. Config is logged once at startup and again on each live edit (not
+  per anomaly line).
+- **In-flight keys:** **F10** master on/off, **F7** Fly Level, **F1** config, **RMB** free-look.
+
+## Decompiling the game (read-only reference)
+The mod hooks the game's own classes, so before guessing at an API (FBW rate-command, AoA calc,
+camera state machine, sign conventions) **read the real decompiled source**. Generate it once:
+```
+# ILSpy CLI — install once, then decompile the game assembly to C#
+dotnet tool install -g ilspycmd
+ilspycmd "<game>/NuclearOption_Data/Managed/Assembly-CSharp.dll" -o <somewhere>/decompiled
+```
+(Or open that same `Assembly-CSharp.dll` in the [ILSpy](https://github.com/icsharpcode/ILSpy) or
+[dnSpy](https://github.com/dnSpy/dnSpy) GUI.) The classes worth reading: `Aircraft`,
+`PilotPlayerState`, `ControlsFilter`, `RelaxedStabilityController`, `CameraCockpitState`,
+`CameraOrbitState`, `CameraStateManager`, `CameraManager`, `CursorManager`, `Gun`. These are the
+seams the mod patches or reads. Keep the decompiled output **outside** the repo (it's game code, not
+redistributable — see `LICENSE`).
+
+## Releasing (distinct from the test-deploy above)
+The manual `dotnet build` + `cp` loop above is for **testing**. To **release** a version, use
+[`release.ps1`](release.ps1). `PluginVersion` in `WTMouseAimPlugin.cs` is the **single source of
+truth**: bump it, then run
+```
+./release.ps1 -Notes "short summary"      # add -Deploy to also copy into the local BepInEx folder
+```
+It builds Release, commits pending changes, tags `vX.Y.Z`, pushes branch + tag, creates the GitHub
+Release with the DLL asset (`gh` CLI), and refreshes the NOMNOM manifest (`*.nomnom.json`)
+version/downloadUrl/hash. After the first release is listed, NOMNOM's hourly job auto-picks up
+later ones.
+> **Agents can't run this:** `release.ps1` is PowerShell and drives `git push` + a GitHub release —
+> outward-facing and hard to reverse. The agent's job is to bump `PluginVersion`, get a clean
+> Release build, and let the **user** run `release.ps1` in a normal PowerShell window.
+
+## Conventions
+- **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
+  paths, the build/release flow, or a sign convention, update the matching section here as part of
+  that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
+- Bump `PluginVersion` on every shipped change; update the Awake load-line string for feature
+  changes. Commit messages: `vX.Y.Z — short summary` (see `git log`).
+- Sign conventions in `Apply` (verify against the decompiled source before changing): `local` =
+  `InverseTransformDirection(aimDir)`, x=right / y=up / z=forward. Nose-up = **negative**
+  `ci.pitch`; positive `ci.roll` = roll right; positive `ci.yaw` = yaw right; `azErr` + =
+  marker right of heading. `t.right.y` < 0 = right wing down.
+- The game FBW reads pitch/yaw as a commanded **angular rate** (hence the fine integrator to kill
+  steady-state residual). No mod-side G-limiter — the game's stability control governs.
+
+## Local-only, not in a fresh checkout
+These are git-ignored (machine-specific or work-in-progress) — mentioned so an agent knows what the
+maintainer's tree has that yours won't:
+- `.claude/hooks/`, `.claude/settings.local.json` — the auto build+deploy hooks and local deploy paths.
+- `plans/` — design plans agreed but **not yet built** (parked "potential improvements"). Drop a new
+  standalone markdown file here instead of starting code when an idea should be captured for later.
