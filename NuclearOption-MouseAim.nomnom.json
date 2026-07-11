@@ -1,4 +1,4 @@
-﻿{
+{
   "id": "NuclearOption-MouseAim",
   "displayName": "WT Mouse Aim",
   "description": "War Thunder-style point-and-chase mouse aim for Nuclear Option. The mouse moves a world-locked aim marker; a thin instructor rolls the aircraft's lift vector onto it then pulls up into it, and levels out as the nose arrives. The game's own fly-by-wire still governs the envelope. Includes cockpit and third-person camera follow, per-axis manual stick override, RMB free-look, a Fly Level autopilot toggle, and 50+ live-tunable parameters (F1 via BepInEx ConfigurationManager).",
@@ -22,12 +22,12 @@
   "artifacts": [
     {
       "fileName": "NuclearOption-MouseAim.dll",
-      "version": "0.50.0",
+      "version": "0.54.0",
       "category": "release",
       "type": "plugin",
       "gameVersion": "0.33",
-      "downloadUrl": "https://github.com/cosistra/wt-mouse-aim/releases/download/v0.50.0/NuclearOption-MouseAim.dll",
-      "hash": "sha256:98b448b27054201345b9841d053e945485e71b91167b5f12d3b512e88b4efd87",
+      "downloadUrl": "https://github.com/cosistra/wt-mouse-aim/releases/download/v0.54.0/NuclearOption-MouseAim.dll",
+      "hash": "sha256:c443a5cee92551e6630de8ac98f2242e1c4c34fb751c8cd388979b5b58e689d1",
       "dependencies": [
         {
           "id": "BepInEx.ConfigurationManager",

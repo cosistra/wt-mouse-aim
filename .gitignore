@@ -19,3 +19,8 @@ plans/
 # Local Claude Code hooks + settings (machine-specific deploy paths)
 .claude/settings.local.json
 .claude/hooks/
+.claude/worktrees/
+
+# Flight recordings + python cache (local debug data; the analyzer script IS committed)
+debugtests/**/*.csv
+__pycache__/
