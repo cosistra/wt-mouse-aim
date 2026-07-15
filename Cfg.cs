@@ -14,6 +14,9 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<bool>  DebugLogging; // periodic BepInEx-log dump of mouse/aim/chase state (verbose)
         public static ConfigEntry<bool>  AnomalyLogging; // event-only log: fires one line when a command misbehaves
         public static ConfigEntry<bool>  CursorLogging;  // focused [cursor] transition log: our cursor state vs the game's CursorManager cache
+        public static ConfigEntry<bool>  GLocFadeEnabled;  // full-screen grey-out as the pilot approaches G-LOC
+        public static ConfigEntry<float> GLocFadeOnset;    // pilotStrength at which darkening begins (higher = earlier)
+        public static ConfigEntry<float> GLocFadeMaxAlpha; // darkness reached at full G-LOC (1 = fully black)
         public static ConfigEntry<float> MouseSensitivity; // degrees of aim offset per unit of mouse delta
         public static ConfigEntry<float> MouseSmoothing;   // 0..1 one-pole smoothing on the mouse delta
         public static ConfigEntry<float> MaxAimAngle;      // cone half-angle (deg) the marker is clamped within
@@ -79,7 +82,10 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> AssistTurnRateGain;  // 1/s: turn-rate-targeted bank (self-scales the loaded bank with airspeed)
         public static ConfigEntry<float> CoordPullReleaseAngle;// deg: error cone inside which the coordinating pull eases off
         public static ConfigEntry<float> TurnLeadTime;        // s: anticipatory lead on the turn-rate bank command (v0.51 death-wobble fix)
-        public static ConfigEntry<float> AssistOffPitchScale; // flat pitch scale while the game's flight-assist is OFF (v0.51 AoA-divergence guard)
+        // v0.55: AssistOffPitchScale (v0.51's flat 0.5 pitch cut while flight-assist is OFF) was DELETED.
+        // The decompiled FBW law showed assist-off changes NOTHING above ~1.2x corner-speed dynamic
+        // pressure, so the flat cut just halved high-speed assist-off turns ("3x slower" reports); the
+        // ChaseController FBW probe now reads the per-airframe params and normalizes pitch exactly.
         public static ConfigEntry<float> BankSlewRate;        // deg/s: rate limit on EvolvedLegacy's bank target (v0.54 anti-relay)
 
         // --- Bank-to-turn law (Phase 1, v0.39): physics-based unified law knobs that have no Legacy
@@ -153,6 +159,14 @@ namespace NuclearOptionMouseAim
                 "Event-only logging: stays silent until a command misbehaves, then writes ONE compact [anomaly] line — overshoot (nose crosses the marker), over-roll (banks past what the turn needs), hunt (output sign-flapping), or persistent-miss (saturated but not closing). Cheap to hand back, unlike the verbose DebugLogging trace. On by default.");
             CursorLogging    = cf.Bind("HUD", "CursorLogging", false,
                 "Focused cursor instrument: writes one [cursor] line ONLY when the cursor regime changes (enter/exit mouse-aim, free-look, menu, mod toggle), showing our Cursor.visible/lockState next to the game CursorManager's cached visibility + flags. Use it to diagnose the OS pointer popping over the game on a mod toggle — when our visibility and the game's cache disagree, the game's Refresh() can't fix the pointer. Low-volume (transition-only); leave OFF normally.");
+            GLocFadeEnabled  = cf.Bind("HUD", "GLocFadeEnabled", true,
+                "Progressively grey the screen out as the pilot approaches G-LOC (blackout). The game's own black-out is a cockpit/first-person effect, but the gameplay consequence — controls dying at pilotStrength < 0.2 — applies in EVERY view, so in third-person you get no warning before the cut. This adds a gradient darkening driven by the same signal, in all views, as the graphical companion to the amber OVER-G text.");
+            GLocFadeOnset    = cf.Bind("HUD", "GLocFadeOnset", 0.4f, new ConfigDescription(
+                "Pilot G-tolerance (pilotStrength, 1 = fine, 0.2 = blacked out) at which the grey-out begins. Higher = earlier/longer warning; lower = later/more urgent. Must stay above the 0.2 blackout point.",
+                new AcceptableValueRange<float>(0.25f, 1.0f)));
+            GLocFadeMaxAlpha = cf.Bind("HUD", "GLocFadeMaxAlpha", 0.7f, new ConfigDescription(
+                "Darkness reached at full G-LOC (when controls cut out). 0.7 = heavy grey-out (external view never becomes a pure void); 1 = fully black.",
+                new AcceptableValueRange<float>(0f, 1f)));
 
             MouseSensitivity = cf.Bind("Aim", "MouseSensitivity", 0.30f, new ConfigDescription(
                 "Degrees the aim circle moves per unit of mouse motion. The raw Win32 delta is normalised to Unity's legacy axis scale (x0.1) so this number is read-backend independent. ~0.3 is a sane start; drag the slider for feel. Higher = the circle races with small hand movements; lower = finer, calmer aiming.",
@@ -286,9 +300,6 @@ namespace NuclearOptionMouseAim
             TurnLeadTime        = cf.Bind("Control", "TurnLeadTime", 0.65f, new ConfigDescription(
                 "THE death-wobble fix (v0.51). Recordings from 8 wobble reports showed the achieved bank lags the atan(omega*V/g) turn-rate bank command by a constant ~0.68-0.71 s, and that command was pure-proportional in the heading error — at the observed 0.3-0.85 Hz oscillation that lag is ~90-180 deg of phase, so the loop self-sustained a limit cycle (bank rocking +/-80 deg from a +/-6 deg aim error, roll stick railed, at ALL speeds — worse the faster you fly). This subtracts noseHeadingRate*TurnLeadTime from the azimuth error BEFORE it becomes a bank target, so the bank rolls out EARLY, anticipating where the nose will be when the bank catches up — including a brief counter-bank that brakes the turn. 0 = exact old behaviour (the wobble). Default 0.65 deliberately sits just under the measured lag. Raise toward 0.7-0.8 if high-speed corrections still overshoot/rock; lower if turns roll out early and park short of the marker.",
                 new AcceptableValueRange<float>(0f, 2f)));
-            AssistOffPitchScale = cf.Bind("Control", "AssistOffPitchScale", 0.5f, new ConfigDescription(
-                "Flat pitch-command scale applied while the game's own flight-assist (AoA limiter) is OFF (v0.51). With assist off at low-to-mid speed the game FBW's stick-to-pitch-rate gain roughly doubles-triples (decompiled: targetPitchAngVel becomes stick*maxPitchAngularVel instead of the G-limited formula), so the mod's fixed pitch gains overshoot violently — a recorded FS-12 run railed the elevator and swung AoA -29..+52 deg. ~0.5 is a rough compensating cut, NOT a physically-derived per-airframe match (that would need reflecting private FBW fields and reconstructing the game's dynamic-pressure blend — deferred). 1 = no change (old behaviour, can rail AoA with assist off). No effect while flight-assist is on.",
-                new AcceptableValueRange<float>(0.2f, 1f)));
             BankSlewRate        = cf.Bind("Control", "BankSlewRate", 60f, new ConfigDescription(
                 "EvolvedLegacy law only (v0.54). Rate limit (deg/s) on the atan(omega*V/g) bank target the roll servo chases. Nineteen v0.53 recordings (KR67 + AB4 Alcyon, 450-536 m/s) showed the brake-clamped lead rectifying heading-rate ripple into a bank target that BANGED 0<->48-65 deg at ~1.5 Hz from a 1-3 deg aim error — the roll servo faithfully chased it (corr 0.79-0.96) and the wings rocked +/-14-30 deg while station-keeping. A target that can only move this fast can't flap above the airframe's own roll response, and a slower-moving target also shrinks the 15-20 deg bank overshoot that sustained the slower 0.5 Hz cycle in big turns. 60 deg/s still reaches the full 72 deg bank in ~1.2 s (about what a real roll-in takes). 0 = off (instant target, old behaviour). Lower toward 40 if the wings still rock; raise toward 90-120 if turn entry feels lazy.",
                 new AcceptableValueRange<float>(0f, 360f)));
@@ -305,11 +316,11 @@ namespace NuclearOptionMouseAim
                 "EvolvedLegacy law only. When the total nose-off-marker angle (off) drops inside FineAngle, Legacy immediately snaps the roll blend to pure wings-level (bigTurn->0) even if the target is still a few degrees SIDEWAYS — it stops rolling to align early and the nose parks short. This knob keeps the roll-to-align contribution alive through the final degrees: the blend weight is MAX(bigTurn, lateralHold) where lateralHold = clamp01(|azErr|/EvolvedAlignHoldDeg), so as long as |azErr| exceeds this value the law keeps rolling to put the target at 12-o'clock instead of leveling early. When BOTH off and |azErr| are near zero the law settles wings-level on target — convergent, no limit cycle. ~5 deg is a reasonable start: raise if the nose still parks short or wings-level too early; lower toward 1-2 if it over-rolls past the target in the final stage.",
                 new AcceptableValueRange<float>(0f, 15f)));
 
-            HeliForwardSpeed    = cf.Bind("Control", "HeliForwardSpeed", 150f, new ConfigDescription(
-                "EvolvedLegacy + collective aircraft (takeoffDistance==0: helicopters / hover-VTOLs) only. FORWARD airspeed (m/s, nose-direction component of velocity) at/above which the aircraft is flown as a normal fixed-wing: bank-to-turn at full strength, regime blend heliBlend=0. Between this and HeliHoverSpeed the law smoothly ramps from bank-to-turn toward yaw-to-point. Has no effect on fixed-wing airframes (they're always heliBlend=0). Default 150 m/s keeps yaw-to-point engaged across the whole normal heli envelope; raise if a fast-moving heli still feels like it's pedalling the nose around, lower if forward flight feels mushy/over-banked.",
+            HeliForwardSpeed    = cf.Bind("Control", "HeliForwardSpeed", 60f, new ConfigDescription(
+                "EvolvedLegacy + collective aircraft (takeoffDistance==0: helicopters / hover-VTOLs) only. FORWARD airspeed (m/s, nose-direction component of velocity) at/above which the aircraft is flown as a normal fixed-wing: bank-to-turn at full strength, regime blend heliBlend=0. Between this and HeliHoverSpeed the law smoothly ramps from bank-to-turn toward yaw-to-point. Has no effect on fixed-wing airframes (they're always heliBlend=0). On tilt-wing / swivel-duct VTOLs the live tilt/nozzle angle also drives the blend (the higher of the two wins). Default 60 m/s (v0.58, was 150) = where the game's own helo FBW yaw weathervane is fully faded in (40-60 m/s, decompiled HeloControlsFilter) — above it yaw commands sideslip the game actively fights, so bank-to-turn must own the turn. Raise if a fast heli still feels like it's pedalling the nose around, lower if forward flight feels mushy/over-banked.",
                 new AcceptableValueRange<float>(20f, 300f)));
-            HeliHoverSpeed      = cf.Bind("Control", "HeliHoverSpeed", 40f, new ConfigDescription(
-                "EvolvedLegacy + collective aircraft only. FORWARD airspeed (m/s) at/below which the aircraft is flown as a pure hover: bank fully suppressed (wings level, roll axis becomes a leveler), yaw authority raised by HeliYawScale so the tail rotor swings the nose onto the marker (heliBlend=1). Must be below HeliForwardSpeed. Also forced on whenever the game's AutoHover is engaged, regardless of speed. Default 40 m/s; raise toward HeliForwardSpeed for an earlier switch to yaw-pointing, lower toward 0 to keep banking down to a crawl.",
+            HeliHoverSpeed      = cf.Bind("Control", "HeliHoverSpeed", 20f, new ConfigDescription(
+                "EvolvedLegacy + collective aircraft only. FORWARD airspeed (m/s) at/below which the aircraft is flown as a pure hover: bank fully suppressed (wings level, roll axis becomes a leveler), yaw authority raised by HeliYawScale so the tail rotor swings the nose onto the marker (heliBlend=1). Must be below HeliForwardSpeed. Also forced on whenever the game's AutoHover is engaged, regardless of speed. Default 20 m/s (v0.58, was 40) — roughly translational-lift speed, below which yaw-to-point is how a helicopter actually turns; raise toward HeliForwardSpeed for an earlier switch to yaw-pointing, lower toward 0 to keep banking down to a crawl.",
                 new AcceptableValueRange<float>(0f, 150f)));
             HeliYawScale        = cf.Bind("Control", "HeliYawScale", 2.0f, new ConfigDescription(
                 "EvolvedLegacy + collective aircraft only. Yaw-authority multiplier blended in (by heliBlend) at full hover so the tail rotor becomes the primary heading driver once the wings are held level. The existing yaw term already points the nose toward the marker; in hover it's the only thing turning the aircraft, so it usually needs more authority than coordinated forward flight. 1 = no boost (same yaw as fixed-wing); ~2 is a firm pedal-turn. Raise if the nose swings onto a side target too slowly; lower if the nose wags/overshoots in hover.",
@@ -409,7 +420,7 @@ namespace NuclearOptionMouseAim
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
                 $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
-                $"leadT={TurnLeadTime.Value:0.00} aOffP={AssistOffPitchScale.Value:0.00} bankSlew={BankSlewRate.Value:0} " +
+                $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} " +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
         }
 

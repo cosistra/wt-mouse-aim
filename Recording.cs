@@ -22,11 +22,14 @@ namespace NuclearOptionMouseAim
         // Bare filename of the active recording (for the anomaly file's rec= tag); "" when not recording.
         public static string CurrentFile => _w != null ? System.IO.Path.GetFileName(_path) : "";
 
-        // CSV header — keep in lockstep with the Sample() row below.
+        // CSV header — keep in lockstep with the Sample() row below. v0.55 adds assist (the game's
+        // flight-assist toggle, 0/1 — closes the "was assist on?" ambiguity in every report) and the
+        // FBW's own target/actual pitch rate (rad/s, GAME frame: + = nose down) for direct law fits.
         private const string Header =
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
             "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw," +
-            "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend,headingRateFilt,azErrPred,tBankE";
+            "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend,headingRateFilt,azErrPred,tBankE," +
+            "assist,fbwTgtPR,fbwPR";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -46,13 +49,21 @@ namespace NuclearOptionMouseAim
                 // Self-describing header block (v0.44): '#' comment lines (ignored as non-data by CSV
                 // tooling and parsers) so the recording alone explains "what we were dealing with" — the
                 // full gain set, active law, aircraft and the session id that ties it to the anomaly file.
-                string acName = "<unknown>";
-                try { if (GameManager.GetLocalAircraft(out var ac) && ac != null && ac.definition != null) acName = ac.definition.name; }
+                string acName = "<unknown>", fbwLine = "<unavailable>";
+                try
+                {
+                    if (GameManager.GetLocalAircraft(out var ac) && ac != null)
+                    {
+                        if (ac.definition != null) acName = ac.definition.name;
+                        fbwLine = ChaseController.FbwHeader(ac); // v0.55: per-airframe FBW params (fail-soft)
+                    }
+                }
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }
                 _w.WriteLine($"# mouseaim recording  v{WTMouseAimPlugin.PluginVersion}  session={WTMouseAimPlugin.SessionId}");
                 _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
                 _w.WriteLine($"# aircraft '{acName}'");
                 _w.WriteLine($"# config {Cfg.SnapshotString()}");
+                _w.WriteLine($"# fbw {fbwLine}");
                 _w.WriteLine(Header);
                 _startTime  = Time.time;
                 _lastSample = -999f; // force the first frame to sample
@@ -107,7 +118,8 @@ namespace NuclearOptionMouseAim
             float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
             float engP, float engR, float engY, float heliBlend, float vFwd,
             float rollRateF, float iPitch, float iYaw, float bankTR, float bankBlend,
-            float headingRateFilt, float azErrPred, float tBankE)
+            float headingRateFilt, float azErrPred, float tBankE,
+            bool assist, float fbwTgtPR, float fbwPR)
         {
             if (_w == null) return;
             float now = Time.time;
@@ -122,7 +134,7 @@ namespace NuclearOptionMouseAim
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
                     $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}," +
                     $"{heliBlend:0.000},{vFwd:0.0},{rollRateF:0.000},{iPitch:0.000},{iYaw:0.000},{bankTR:0.0},{bankBlend:0.000}," +
-                    $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0}");
+                    $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0},{(assist ? 1 : 0)},{fbwTgtPR:0.000},{fbwPR:0.000}");
                 _samples++;
             }
             catch (System.Exception e)

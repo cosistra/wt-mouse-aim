@@ -26,7 +26,13 @@ Machine-specific paths are written as placeholders:
   - `Cfg.cs` — `Cfg` (all config binds) + `ConfigurationManagerAttributes`.
   - `AimRig.cs` — `AimRig` (world-locked marker + Win32 raw mouse) + `Guards`.
   - `ChaseController.cs` — `ControlLawMode` enum + `ChaseController` (the control law in `Apply`, nested
-    `AnFrame`; also `DetectAnomalies`/`TrackManeuver`) + `PilotPlayerStatePatch` (Harmony seam on
+    `AnFrame`; also `DetectAnomalies`/`TrackManeuver`, the v0.55 FBW probe — per-airframe
+    stick→pitch-rate params read from the game's `ControlsFilter.FlyByWire`, fail-soft — and the
+    v0.57 canard probe/`InvertCanardRemap` — undoes the KR-67's `RelaxedStabilityController`
+    pitch remap, fail-soft — and the v0.58 helo probe/`ResolveHelo` — reads the private
+    `heloFlyByWire` of `HeloControlsFilter` + tilt/nozzle archetype components to rate-normalize
+    rotorcraft commands and drive the hover regime by tilt angle, fail-soft; rotorcraft are
+    force-flown with EvolvedLegacy) + `PilotPlayerStatePatch` (Harmony seam on
     `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
@@ -74,7 +80,10 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   opens every `Cfg` knob in-game — change a gain, feel it immediately, then write the good value
   back into `Cfg.cs` defaults. Config is logged once at startup and again on each live edit (not
   per anomaly line).
-- **In-flight keys:** **F10** master on/off, **F7** Fly Level, **F1** config, **RMB** free-look.
+- **In-flight keys:** the mod's hotkeys are all `Cfg` binds — for the current set + defaults, grep
+  `Cfg.cs` for `ConfigEntry<KeyCode>`, or read the startup load-line in `LogOutput.log` (it logs
+  every active binding). Don't hardcode the key list here; it drifts. (F1 = config and RMB =
+  free-look aren't mod binds — F1 is ConfigurationManager's own key, RMB is the game's.)
 
 ## Decompiling the game (read-only reference)
 The mod hooks the game's own classes, so before guessing at an API (FBW rate-command, AoA calc,
@@ -110,8 +119,10 @@ later ones.
 - **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
   paths, the build/release flow, or a sign convention, update the matching section here as part of
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
-- Bump `PluginVersion` on every shipped change; update the Awake load-line string for feature
-  changes. Commit messages: `vX.Y.Z — short summary` (see `git log`).
+- Bump `PluginVersion` on every shipped change. The Awake load-line stays a SHORT one-liner
+  (version + hotkeys + "see CHANGELOG.md") — version history goes in `CHANGELOG.md` only, never
+  into the log string (it used to mirror the whole changelog; deliberately cut in v0.57).
+  Commit messages: `vX.Y.Z — short summary` (see `git log`).
 - Sign conventions in `Apply` (verify against the decompiled source before changing): `local` =
   `InverseTransformDirection(aimDir)`, x=right / y=up / z=forward. Nose-up = **negative**
   `ci.pitch`; positive `ci.roll` = roll right; positive `ci.yaw` = yaw right; `azErr` + =

@@ -3,6 +3,157 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.58.0
+
+- **Rotorcraft stabilization — the heli wobble fix.** The UH-90's ~1 Hz forward-flight pitch
+  buzz and the RAH-72's ~1.2 Hz hover "sideways wobble" (Discord reports) are one disease: the
+  mod's fixed-wing error→stick gains ran an outer loop at 10–15 s⁻¹ around the game's own
+  `HeloFlyByWire` — a competent 3-axis **rate-command** PID with ~0.3 s lag (fitted from the
+  recordings at corr 0.88–0.97) — guaranteeing a ~1 Hz limit cycle on any heli, in *both* laws
+  (a user A/B'd to Legacy and the buzz was identical). Fix is the v0.55 fixed-wing pattern,
+  helo edition: a new fail-soft probe reads the private `heloFlyByWire` params (Enabled,
+  gLimit, maxAngularVel) and pitch/yaw become normalized rate commands
+  (`stick = 2.0·err/ωmax`, ~55° phase margin), auto-adapting to modded helis; `FineGainBoost`
+  no longer applies to collective airframes (it peaked the gain exactly at boresight).
+- **VTOL/heli regime from what the aircraft is, not a speed guess.** `heliBlend` is now driven
+  by the live tilt/nozzle angle where the airframe exposes one (`TiltWingController` wing
+  angle, `SwivelDuctSystem` nozzle angle — the higher of tilt-fraction and speed-blend wins);
+  `HeliForwardSpeed` default 150→**60** m/s and `HeliHoverSpeed` 40→**20** (the game's own helo
+  yaw weathervane fades in at 40–60 m/s — above that, yaw commands sideslip the game actively
+  fights; 150 kept a *cruising* UH-90 40% in hover regime, the mushy/skiddy-turn complaint).
+  `CompoundHeloController` (thruster heli) presence is detected and logged.
+- **Rotorcraft always fly EvolvedLegacy.** Every bit of heli handling lives in that law;
+  switching to Legacy silently dropped all of it (that user's A/B). `ControlLawMode` is now
+  ignored for collective airframes (logged once); fixed-wing selection untouched.
+- **Heading deprojection — the vertical-zoom roll oscillation fix.** The one FAIL of the v57
+  round (growing 0.46 Hz roll/azimuth cycle at 250–280 m/s) was not a gain problem: the nose
+  was ~82° up in a zoom climb, where horizontal-plane `azErr` inflates by 1/cos(pitch) —
+  a real sub-degree offset read as ±9.5° (a sibling capture at ~89° read ±170°!) and the
+  V-scaled bank map chased the phantom rail-to-rail. The bank-path errors (`azBank`,
+  `azErrPred`) are now multiplied by cos(pitch): exact at level flight (clean files 0.99–1.00,
+  replay ×1.00), zeroing bank authority only where heading is genuinely meaningless — pitch/yaw
+  fly body-frame errors and still close the capture. Replay: phantom bank-target swing cut
+  ×7–12 on the two pathological files, ≤0.5° change on every clean/big-turn file.
+- **Detector fixes.** `overstress` now requires real load (g > 2.5) and valid geometry
+  (|AoA| ≤ 90°, speed > 100 m/s) for the alpha branch — the v57 session's 41 lines (all from
+  one unloaded 1 g departure, "AoA −176°" at 21 m/s) are all suppressed, the genuine v56
+  9.7 g events all still fire. New `az-limit-cycle` anomaly: azErr sign-flipping with a rising
+  envelope + active roll stick in the fine cone — the signature that logged zero lines in the
+  v57 FAIL file (fires at t=380 on that recording, 4 s before the stick railed; silent on all
+  54 other sample files). `[canard]` now logs unconditionally with a log-only child-scan
+  (`field=`/`childScan=`), to settle why one session's KR-67 carries the canard controller and
+  another's doesn't — binding stays field-only on purpose: the game guards its remap on the
+  same field, so a null field means no remap exists to invert.
+- Knob delta: **0 new Cfg entries**; two default changes (`HeliForwardSpeed` 150→60,
+  `HeliHoverSpeed` 40→20 — F1-reset or delete the cfg line to pick them up on an existing
+  install).
+
+## 0.57.0
+
+- **KR-67 Ifrit canard linearization — the straight-line buzz fix.** The 47-recording v0.56 fleet
+  round (8 airframes) confirmed the user-reported tiny straight-line oscillation on the Ifrit: a
+  ~5.3 Hz pitch buzz (stick sign-flipping on 60–70% of samples, g wiggling ±0.4) active on up to
+  82% of a recording, both assist states, Ifrit-exclusive, present since at least v0.53. Root
+  cause (decompiled `Aircraft.FilterInputs`): the Ifrit is the one airframe with a
+  `RelaxedStabilityController`, which **replaces** the pitch stick with
+  `Lerp(AoA/canardRange, stick, |stick|)` before the FBW sees it — small inputs act
+  quadratically (0.05 stick delivers 0.0025) and the response is locally **reversed** for
+  `0 < stick < a/2`, a textbook deadzone/relay limit cycle around boresight. The mod now probes
+  the component (fail-soft, like the FBW probe) and inverts the remap closed-form, so the FBW
+  receives exactly the pitch the control law intended. Identity on every other airframe; on the
+  Ifrit this also un-warps the whole mid-stick response (half stick used to deliver a quarter).
+- **Predictive AoA gate — the assist-off anti-pump.** The reactive v0.55/0.56 gate is a relay on
+  a hard pull: AoA blows 1.3–2.5× past the ceiling before the fade bites (Trainer 20.4° on an
+  8.5° ceiling, growing; CAS1 dragged to 9.7 g on a 6 g airframe for 16 s), the gate slams shut,
+  AoA falls, full pull re-engages — a ~0.7 Hz buck cycle. The gate now closes on **predicted**
+  AoA (`AoA + max(0, rate)·0.30 s` toward each ceiling) but reopens on the real AoA — the
+  asymmetric lead is hysteresis, which is what actually breaks a relay.
+- **Slewed big-turn roll alignment.** Third member of the v0.53 raw-error→roll relay family: when
+  the target crosses dead-astern, `phi` flips sign in one tick and `eAlign` followed it
+  rail-to-rail (0.86–0.98 Hz roll-stick chatter in the FS-12/CI-22/KR-67 scissors captures),
+  bypassing both the v0.53 fine-cone deadzone and the v0.54 bank-target slew. `eAlign` is now
+  slew-limited at 3/s (full reversal ~1 s) — the chatter needs ~5.5/s to sustain, a genuine
+  over-the-top sweep barely notices.
+- **Overstress anomaly line.** The 9.7 g / 22° AoA assist-off episodes produced **zero**
+  `[anomaly]` lines — every detector watched stick patterns, none watched the airframe. New
+  `overstress` anomaly fires when g/AoA stay past the airframe's own FBW limits for 0.5 s.
+- **Analyzer:** high-frequency pitch-buzz detector (the buzz was invisible to the episode
+  detector — the v56 Ifrit files PASSed while buzzing 82% of the time); AoA-pump FAIL verdicts
+  with limiter-relative thresholds (pp 20 on a 27° limiter is honest maneuvering, on a 10°
+  Trainer it's a blow-through cycle); AoA/g overstress WARN lines against the `# fbw` header
+  (which now also records `canardRange`); WARN verdict text generalized.
+- Knob delta: **0 new Cfg entries** (canard inversion is probe-driven; gate lead / eAlign slew
+  are `ponytail:` constants).
+
+## 0.56.0
+
+- **Q-scheduled pitch gain — the takeoff-oscillation fix.** The 31-recording v0.55 test round
+  (FS-12 + Trainer) caught a 100% mod-driven 0.55 Hz pitch limit cycle below corner speed that
+  needs ~30–55 s of uninterrupted tracking to ratchet up (bank 18°→85°, g 0.7→7.5, AoA −29..+37°)
+  and then departs — which is why short low-speed tests never reproduced it; takeoff climb-out
+  supplied the window. Phase forensics (WOBBLE-FINDINGS.md UPDATE 6): the mod's P-response to the
+  aim error is instant (+0.13 s), but the *achieved* pitch rate lags the command by >1 s at
+  113 m/s — the low-q plant supplies essentially all the loop phase, and the outer P gain (tuned
+  against the fast high-q plant) is too hot there. The pitch demand terms (error P + coordPull)
+  are now scaled by the game's own q clamp (`clamp(q_ratio, 0.3, 1)`, ≡ 1 at/above corner speed —
+  high-speed feel untouched), leaving the rate-damping term unscaled so damping is relatively ~3×
+  stronger exactly where the plant is slow. One mechanism, both assist regimes; big errors still
+  rail the stick, so max-performance pulls keep full authority.
+- **Relative AoA ceiling margins.** The fixed −4°/6° margin+fade collapsed on low-limit airframes:
+  the Trainer's 10° `alphaLimiter` gave a 6° ceiling with the fade starting at **0° AoA** —
+  measured 60–90% of pitch authority cut at completely ordinary 3–5° turning AoA. Margins are now
+  proportional (`min(4°, 0.15·lim)` margin, `min(6°, 0.25·lim)` fade): Trainer gets full authority
+  below 6° AoA (ceiling 8.5°); the FS-12 (27°) keeps exactly the old 4°/6°.
+- **Assist-OFF is now a performance mode** (v0.55's assist-off pitch normalization DELETED). The
+  v55 sweep showed the normalization (×0.32–0.5 below corner speed) was the single biggest
+  mod-side restriction — ~15% of demanding assist-off samples held back at safe AoA — and the
+  airframe itself tracks its commanded rate at r 0.85–0.99 (the plane was never the bottleneck).
+  With assist OFF the game's raw law now passes through at full command, guarded by the AoA
+  ceiling + the q schedule (both assist-independent). High-speed assist parity needs no mod-side
+  scaling — the game runs the identical protected law above ~1.2× corner-q itself.
+- **Analyzer: FAIL/WARN verdict split + guard attribution.** Rail-only evidence (roll stick
+  railed, any speed) is now a WARN — the v55 captures showed plain railing is usually a benign
+  max-performance reversal; FAIL requires dynamic evidence (oscillation episode / growing azErr /
+  AoA blow-through). The digest derives per-segment `sched min` / `pitch gated %` from the
+  existing columns + `# fbw` header (no new CSV columns needed — the guards are pure functions of
+  what's already recorded). Selftest coverage for both. Config knob delta: **0**.
+
+## 0.55.0
+
+- **Low-speed pitch oscillation fixed + stability-assist parity — the Draken round-2 report**
+  (compounding oscillation below ~450 km/h on Ifrit/Compass/Revoker that could crash the plane,
+  and stability-assist OFF turning ~3× slower). A fresh decompile of the game's
+  `ControlsFilter.FlyByWire.Filter` plus an offline fit on the 11 tester recordings nailed both
+  root causes (see WOBBLE-FINDINGS.md UPDATE 5):
+  - **FBW probe (new)**: the mod now reads each airframe's fly-by-wire parameters from the game
+    at runtime (cornerSpeed/maxPitchAngularVel via the public API; gLimitPositive/alphaLimiter
+    via reflection, everything fail-soft — helicopters and FBW-less airframes keep the old
+    behaviour) and reconstructs the game's own stick→pitch-rate gain per tick.
+  - **`AssistOffPitchScale` REMOVED** (knob deleted): the decompiled law shows assist-off changes
+    *nothing* above ~1.2× corner-speed dynamic pressure, so v0.51's flat 0.5 cut was simply
+    halving high-speed assist-off turns (the "3× slower"). Replaced by an exact per-airframe,
+    per-speed normalization (protected/achievable rate ratio) that is ≡ 1 with assist on or at
+    speed — the verified high-speed feel is byte-identical — and the physically-correct cut with
+    assist off at low q.
+  - **Achievability cap**: the turn-rate demand ωdes is capped at the achievable pitch rate (in
+    both bank-target sites, shared pre-compute + EvolvedLegacy), so at low speed the bank target
+    shrinks physically instead of slamming ±72° into a turn the collapsed pitch rate can't fly;
+    the fine integrators freeze while capped (anti-windup — the offline fit showed
+    corr(command, response) going *negative* below corner speed: the plane had stopped following
+    while the loop kept winding).
+  - **Mod-side AoA ceiling**: the pitch command driving AoA past the game's per-airframe
+    `alphaLimiter` − 4° is scaled out (sign-aware, so recovery is never blocked), active
+    regardless of the assist state — assist-OFF now gets the AoA protection the game withholds.
+- **G-LOC fade-to-black warning**: a gradual full-screen grey-out driven by the same
+  `pilotStrength` signal as the amber OVER-G text, so third-person pilots (who get none of the
+  game's cockpit-only black-out) see G-LOC coming instead of an instant control cut. New knobs
+  `GLocFadeEnabled` / `GLocFadeOnset` (0.4) / `GLocFadeMaxAlpha` (0.7).
+- **Instrumentation**: recordings gain `assist`/`fbwTgtPR`/`fbwPR` columns and a `# fbw`
+  per-airframe params header line; `analyze-wobble.py` gains a per-file stick→rate model fit
+  (high-q/low-q split at the airframe's corner speed) and a named `low-speed stall oscillation`
+  FAIL verdict (stall blow-through / growing azErr / low-speed roll-rail), with `--selftest`
+  coverage. Config knob delta: −1.
+
 ## 0.54.0
 
 - **De-rectified turn lead + slew-limited bank target — the ~1.5 Hz wing rock and the
