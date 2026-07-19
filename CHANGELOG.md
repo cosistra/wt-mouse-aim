@@ -28,6 +28,12 @@ All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMous
 - **Dev-guide requirement (CLAUDE.md).** Codified the design rule the above follows: one
   control law for all airframes at all loads and speeds — every gain/schedule/gate keys off
   probed per-airframe parameters and live physical state, never per-plane tuning constants.
+- **Build system self-configures — no machine-specific paths committed.** The csproj no longer
+  hardcodes a game path: a new `build/locate-game.ps1` discovers the Nuclear Option install by
+  scanning Steam metadata (registry `SteamPath`/`InstallPath` + every `libraryfolders.vdf` library),
+  overridable by `NUCLEAR_OPTION_PATH` or `/p:GamePath=`, and self-caches the BepInEx 5 reference
+  DLLs under `.deps/` (downloaded once if absent — never installed into the game). Any checkout
+  builds with zero edits. New `PENDING-TESTS.md` tracks shipped-but-unflown changes.
 - Analysis artifacts: `GENERALITY-REVIEW.md` — a full review of the control law against that
   rule, with ranked findings for future work (Ifrit hover-yaw hypothesis included; no Ifrit
   recording existed in the v58 batch, so that fix waits on data).
