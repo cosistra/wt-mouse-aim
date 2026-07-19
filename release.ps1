@@ -24,6 +24,9 @@
 .PARAMETER Deploy
     Also copy the built DLL into the local game's BepInEx plugins folder (dev convenience).
 
+.PARAMETER SkipArchCheck
+    Skip the ARCHITECTURE.md drift check that runs before the build.
+
 .EXAMPLE
     ./release.ps1 -Notes "pole-stable horizon leveling"
 #>
@@ -31,7 +34,8 @@
 param(
     [string]$Notes,
     [switch]$NoCommit,
-    [switch]$Deploy
+    [switch]$Deploy,
+    [switch]$SkipArchCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +56,25 @@ $version = $verMatch.Matches[0].Groups[1].Value
 $tag = "v$version"
 if (-not $Notes) { $Notes = $tag }
 Step "Releasing $tag"
+
+# --- 1b. Architecture-diagram drift gate -------------------------------------------------------
+# ARCHITECTURE.md is the system map agents (and humans) navigate by, so a drifted diagram must not
+# ship. Checks files/types/patches against the node index and the ARCH-VERSION stamp against
+# PluginVersion. Skippable (-SkipArchCheck); a missing Python is a warning, not a blocked release.
+if (-not $SkipArchCheck) {
+    Step "Checking ARCHITECTURE.md is current"
+    # No ?? operator here on purpose: this script must stay runnable in Windows PowerShell 5.1.
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { $py = Get-Command python3 -ErrorAction SilentlyContinue }
+    if (-not $py) {
+        Write-Host "python not found - skipping the architecture check." -ForegroundColor Yellow
+    } else {
+        & $py.Source 'debugtests/check-architecture.py'
+        if ($LASTEXITCODE -ne 0) {
+            throw "ARCHITECTURE.md is out of date (see above). Update it, or re-run with -SkipArchCheck."
+        }
+    }
+}
 
 # --- 2. Build ----------------------------------------------------------------------------------
 Step "Building Release"
