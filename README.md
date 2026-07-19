@@ -92,6 +92,10 @@ around that rather than fighting it. Camera patches on the cockpit and orbit cam
 the view follow the same marker. It's deliberately a *thin* instructor — the game still owns the
 flight model.
 
+For the full picture, [**ARCHITECTURE.md**](ARCHITECTURE.md) has the system diagram: an at-a-glance
+map of every subsystem and where the mod/game boundary sits, then zoom-ins on the frame timeline, the
+aim rig, the control-law pipeline, the camera patches, and the telemetry loop.
+
 ---
 
 ## Install

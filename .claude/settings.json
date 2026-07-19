@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR:-.}/debugtests/check-architecture.py\" --hook",
+            "timeout": 30,
+            "statusMessage": "Checking ARCHITECTURE.md is current"
+          }
+        ]
+      }
+    ]
+  }
+}

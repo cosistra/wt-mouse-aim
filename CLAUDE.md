@@ -5,6 +5,12 @@ coding agent working in this repo**: how the code is laid out, how to build/depl
 debug in-game, and how to read the decompiled game source. Committed on purpose — a fresh checkout
 should be enough to get productive.
 
+**Read [ARCHITECTURE.md](ARCHITECTURE.md) before your first edit.** It is the system diagram: an
+at-a-glance map of every subsystem, then per-subsystem zoom-ins (frame timeline, the aim rig, the
+`Apply` pipeline, camera patches, telemetry, config), with the mod / game / platform boundary drawn
+explicitly. This file tells you where code *lives*; that one tells you how it *works* and why.
+**You are required to keep it current — see [Keeping the diagram current](#keeping-the-diagram-current).**
+
 Machine-specific paths are written as placeholders:
 - `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`), with
   **BepInEx 5 (Mono x64)** installed into it. This is set **once** in the csproj — see setup below.
@@ -115,10 +121,44 @@ later ones.
 > outward-facing and hard to reverse. The agent's job is to bump `PluginVersion`, get a clean
 > Release build, and let the **user** run `release.ps1` in a normal PowerShell window.
 
+## Keeping the diagram current
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is treated as **code, not documentation**. A stale system map is
+worse than none — it sends the next agent to the wrong file with confidence.
+
+**The rule: a structural change updates the diagram in the SAME change.** Structural means any of —
+- a `.cs` file added, removed, or renamed;
+- a top-level type added or removed;
+- a Harmony patch added, removed, or retargeted;
+- a stage added, removed, or **reordered** in the `ChaseController.Apply` pipeline (the L1.3 diagram
+  is ordered — reordering it silently is the easiest way to make the map lie);
+- a new game type read by reflection (add it to the game-types table, note the fail-soft behaviour);
+- a new artifact, sink, or offline tool.
+
+**Verify before you hand back:**
+```
+python debugtests/check-architecture.py            # exit 1 on drift; run this after any code change
+python debugtests/check-architecture.py --fix-version   # sync the ARCH-VERSION stamp after a version bump
+python debugtests/check-architecture.py --selftest      # asserts on the parsers
+```
+Two automatic gates back this up, so it isn't only a matter of the agent remembering:
+- **Stop hook** — `.claude/settings.json` (committed, so it applies in a fresh checkout too) runs the
+  checker when an agent finishes a turn. On drift it exits 2, which feeds the problem list back to
+  the agent to fix before handing back. It is silent when clean, and it checks at end-of-turn rather
+  than on every edit so a multi-step refactor isn't nagged mid-flight.
+- **Release gate** — `release.ps1` runs the same check before it builds, so a drifted diagram cannot
+  ship. Bypass with `-SkipArchCheck` if you ever need to.
+
+**What the checker cannot see.** It verifies files/types/patches/version — the mechanical half. It
+cannot tell that an arrow now points the wrong way, that a signal was renamed, or that a control law
+changed what it does. So: **after touching a subsystem, re-read that L1 section and fix the prose
+too.** A green checker on a wrong diagram is the failure mode to avoid.
+
 ## Conventions
 - **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
   paths, the build/release flow, or a sign convention, update the matching section here as part of
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
+  The same standing rule applies to `ARCHITECTURE.md` (above) — CLAUDE.md is the *where*, that is
+  the *how*; a change that alters structure usually touches both.
 - Bump `PluginVersion` on every shipped change. The Awake load-line stays a SHORT one-liner
   (version + hotkeys + "see CHANGELOG.md") — version history goes in `CHANGELOG.md` only, never
   into the log string (it used to mirror the whole changelog; deliberately cut in v0.57).
