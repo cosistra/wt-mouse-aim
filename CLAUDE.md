@@ -12,17 +12,25 @@ explicitly. This file tells you where code *lives*; that one tells you how it *w
 **You are required to keep it current — see [Keeping the diagram current](#keeping-the-diagram-current).**
 
 Machine-specific paths are written as placeholders:
-- `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`), with
-  **BepInEx 5 (Mono x64)** installed into it. This is set **once** in the csproj — see setup below.
+- `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`). The build
+  **auto-discovers** it (Steam scan) — no path is committed anywhere. To **run** the mod you also
+  need **BepInEx 5 (Mono x64)** installed into `<game>`; the build itself doesn't (it self-caches
+  the reference DLLs — see setup below).
 
-## First-time setup (one edit)
-1. Install [BepInEx 5 Mono x64](https://github.com/BepInEx/BepInEx/releases) into `<game>` and run
-   the game once so it generates `BepInEx/`.
-2. Point the build at your install: edit `<GamePath>` at the top of
-   [`NuclearOption-MouseAim.csproj`](NuclearOption-MouseAim.csproj) to your `<game>` folder. That
-   one property is the **single source of truth for paths** — every reference (`Assembly-CSharp`,
-   BepInEx core, Unity modules) derives from it.
-3. `dotnet build -c Release` and confirm 0 errors (the `MSB3277` warning is harmless).
+## First-time setup (no edits needed)
+1. `dotnet build -c Release` — that's it. Confirm 0 errors (the `MSB3277` warning is harmless). The
+   build runs [`build/locate-game.ps1`](build/locate-game.ps1), which finds `<game>` via Steam
+   metadata (registry `SteamPath`/`InstallPath` + every library in `steamapps\libraryfolders.vdf`)
+   and self-caches the BepInEx 5 reference DLLs under `.deps\` (downloaded once if absent). No
+   `<GamePath>` to edit — nothing machine-specific is committed.
+   - **Override** (only if auto-discovery can't find the game): set env var
+     `NUCLEAR_OPTION_PATH=<game>`, or build with `/p:GamePath="<game>"`.
+   - **No .NET SDK?** The official user-local installer needs no admin:
+     `iwr https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1; ./dotnet-install.ps1 -Channel 8.0`
+     then build with that `dotnet` (e.g. `~/.dotnet/dotnet.exe`).
+2. To actually **run** the mod in-game: install [BepInEx 5 Mono x64](https://github.com/BepInEx/BepInEx/releases)
+   into `<game>`, run the game once so it generates `BepInEx/`, then deploy the DLL (see build/test
+   loop below). Installing BepInEx is a *run* requirement only — the build never touches `<game>`.
 
 ## Layout
 - **Mod code is split one file per concern** (all at repo root, single namespace
@@ -38,14 +46,18 @@ Machine-specific paths are written as placeholders:
     pitch remap, fail-soft — and the v0.58 helo probe/`ResolveHelo` — reads the private
     `heloFlyByWire` of `HeloControlsFilter` + tilt/nozzle archetype components to rate-normalize
     rotorcraft commands and drive the hover regime by tilt angle, fail-soft; rotorcraft are
-    force-flown with EvolvedLegacy) + `PilotPlayerStatePatch` (Harmony seam on
-    `PilotPlayerState.PlayerAxisControls`).
+    force-flown with EvolvedLegacy — and the v0.59 AoA-utilization demand schedule/recovery
+    bias — folds live AoA vs the probed alpha ceiling into `qSched`, gates `FineGainBoost`,
+    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix) +
+    `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
 
 ## Paths (all under `<game>`)
-- Build reference DLLs: `<game>\NuclearOption_Data\Managed\` and `<game>\BepInEx\core\`.
+- Build reference DLLs: `<game>\NuclearOption_Data\Managed\` and `<game>\BepInEx\core\` — the latter
+  falls back to the repo-local cache `.deps\BepInEx\core` (auto-downloaded) when `<game>` has no
+  BepInEx installed. Both are resolved by `build/locate-game.ps1`, not hardcoded.
 - Deploy target: `<game>\BepInEx\plugins\WTMouseAim\NuclearOption-MouseAim.dll`.
 - BepInEx log (read after a flight): `<game>\BepInEx\LogOutput.log`.
 - Live config: `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
@@ -154,11 +166,24 @@ changed what it does. So: **after touching a subsystem, re-read that L1 section 
 too.** A green checker on a wrong diagram is the failure mode to avoid.
 
 ## Conventions
+- **ONE control law for ALL airframes, at all loads and speeds — no per-plane tuning.** This is
+  the core design requirement (maintainer, 2026-07-18). Every gain, schedule, and gate must key
+  off (a) per-airframe parameters probed from the game's own components (the FBW/canard/helo
+  probes — always fail-soft) and (b) live physical state (dynamic pressure, AoA, measured rates
+  and effectiveness — loadout/mass shows up as achieved-vs-commanded discrepancy, never as a
+  constant). A fix that only works because a constant suits one plane is wrong even if it fixes
+  the report. Before shipping a control-law change, check it against: a light jet at high q, a
+  loaded jet mushing near its alpha limit above corner speed, a low-limit STOL trainer, and a
+  hovering helo. `GENERALITY-REVIEW.md` is the standing audit of the law against this rule —
+  update it when a finding is fixed or a new one is discovered.
 - **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
   paths, the build/release flow, or a sign convention, update the matching section here as part of
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
   The same standing rule applies to `ARCHITECTURE.md` (above) — CLAUDE.md is the *where*, that is
   the *how*; a change that alters structure usually touches both.
+- **`PENDING-TESTS.md` tracks shipped-but-unflown changes.** A code change is green-built but not
+  yet confirmed in the air until someone flies it. Add an entry when you ship such a change; run
+  each test and **delete its entry** once it passes (delete the file when it's empty).
 - Bump `PluginVersion` on every shipped change. The Awake load-line stays a SHORT one-liner
   (version + hotkeys + "see CHANGELOG.md") — version history goes in `CHANGELOG.md` only, never
   into the log string (it used to mirror the whole changelog; deliberately cut in v0.57).

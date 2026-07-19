@@ -119,6 +119,10 @@ namespace NuclearOptionMouseAim
                                                // eAlign followed it rail-to-rail, bypassing every bank-target slew/deadzone)
         private static float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
         private static float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
+        private static float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
+                                               // down to the 0.3 q-clamp floor near this airframe's own alpha ceiling).
+                                               // Fast attack / slow release — the hysteresis that stops demand snapping
+                                               // hot again as AoA falls back through the ceiling mid-cycle (loaded-jet fix)
 
         // Measured-reactive yaw-weakness estimate (v0.35). _yawEffFilt is a low-passed raw measure of how
         // much nose-yaw rate each unit of yaw command is buying (deg/s per stick); _yawWeak in [0,1] rises
@@ -482,6 +486,7 @@ namespace NuclearOptionMouseAim
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
                 _headingRateFilt = 0f; _tBankSlewed = 0f; // fresh heading-rate lead (v0.51) + bank-target slew (v0.54)
+                _alphaSchedFilt = 1f; // fresh AoA-utilization demand schedule (v0.59)
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -578,13 +583,9 @@ namespace NuclearOptionMouseAim
                 // the rate damping and the output slew limiter still active against hunting.)
                 float damp = Cfg.ChaseDamping.Value;
                 float fineBlend = Mathf.Clamp01(1f - off / Mathf.Max(1f, Cfg.FineAngle.Value));
-                float fineGain  = 1f + Cfg.FineGainBoost.Value * fineBlend;
-                // v0.58: NO fine boost on rotorcraft. The boost multiplies the outer P gain up to 3.5x
-                // exactly at boresight — on the helo rate-command inner loop (~0.3 s lag) that made the
-                // loop gain 10-15 s^-1 and limit-cycled at ~1 Hz on BOTH reported wobbles (v57 recs:
-                // UH-90 pitch 0.88/1.08 Hz, RAH-72 hover yaw 1.16 Hz). Planes need the boost because
-                // their FBW parks short; the helo PID has an integral compensator and doesn't.
-                if (_collective) fineGain = 1f;
+                // fineGain moved BELOW the AoA-ceiling block in v0.59: the boost is gated by the
+                // AoA-utilization schedule (_alphaSchedFilt), which that block updates. Nothing between
+                // here and there reads fineGain (the integrator winds on fineBlend, not fineGain).
 
                 // BODY-FRAME ROLL-THEN-PULL (v0.26). One shared plan for all three axes: roll the lift
                 // vector (body-up) onto the target, then pull up into it. Attitude-robust at any pitch (no
@@ -779,6 +780,7 @@ namespace NuclearOptionMouseAim
                 // is never blocked: aoaGateUp bites as AoA nears +ceiling and scales only NOSE-UP
                 // commands; aoaGateDn is the mirrored push guard. 1 = wide open.
                 float aoaGateUp = 1f, aoaGateDn = 1f;
+                float aoaRecover = 0f; // v0.59: restoring pitch past either AoA ceiling (+ = nose-down needed)
                 if (!_collective)
                 {
                     // v0.56: RELATIVE margin/fade (was fixed 4/6 deg). alphaLimiter spans 10..27 deg across
@@ -805,7 +807,49 @@ namespace NuclearOptionMouseAim
                     float aoaPredDn = aoaNow + Mathf.Min(0f, _aoaRateFilt) * aoaLead; // falling -> -ceiling
                     aoaGateUp = Mathf.Clamp01((aoaCeil - aoaPredUp) / aoaFade);
                     aoaGateDn = Mathf.Clamp01((aoaCeil + aoaPredDn) / aoaFade);
+                    // v0.59 AoA-UTILIZATION DEMAND SCHEDULE — the LOADED-jet fix (v58 discord FS-12 rec
+                    // 015235: rail-to-rail ~0.55 Hz pitch relay at 160-170 m/s, AoA +43..-18 on a ~23 deg
+                    // ceiling, iPitch ~0.003 — integrators innocent). qSched above keys off dynamic
+                    // pressure ONLY, so a loaded airframe that needs high AoA to make its commanded G
+                    // above corner speed reads as high-q while the plant is actually mushing: gain stays
+                    // hot, the nose departs, and the gate+damping relay-cycle it. Fold live AoA
+                    // utilization — against THIS airframe's probed ceiling — into the same schedule:
+                    // 1 below utilStart, easing to the same 0.3 floor as the game's q clamp at the
+                    // ceiling. Uses the PREDICTED AoA (same lead as the gates) so it bites into a fast
+                    // pull, with fast-attack/slow-release smoothing (the _yawWeak hysteresis trick) so
+                    // demand can't snap hot again as AoA falls back through the ceiling mid-cycle — that
+                    // snap-back is what sustains a relay. Light jet at moderate AoA: util < utilStart,
+                    // sched 1, behaviour byte-identical. Airframe-agnostic by construction: probed
+                    // ceiling + live state, no per-plane constants.
+                    // ponytail: fixed utilStart/floor/taus, promote to Cfg if flight tuning demands it.
+                    const float utilStart = 0.6f, schedFloor = 0.3f, atkTau = 0.05f, relTau = 1.0f;
+                    float aoaUtil  = Mathf.Max(aoaPredUp, -aoaPredDn) / Mathf.Max(1f, aoaCeil);
+                    float schedRaw = Mathf.Lerp(1f, schedFloor, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
+                    float schedTau = schedRaw < _alphaSchedFilt ? atkTau : relTau;
+                    _alphaSchedFilt += (dt / (schedTau + dt)) * (schedRaw - _alphaSchedFilt);
+                    qSched = Mathf.Min(qSched, _alphaSchedFilt);
+                    // v0.59 AoA RECOVERY BIAS — the gates only CUT the command driving AoA outward; past
+                    // the ceiling the command is zero and recovery is left to raw aero + reactive damping,
+                    // which is exactly the asymmetric relay the FS-12 cycle rode (+43 overshoot, then an
+                    // unopposed -18 bunt). Command a restoring pitch proportional to the PREDICTED excess
+                    // past either ceiling, normalized by the airframe-proportional fade width: continuous
+                    // (no discontinuity to relay on), symmetric, exactly zero inside the envelope.
+                    aoaRecover = (Mathf.Max(0f, aoaPredUp - aoaCeil) - Mathf.Max(0f, -aoaPredDn - aoaCeil)) / aoaFade;
                 }
+                else _alphaSchedFilt = 1f; // rotorcraft: schedule inert (the helo path is rate-normalized)
+
+                // FINE-CAPTURE GAIN (moved below the AoA block in v0.59 — see the fineBlend comment above).
+                // The boost is gated by the AoA-utilization schedule: at 3.5x near boresight it railed the
+                // stick on ~5 deg of error exactly where the loaded plant was mushing (the kick that starts
+                // the FS-12 relay). Gated by _alphaSchedFilt — NOT the speed qSched — so a low-speed LIGHT
+                // jet keeps the current capture feel; only genuine near-ceiling AoA softens it.
+                float fineGain = 1f + Cfg.FineGainBoost.Value * fineBlend * _alphaSchedFilt;
+                // v0.58: NO fine boost on rotorcraft. The boost multiplies the outer P gain up to 3.5x
+                // exactly at boresight — on the helo rate-command inner loop (~0.3 s lag) that made the
+                // loop gain 10-15 s^-1 and limit-cycled at ~1 Hz on BOTH reported wobbles (v57 recs:
+                // UH-90 pitch 0.88/1.08 Hz, RAH-72 hover yaw 1.16 Hz). Planes need the boost because
+                // their FBW parks short; the helo PID has an integral compensator and doesn't.
+                if (_collective) fineGain = 1f;
 
                 // ANTICIPATORY LEAD (v0.51) — THE death-wobble fix. bankTR below is pure-proportional
                 // in azErr, and 8 user recordings showed the achieved bank lags that command by a
@@ -949,6 +993,15 @@ namespace NuclearOptionMouseAim
                 // opposite direction is never blocked. Active regardless of the assist state: assist-OFF
                 // gets the AoA protection the game withholds.
                 tgtP *= tgtP < 0f ? aoaGateUp : aoaGateDn;
+                // v0.59 AoA RECOVERY BIAS — applied AFTER the gates (it must survive them: it's the term
+                // that flies the nose back INSIDE the envelope) and BEFORE the canard inversion (it's a
+                // desired-effective-pitch term like the rest of tgtP). Nose-down = POSITIVE ci.pitch, so
+                // + excess past the +ceiling adds a positive (down) command; mirrored on the negative
+                // side. Capped well below full deflection — it recovers, it doesn't bunt. The integrator
+                // is already frozen whenever this is nonzero (the gates are < 1 there).
+                // ponytail: fixed gain/cap, promote to Cfg if flight tuning demands it.
+                if (aoaRecover != 0f)
+                    tgtP = Mathf.Clamp(tgtP + Mathf.Clamp(aoaRecover * 0.25f, -0.5f, 0.5f), -1f, 1f);
 
                 // v0.57 CANARD LINEARIZATION — invert the Ifrit's relaxed-stability pitch remap so the
                 // FBW receives the pitch the law (and the AoA gate above) intended. tgtP here is the

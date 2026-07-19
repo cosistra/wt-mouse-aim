@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 0.58.0 -->
+<!-- ARCH-VERSION: 0.59.0 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -247,11 +247,14 @@ flowchart TB
 
     subgraph COND["5 · CONDITION"]
         c1["anticipatory lead → brake-only clamp<br/>→ proportional floor → achievability cap"]
-        c2["mod-side AoA ceiling (v0.55)"]
+        c2["<b>AoA envelope</b> — ceiling gates (v0.55)<br/>predictive lead; cut only the command<br/>driving AoA OUTWARD"]
+        c2b["<b>AoA-utilization demand schedule</b> (v0.59)<br/>live AoA vs this airframe's PROBED ceiling,<br/>folded into qSched. Fast-attack / slow-release<br/>so demand can't snap hot again as AoA falls<br/>back through the ceiling — the loaded-jet fix"]
+        c2c["<b>AoA recovery bias</b> (v0.59)<br/>restoring pitch ∝ predicted excess past either<br/>ceiling. Continuous + symmetric, exactly zero<br/>inside the envelope — the gates only CUT,<br/>so past the ceiling nothing flew it back in"]
+        c2d["fine-capture boost, gated by that schedule<br/>(NOT by speed — a slow LIGHT jet keeps its feel;<br/>only genuine near-ceiling AoA softens it)"]
         c3["fine leaky integrator (v0.24)<br/>FBW is a RATE law, so P alone parks short"]
         c4["invert canard remap (v0.57)<br/>so the game delivers the pitch we meant"]
         c5["output slew limit"]
-        c1 --> c2 --> c3 --> c4 --> c5
+        c1 --> c2 --> c2b --> c2c --> c2d --> c3 --> c4 --> c5
     end
 
     subgraph MAN["6 · MANUAL HANDOFF"]
@@ -273,7 +276,7 @@ flowchart TB
     MEAS --> EST --> PROBE --> LAW --> COND --> MAN --> WRITE
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
-    class m1,m2,m3,e1,e2,e3,e4,e5,p1,p2,p3,l1,l2,l3,c1,c2,c3,c4,c5,h1,h2,h3,h4,w1,w2,w3,w4,w5 mod
+    class m1,m2,m3,e1,e2,e3,e4,e5,p1,p2,p3,l1,l2,l3,c1,c2,c2b,c2c,c2d,c3,c4,c5,h1,h2,h3,h4,w1,w2,w3,w4,w5 mod
 ```
 
 ### Why the probes exist
@@ -293,6 +296,23 @@ oscillation and windup. Three airframe families need three different questions:
 leaves the probe not-ok and the previous version's behaviour exactly intact. That contract is
 non-negotiable for new probes — reflection against game internals is the one part of this mod that a
 patch can silently break.
+
+### The generality rule (the reason the probes carry so much weight)
+
+**No per-airframe constants, ever.** Every gain, schedule and gate must key off either (a) a parameter
+*probed from the game's own components* for the airframe being flown, or (b) *live physical state* —
+dynamic pressure, AoA, measured rates and effectiveness. Loadout and mass are never constants; they
+show up as achieved-vs-commanded discrepancy and must be handled that way.
+
+A fix that only works because a tuned constant happens to suit one plane is **wrong even if it closes
+the report**. Before shipping a control-law change, check it against a light jet at high q, a loaded
+jet mushing near its alpha limit above corner speed, a low-limit STOL trainer, and a hovering helo.
+
+This is what the v0.59 demand schedule is an instance of: `qSched` keyed off dynamic pressure *alone*,
+so a loaded airframe needing high AoA to make its commanded G read as high-q while the plant was
+actually mushing — gain stayed hot, the nose departed, and the gate plus damping relay-cycled it.
+The fix folds *live* AoA against the *probed* ceiling into the same schedule, so it is airframe-
+agnostic by construction. `GENERALITY-REVIEW.md` is the standing audit of the law against this rule.
 
 ---
 

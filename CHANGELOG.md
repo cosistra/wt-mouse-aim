@@ -3,6 +3,41 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.59.0
+
+- **AoA-utilization demand schedule — the loaded-jet pitch-oscillation fix.** The v58 Discord
+  FS-12 (Revoker) recording (loaded, 229–330 kt) showed a rail-to-rail ~0.55 Hz pitch relay:
+  AoA swung +43°…−18° on a ~23° ceiling while `iPitch` sat at 0.003 (integrators innocent).
+  Root cause: the v0.56 low-q gain schedule keys off **dynamic pressure only**, so a *loaded*
+  airframe that needs high AoA to make its commanded G *above* corner speed reads as high-q
+  while the plant is actually mushing — outer-loop gain stays hot and the nose departs. The
+  schedule now also folds in live **AoA utilization against the airframe's own probed alpha
+  ceiling** (predicted AoA, same lead as the gates; fast-attack/slow-release hysteresis so
+  demand can't snap hot mid-cycle), easing to the same 0.3 floor as the game's q clamp.
+  Airframe-agnostic: probed ceiling + live state, no per-plane constants.
+- **`FineGainBoost` gated by the same schedule.** The up-to-3.5× boresight boost railed the
+  stick on ~5° of error exactly where the loaded plant was mushing — the kick that starts the
+  relay. Gated by the AoA schedule (not the speed one), so light jets at any speed keep the
+  current capture feel; only genuine near-ceiling AoA softens it.
+- **AoA recovery bias.** The v0.55 gates only *cut* the command driving AoA outward — past
+  the ceiling the command is zero and recovery was left to raw aero + reactive damping (the
+  asymmetric relay the FS-12 cycle rode: +43° overshoot, then an unopposed −18° bunt). A
+  restoring pitch proportional to the predicted excess past either ceiling (normalized by the
+  airframe-proportional fade width, capped at 0.5 stick) now actively flies the nose back
+  inside the envelope. Continuous and symmetric — no discontinuity left to relay on.
+- **Dev-guide requirement (CLAUDE.md).** Codified the design rule the above follows: one
+  control law for all airframes at all loads and speeds — every gain/schedule/gate keys off
+  probed per-airframe parameters and live physical state, never per-plane tuning constants.
+- **Build system self-configures — no machine-specific paths committed.** The csproj no longer
+  hardcodes a game path: a new `build/locate-game.ps1` discovers the Nuclear Option install by
+  scanning Steam metadata (registry `SteamPath`/`InstallPath` + every `libraryfolders.vdf` library),
+  overridable by `NUCLEAR_OPTION_PATH` or `/p:GamePath=`, and self-caches the BepInEx 5 reference
+  DLLs under `.deps/` (downloaded once if absent — never installed into the game). Any checkout
+  builds with zero edits. New `PENDING-TESTS.md` tracks shipped-but-unflown changes.
+- Analysis artifacts: `GENERALITY-REVIEW.md` — a full review of the control law against that
+  rule, with ranked findings for future work (Ifrit hover-yaw hypothesis included; no Ifrit
+  recording existed in the v58 batch, so that fix waits on data).
+
 ## 0.58.0
 
 - **Rotorcraft stabilization — the heli wobble fix.** The UH-90's ~1 Hz forward-flight pitch
