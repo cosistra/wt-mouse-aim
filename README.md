@@ -92,9 +92,10 @@ around that rather than fighting it. Camera patches on the cockpit and orbit cam
 the view follow the same marker. It's deliberately a *thin* instructor — the game still owns the
 flight model.
 
-For the full picture, [**ARCHITECTURE.md**](ARCHITECTURE.md) has the system diagram: an at-a-glance
-map of every subsystem and where the mod/game boundary sits, then zoom-ins on the frame timeline, the
-aim rig, the control-law pipeline, the camera patches, and the telemetry loop.
+> 📐 **[ARCHITECTURE.md](ARCHITECTURE.md) — the full system diagram.** An at-a-glance map of every
+> subsystem with the mod / game / platform boundary drawn explicitly, then zoom-ins on the frame
+> timeline, the aim rig, the control-law pipeline, the camera patches, and the telemetry loop.
+> Start there if you want to understand or change how any of this works.
 
 ---
 
@@ -151,14 +152,19 @@ handy for bug reports.
 
 ## Build from source
 
-Requires the .NET SDK. Point `<GamePath>` in `NuclearOption-MouseAim.csproj` at your install
-(the folder containing `NuclearOption.exe`, with BepInEx 5 installed into it):
+Requires the .NET SDK. No paths to edit — the build finds your install automatically via Steam:
 
 ```
 dotnet build NuclearOption-MouseAim.csproj -c Release
 ```
 
+If auto-discovery can't find the game, set `NUCLEAR_OPTION_PATH=<folder with NuclearOption.exe>`
+or build with `/p:GamePath="<folder with NuclearOption.exe>"`.
+
 Then copy `bin\Release\NuclearOption-MouseAim.dll` into `<game>\BepInEx\plugins\WTMouseAim\`.
+
+Contributors: [`CLAUDE.md`](CLAUDE.md) is the dev guide (layout, debugging, conventions) and
+[`ARCHITECTURE.md`](ARCHITECTURE.md) is the system diagram — read the diagram before your first change.
 
 Maintainers: [`release.ps1`](release.ps1) builds, tags, and publishes a GitHub release in one step.
 
