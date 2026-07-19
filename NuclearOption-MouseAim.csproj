@@ -6,7 +6,7 @@
        BepInEx 5 (mono) is installed into this same folder.
        ==================================================================== -->
   <PropertyGroup>
-    <GamePath>E:\SlowGames\steamapps\common\Nuclear Option</GamePath>
+    <GamePath>D:\SteamLibrary\steamapps\common\Nuclear Option</GamePath>
   </PropertyGroup>
 
   <PropertyGroup>
