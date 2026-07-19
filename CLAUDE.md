@@ -32,8 +32,10 @@ Machine-specific paths are written as placeholders:
     pitch remap, fail-soft — and the v0.58 helo probe/`ResolveHelo` — reads the private
     `heloFlyByWire` of `HeloControlsFilter` + tilt/nozzle archetype components to rate-normalize
     rotorcraft commands and drive the hover regime by tilt angle, fail-soft; rotorcraft are
-    force-flown with EvolvedLegacy) + `PilotPlayerStatePatch` (Harmony seam on
-    `PilotPlayerState.PlayerAxisControls`).
+    force-flown with EvolvedLegacy — and the v0.59 AoA-utilization demand schedule/recovery
+    bias — folds live AoA vs the probed alpha ceiling into `qSched`, gates `FineGainBoost`,
+    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix) +
+    `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
@@ -116,6 +118,16 @@ later ones.
 > Release build, and let the **user** run `release.ps1` in a normal PowerShell window.
 
 ## Conventions
+- **ONE control law for ALL airframes, at all loads and speeds — no per-plane tuning.** This is
+  the core design requirement (maintainer, 2026-07-18). Every gain, schedule, and gate must key
+  off (a) per-airframe parameters probed from the game's own components (the FBW/canard/helo
+  probes — always fail-soft) and (b) live physical state (dynamic pressure, AoA, measured rates
+  and effectiveness — loadout/mass shows up as achieved-vs-commanded discrepancy, never as a
+  constant). A fix that only works because a constant suits one plane is wrong even if it fixes
+  the report. Before shipping a control-law change, check it against: a light jet at high q, a
+  loaded jet mushing near its alpha limit above corner speed, a low-limit STOL trainer, and a
+  hovering helo. `GENERALITY-REVIEW.md` is the standing audit of the law against this rule —
+  update it when a finding is fixed or a new one is discovered.
 - **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
   paths, the build/release flow, or a sign convention, update the matching section here as part of
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
