@@ -5,11 +5,18 @@
 
 .DESCRIPTION
     Single source of truth for the version is PluginVersion in WTMouseAimPlugin.cs. The script:
-      1. Builds the Release DLL.
-      2. Commits any pending changes (unless -NoCommit).
+      1. Commits any pending changes (unless -NoCommit).
+      2. Builds the Release DLL.
       3. Tags vX.Y.Z and pushes the branch + tag.
       4. Creates a GitHub Release with the DLL as an asset (gh CLI).
-      5. Computes the SHA-256 and writes version / downloadUrl / hash into the NOMNOM manifest.
+      5. Computes the SHA-256, writes version / downloadUrl / hash into the NOMNOM manifest, and
+         commits that as a follow-up so the tree ends clean.
+
+    Commit-then-build is deliberate (NOMNOM policy clause 2.2 - "DLL must be consistent with the
+    source"). The compiler stamps SourceRevisionId from HEAD at build time, so building first would
+    ship a DLL pointing at the PREVIOUS commit and send anyone verifying the binary to the wrong
+    source. The manifest bump lands AFTER the tag on purpose: the tag must stay on the exact commit
+    the DLL was built from.
 
     After the first release is listed in NOMNOM, future versions are picked up automatically by
     NOMNOM's hourly auto-update job - you still run this script to build + publish the release,
@@ -57,6 +64,10 @@ $tag = "v$version"
 if (-not $Notes) { $Notes = $tag }
 Step "Releasing $tag"
 
+# Fail before anything is committed, not after (this guard used to sit down at the tag step, where
+# an already-taken tag aborted the run with a stray release commit already made).
+if (git tag -l $tag) { throw "Tag $tag already exists. Bump PluginVersion or delete the tag." }
+
 # --- 1b. Architecture-diagram drift gate -------------------------------------------------------
 # ARCHITECTURE.md is the system map agents (and humans) navigate by, so a drifted diagram must not
 # ship. Checks files/types/patches against the node index and the ARCH-VERSION stamp against
@@ -76,16 +87,8 @@ if (-not $SkipArchCheck) {
     }
 }
 
-# --- 2. Build ----------------------------------------------------------------------------------
-Step "Building Release"
-dotnet build $csproj -c Release
-if ($LASTEXITCODE -ne 0) { throw "Build failed" }
-if (-not (Test-Path $dll)) { throw "Build did not produce $dll" }
-
-$hash = (Get-FileHash -Path $dll -Algorithm SHA256).Hash.ToLower()
-Write-Host "SHA-256: $hash"
-
-# --- 3. Commit pending changes -----------------------------------------------------------------
+# --- 2. Commit pending changes -----------------------------------------------------------------
+# Must run BEFORE the build so the DLL's embedded SourceRevisionId names the released commit.
 if (-not $NoCommit) {
     $dirty = git status --porcelain
     if ($dirty) {
@@ -97,8 +100,16 @@ if (-not $NoCommit) {
     }
 }
 
+# --- 3. Build ----------------------------------------------------------------------------------
+Step "Building Release"
+dotnet build $csproj -c Release
+if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+if (-not (Test-Path $dll)) { throw "Build did not produce $dll" }
+
+$hash = (Get-FileHash -Path $dll -Algorithm SHA256).Hash.ToLower()
+Write-Host "SHA-256: $hash"
+
 # --- 4. Tag + push -----------------------------------------------------------------------------
-if (git tag -l $tag) { throw "Tag $tag already exists. Bump PluginVersion or delete the tag." }
 Step "Tagging and pushing"
 git tag $tag
 git push origin HEAD
@@ -130,9 +141,27 @@ $text = [regex]::Replace($text, '("downloadUrl":\s*")[^"]*(")', "`${1}$downloadU
 $text = [regex]::Replace($text, '("hash":\s*")[^"]*(")', "`${1}sha256:$hash`${2}")
 Set-Content -LiteralPath $manifest -Value $text -Encoding UTF8 -NoNewline
 
+# Commit the bump as a follow-up (it can only be written once the DLL exists and is hashed, i.e.
+# after the tag). Left uncommitted it just drifts until some later release sweeps it up, which is
+# how the in-repo manifest ended up two releases behind the registry.
+if (-not $NoCommit) {
+    if (git status --porcelain -- $manifest) {
+        git add -- $manifest
+        git commit -m "$tag - NOMNOM manifest bump"
+        git push origin HEAD
+    }
+}
+
 # --- 7. Optional local deploy ------------------------------------------------------------------
 if ($Deploy) {
-    $gamePath = (Select-String -Path $csproj -Pattern '<GamePath>(.*?)</GamePath>').Matches[0].Groups[1].Value
+    # The game path is no longer stored in the csproj (v0.59 made the build auto-discover it), so
+    # ask the locator. It prints exactly one stdout line "<game>|<bepinexCore>"; its diagnostics go
+    # to stderr, hence the '|' filter rather than trusting the line count.
+    $locateScript = Join-Path $PSScriptRoot 'build\locate-game.ps1'
+    $locateOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $locateScript -GamePath ''
+    $resultLine = @($locateOut) | Where-Object { $_ -like '*|*' } | Select-Object -Last 1
+    if (-not $resultLine) { throw "locate-game.ps1 returned no game path - cannot deploy. Set NUCLEAR_OPTION_PATH." }
+    $gamePath = $resultLine.Split('|')[0]
     $dest = Join-Path $gamePath 'BepInEx/plugins/WTMouseAim'
     Step "Deploying to $dest"
     New-Item -ItemType Directory -Force -Path $dest | Out-Null

@@ -125,10 +125,16 @@ truth**: bump it, then run
 ```
 ./release.ps1 -Notes "short summary"      # add -Deploy to also copy into the local BepInEx folder
 ```
-It builds Release, commits pending changes, tags `vX.Y.Z`, pushes branch + tag, creates the GitHub
-Release with the DLL asset (`gh` CLI), and refreshes the NOMNOM manifest (`*.nomnom.json`)
-version/downloadUrl/hash. After the first release is listed, NOMNOM's hourly job auto-picks up
-later ones.
+It commits pending changes, builds Release, tags `vX.Y.Z`, pushes branch + tag, creates the GitHub
+Release with the DLL asset (`gh` CLI), then refreshes the NOMNOM manifest (`*.nomnom.json`)
+version/downloadUrl/hash and commits that bump as a follow-up. After the first release is listed,
+NOMNOM's hourly job auto-picks up later ones.
+
+**Commit-then-build is load-bearing, don't reorder it.** The compiler stamps `SourceRevisionId`
+from HEAD at build time, so building first ships a DLL that names the *previous* commit — which
+breaks the one check NOMNOM policy clause 2.2 rests on (rebuild the tag, get the same binary).
+Correspondingly the manifest bump lands *after* the tag: the tag must stay on the exact commit the
+DLL was built from.
 > **Agents can't run this:** `release.ps1` is PowerShell and drives `git push` + a GitHub release —
 > outward-facing and hard to reverse. The agent's job is to bump `PluginVersion`, get a clean
 > Release build, and let the **user** run `release.ps1` in a normal PowerShell window.
