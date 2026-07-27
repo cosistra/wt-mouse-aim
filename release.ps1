@@ -140,6 +140,10 @@ $text = ([regex]'("version":\s*")[^"]*(")').Replace($text, "`${1}$version`${2}",
 $text = [regex]::Replace($text, '("downloadUrl":\s*")[^"]*(")', "`${1}$downloadUrl`${2}")
 $text = [regex]::Replace($text, '("hash":\s*")[^"]*(")', "`${1}sha256:$hash`${2}")
 Set-Content -LiteralPath $manifest -Value $text -Encoding UTF8 -NoNewline
+# ponytail: "gameVersion" is deliberately NOT rewritten - it tracks the GAME, not this mod, so it
+# only changes on a game update. Edit it by hand when compat moves (0.33 -> 0.34 in v0.68.0), and
+# remember NOMNOM's registry copy is separate: its auto-updater seeds gameVersion from the PREVIOUS
+# artifact, so a new release inherits the OLD value there and needs a PR to modManifests/ to correct.
 
 # Commit the bump as a follow-up (it can only be written once the DLL exists and is hashed, i.e.
 # after the tag). Left uncommitted it just drifts until some later release sweeps it up, which is
