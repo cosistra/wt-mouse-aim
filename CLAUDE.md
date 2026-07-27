@@ -39,7 +39,7 @@ Machine-specific paths are written as placeholders:
   - `WTMouseAimPlugin.cs` — `WTMouseAimPlugin` (Awake/OnGUI overlay). Holds `PluginVersion`, the version SoT.
   - `Cfg.cs` — `Cfg` (all config binds) + `ConfigurationManagerAttributes`.
   - `AimRig.cs` — `AimRig` (world-locked marker + Win32 raw mouse) + `Guards`.
-  - `ChaseController.cs` — `ControlLawMode` enum + `ChaseController` (the control law in `Apply`, nested
+  - `ChaseController.cs` — `ChaseController` (the control law in `Apply`, nested
     `AnFrame`; also `DetectAnomalies`/`TrackManeuver`, the v0.55 FBW probe — per-airframe
     stick→pitch-rate params read from the game's `ControlsFilter.FlyByWire`, fail-soft — and the
     v0.57 canard probe/`InvertCanardRemap` — undoes the KR-67's `RelaxedStabilityController`
@@ -48,7 +48,16 @@ Machine-specific paths are written as placeholders:
     rotorcraft commands and drive the hover regime by tilt angle, fail-soft; rotorcraft are
     force-flown with EvolvedLegacy — and the v0.59 AoA-utilization demand schedule/recovery
     bias — folds live AoA vs the probed alpha ceiling into `qSched`, gates `FineGainBoost`,
-    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix) +
+    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix). **ONE fixed-wing
+    law now: `ApplyEvolvedLegacy`** (the Unified A/B alternative + its enum/hotkey were removed in
+    v0.65 — see CHANGELOG); rotorcraft are force-flown through it too. v0.64 scales `pErrTerm` by the
+    measured `_pitchEff` estimator; **v0.65 C1** reversal-gates that floor (below `revThresh` the floor
+    is dropped so a reversed plant stops being forced), and **v0.65 B2** injects a bounded, V-independent,
+    marker-stationary-gated micro-bank in the sub-0.5° azimuth cone so a high-q residual settles on a
+    gentle coordinated turn (gate `_settleOK` from the aim-direction angular rate; new recorder column
+    `settleOn`). v0.61 Track A (shared) gated the eAlign anti-relay slew to the dead-astern wrap region
+    and decoupled the azTR presence gate from the predFloor. `Legacy`/`BankToTurn` removed in v0.60;
+    `BankToTurnVmin` renamed `BankSpeedFloor` (shared bank airspeed floor). Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
@@ -187,9 +196,12 @@ too.** A green checker on a wrong diagram is the failure mode to avoid.
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
   The same standing rule applies to `ARCHITECTURE.md` (above) — CLAUDE.md is the *where*, that is
   the *how*; a change that alters structure usually touches both.
-- **`PENDING-TESTS.md` tracks shipped-but-unflown changes.** A code change is green-built but not
-  yet confirmed in the air until someone flies it. Add an entry when you ship such a change; run
-  each test and **delete its entry** once it passes (delete the file when it's empty).
+- **Suggest flight tests in your answer, don't file them.** A control-law / flight-model change is
+  green-built but not confirmed until someone flies it — so when you ship one, end the response with
+  the specific scenarios that would prove or break it: airframe + loadout, speed band, the maneuver,
+  and what a pass vs. a failure looks like (name the signal, e.g. "no 0.5 Hz rail-to-rail pitch
+  cycle", "AoA stays under the limiter"). Cite a comparable capture in `debugtests/` when one exists.
+  Keep it to the few tests that actually discriminate; there is no tracking file to append to.
 - Bump `PluginVersion` on every shipped change. The Awake load-line stays a SHORT one-liner
   (version + hotkeys + "see CHANGELOG.md") — version history goes in `CHANGELOG.md` only, never
   into the log string (it used to mirror the whole changelog; deliberately cut in v0.57).

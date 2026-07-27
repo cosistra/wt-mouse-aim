@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 0.59.0 -->
+<!-- ARCH-VERSION: 0.68.0 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -57,8 +57,8 @@ flowchart TB
     subgraph OUT["🟩 ARTIFACTS & OFFLINE TOOLS"]
         direction LR
         log["LogOutput.log<br/>[anomaly] [maneuver] [seam]"]
-        csv["mouseaim-rec-*.csv<br/>38-column capture"]
-        pytool["debugtests/analyze-wobble.py<br/>--digest · scoring · --selftest"]
+        csv["mouseaim-rec-VER-RUN-NN-*.csv<br/>45-column capture (v0.65)"]
+        pytool["debugtests/analyze-wobble.py<br/>--digest · scoring · --selftest<br/>debugtests/replay-pitcheff.py<br/>_pitchEff replay (v0.64) · --selftest"]
     end
 
     bepin --> plugin
@@ -122,7 +122,7 @@ The marker moves on the render frame (`Update`), the stick is written on the phy
 flowchart TB
     subgraph U["🟨 Update — once per rendered frame"]
         direction TB
-        u1["plugin.Update<br/>hotkeys: master toggle · fly-level · record · A/B law"]
+        u1["plugin.Update<br/>hotkeys: master toggle · fly-level · record"]
         u2["aim_rig.Update<br/>1. pick cursor regime<br/>2. read raw Win32 mouse delta<br/>3. rotate world aim vector<br/>4. clamp into MaxAimAngle cone"]
         u1 --> u2
     end
@@ -239,17 +239,15 @@ flowchart TB
         p3["<b>helo probe</b> v0.58<br/>private heloFlyByWire + TiltWing /<br/>SwivelDuct / Compound archetypes"]
     end
 
-    subgraph LAW["4 · CONTROL LAW (A/B switchable in flight)"]
-        l1["<b>ApplyLegacy</b><br/>accreted v0.37 law"]
-        l2["<b>ApplyEvolvedLegacy</b> ← default<br/>speed-aware bank target · slew limit<br/>q-scheduled damping · rate normalisation<br/>(forced for all rotorcraft)"]
-        l3["ApplyBankToTurn<br/>abandoned — retained, unreachable"]
+    subgraph LAW["4 · CONTROL LAW (one law — EvolvedLegacy; Unified removed v0.65)"]
+        l1["<b>ApplyEvolvedLegacy</b> ← the only law<br/>speed-aware bank target · slew limit<br/>v0.64: pErrTerm scaled by measured _pitchEff,<br/>reversal-gated floor v0.65 C1, latch-fixed v0.67<br/>(fixed-wing only — rotorcraft untouched)<br/>q + AoA demand schedules · helo rate normalisation<br/>(forced for all rotorcraft)<br/>v0.65 B2: sub-0.5° fine-settle micro-bank; v0.67:<br/>turn demand RAMPS in over [0.5°,2°] (no gate-exit step)<br/>v0.67: down-hemisphere roll-to-align suppressed →<br/>bounded pushover closes below-targets (no 90° hang)"]
     end
 
     subgraph COND["5 · CONDITION"]
-        c1["anticipatory lead → brake-only clamp<br/>→ proportional floor → achievability cap"]
+        c1["anticipatory lead → brake-only clamp<br/>→ proportional floor → achievability cap<br/>(v0.67: cap also folds the LIVE alpha margin,<br/>not just gLimit — turn demand ≤ what the wing<br/>can pull at this AoA)"]
         c2["<b>AoA envelope</b> — ceiling gates (v0.55)<br/>predictive lead; cut only the command<br/>driving AoA OUTWARD"]
         c2b["<b>AoA-utilization demand schedule</b> (v0.59)<br/>live AoA vs this airframe's PROBED ceiling,<br/>folded into qSched. Fast-attack / slow-release<br/>so demand can't snap hot again as AoA falls<br/>back through the ceiling — the loaded-jet fix"]
-        c2c["<b>AoA recovery bias</b> (v0.59)<br/>restoring pitch ∝ predicted excess past either<br/>ceiling. Continuous + symmetric, exactly zero<br/>inside the envelope — the gates only CUT,<br/>so past the ceiling nothing flew it back in"]
+        c2c["<b>AoA recovery bias</b> (v0.59, damped v0.62)<br/>restoring pitch ∝ predicted excess past either<br/>ceiling. Continuous + symmetric, exactly zero<br/>inside the envelope — the gates only CUT,<br/>so past the ceiling nothing flew it back in.<br/>v0.62: uses the TWO-SIDED predicted AoA<br/>(AoA + rate·lead), NOT the gates' one-sided<br/>preds — the lead is its damping term, so it<br/>fades as recovery develops instead of holding<br/>to the crossing (that was the +43→-47 bang-bang)"]
         c2d["fine-capture boost, gated by that schedule<br/>(NOT by speed — a slow LIGHT jet keeps its feel;<br/>only genuine near-ceiling AoA softens it)"]
         c3["fine leaky integrator (v0.24)<br/>FBW is a RATE law, so P alone parks short"]
         c4["invert canard remap (v0.57)<br/>so the game delivers the pitch we meant"]
@@ -276,7 +274,7 @@ flowchart TB
     MEAS --> EST --> PROBE --> LAW --> COND --> MAN --> WRITE
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
-    class m1,m2,m3,e1,e2,e3,e4,e5,p1,p2,p3,l1,l2,l3,c1,c2,c2b,c2c,c2d,c3,c4,c5,h1,h2,h3,h4,w1,w2,w3,w4,w5 mod
+    class m1,m2,m3,e1,e2,e3,e4,e5,p1,p2,p3,l1,c1,c2,c2b,c2c,c2d,c3,c4,c5,h1,h2,h3,h4,w1,w2,w3,w4,w5 mod
 ```
 
 ### Why the probes exist
@@ -296,6 +294,31 @@ oscillation and windup. Three airframe families need three different questions:
 leaves the probe not-ok and the previous version's behaviour exactly intact. That contract is
 non-negotiable for new probes — reflection against game internals is the one part of this mod that a
 patch can silently break.
+
+**The FBW rate pair also feeds a measured signal (v0.60).** Beyond the static probe params, `Apply`
+reads the FBW's *live* commanded-vs-achieved pitch rate (`GetTargetPitchAngVel` / `GetPitchAngVel` —
+the same pair the recorder logs) and low-passes the **signed** ratio into `_pitchEff`, the pitch twin
+of `_yawWeak`: fast-attack / slow-release so load, mush, density and damage all show up generically as
+achieved &lt; commanded. **v0.64: the ratio is signed, not magnitude-only.** Through v0.63 both sides
+were `Abs`'d, which blinded it to a REVERSED plant — the FS-12 departure case, where the airframe
+pitches opposite the command at ~3x magnitude and the old estimator read a confident `1.00`. `Clamp01`
+now floors a reversed plant to `0`. The noise gate stays on magnitude (gating on the signed command
+would skip every nose-down frame). `ApplyEvolvedLegacy` (the only law) consumes it — it scales
+`pErrTerm` by an `effFloor`-floored factor (fixed-wing only; the estimator is not measured for
+`_collective`, so rotorcraft are untouched). **v0.65 C1: the floor is reversal-gated** — below a
+`revThresh` (0.15) the floor is dropped and demand collapses to the measured near-0 value, so on a
+reversed plant (`_pitchEff ≈ 0`) the law stops forcing 30% pitch into a plant moving the opposite way
+(the sustained rec04/rec05 relay). Healthy and genuine low-q mush cases are byte-identical to v0.64.
+**v0.67: the C1 floor could latch.** A gated-out command (`|cmd| < 0.05`, e.g. after C1 collapsed the
+pitch to ~0) carries no information, and pure-holding `_pitchEff` there pinned a *transient* low-q mush
+at ~0 forever — C1 kept pitch ×0, so the stick stayed ~0, so `cmd` stayed dead and it could never
+re-measure (rec14 froze the pull ~4 s at railed bank). The dead-command branch now floors the estimate
+at `Max(_pitchEff, revThresh)`: a latched-low estimate rises toward ~15% (the slow release tau) so the
+pitch re-establishes a self-probe → `cmd > 0.05` → re-measure; a healthy estimate is untouched, so a
+brief neutral stick never drags a good jet down. The v0.59 AoA recovery bias is scaled by it too,
+unfloored — a reversed plant cannot be recovered by commanding more, and the traces show that term
+sustaining the limit cycle. Fail-soft: holds its last value on any read miss (probe unavailable / manual
+/ read error — distinct from the dead-command self-probe above, which only fires with a live FBW).
 
 ### The generality rule (the reason the probes carry so much weight)
 
@@ -360,10 +383,10 @@ flowchart LR
 
     chase -->|"event only,<br/>per-type cooldown"| an["🟦 AnomalyLog<br/>overshoot · over-roll · hunt · yaw-wag<br/>roll-wobble · az-limit-cycle · persistent-miss · overstress"]
     chase -->|"one line per<br/>completed turn"| mv["🟦 [maneuver] summary"]
-    chase -->|"hotkey-armed,<br/>rate-limited"| rec["🟦 ManeuverRecorder<br/>38-column CSV, self-describing<br/># header: gains · law · airframe · FBW params"]
+    chase -->|"hotkey-armed,<br/>rate-limited"| rec["🟦 ManeuverRecorder<br/>45-column CSV, self-describing<br/># header: gains · law · airframe · FBW params · run/rec index<br/>v0.63: + tgtPRaw/aoaGU/aoaGD/aoaRec/qSched/pEff<br/>(the pitch decision variables)<br/>v0.65: + settleOn (B2 fine-settle gate engaged)"]
     chase -->|"live"| hud["🟦 debug HUD + anomaly flash"]
 
-    an --> logf["🟩 LogOutput.log<br/>+ mouseaim-anomalies-SESSION.log"]
+    an --> logf["🟩 LogOutput.log<br/>+ mouseaim-anomalies-VER-RUN-SESSION.log"]
     mv --> logf
     rec --> csvf["🟩 mouseaim-rec-SESSION.csv"]
 
@@ -420,7 +443,7 @@ repo must appear here.** `debugtests/check-architecture.py` enforces exactly tha
 | `plugin` | `WTMouseAimPlugin.cs` | `WTMouseAimPlugin` | BepInEx entry point, hotkeys, IMGUI overlay, `PluginVersion` SoT, session id |
 | `cfg` | `Cfg.cs` | `Cfg`, `ConfigurationManagerAttributes` | every config bind + F1 metadata |
 | `aim_rig` | `AimRig.cs` | `AimRig`, `Guards` | world-locked marker, Win32 raw mouse, cursor regimes; `Guards` = "should the mod be passive" |
-| `chase` | `ChaseController.cs` | `ChaseController`, `ControlLawMode` | the instructor: measure → estimate → probe → law → condition → handoff → write |
+| `chase` | `ChaseController.cs` | `ChaseController` | the instructor: measure → estimate → probe → law → condition → handoff → write |
 | `seam` | `ChaseController.cs` | `PilotPlayerStatePatch` | Harmony prefix/postfix on `PilotPlayerState.PlayerAxisControls` |
 | `campatch` | `CameraPatches.cs` | `CockpitCameraPatch`, `CameraOrbitPatch`, `CameraSwitchStatePatch` | view follows the marker in cockpit + orbit |
 | `telem` | `Recording.cs` | `ManeuverRecorder`, `AnomalyLog` | CSV capture + event-only anomaly sink |
@@ -438,7 +461,7 @@ repo must appear here.** `debugtests/check-architecture.py` enforces exactly tha
 | `RelaxedStabilityController` | read via `AccessTools` field refs | `chase` canard probe |
 | `TiltWingController`, `SwivelDuctSystem`, `CompoundHeloController` | `GetComponentInChildren` | `chase` archetype fingerprint |
 | `CursorManager.visible` | read **and written** via reflection | `aim_rig` cache resync |
-| `Aircraft`, `GameManager`, `CameraStateManager`, `Rewired`, `DynamicMap`, `RadialMenuMain`, `Leaderboard`, `TargetCalc`, `PlayerSettings` | public API | various |
+| `Aircraft`, `GameManager`, `CameraStateManager`, `Rewired`, `DynamicMap`, `RadialMenuMain`, `NuclearOption.UI.LeaderboardMenu`, `TargetCalc`, `PlayerSettings` | public API | various |
 
 ---
 

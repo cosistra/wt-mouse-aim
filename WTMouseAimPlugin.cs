@@ -19,7 +19,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.59.0";
+        public const string PluginVersion = "0.68.0";
 
         internal static ManualLogSource Log;
 
@@ -32,6 +32,34 @@ namespace NuclearOptionMouseAim
         {
             get { if (_sessionId == null) _sessionId = System.DateTime.Now.ToString("yyyyMMdd-HHmmss"); return _sessionId; }
         }
+
+        // RUN INDEX (v0.63) — a small monotonic integer that survives game restarts, so two boots of the
+        // game are "R7" and "R8" rather than two opaque wallclock ids. The session id above is unique but
+        // unorderable at a glance; when a report says "the wobble in R8 rec 3" that has to be greppable.
+        // Backed by a one-line counter file next to LogOutput.log, bumped once per Awake. Fail-soft: any
+        // IO problem yields run 0, which reads as "unknown run" rather than colliding with a real one.
+        private static int _runIndex = -1;
+        internal static int RunIndex
+        {
+            get
+            {
+                if (_runIndex >= 0) return _runIndex;
+                _runIndex = 0;
+                try
+                {
+                    string p = System.IO.Path.Combine(BepInEx.Paths.BepInExRootPath, "mouseaim-run.txt");
+                    int last = 0;
+                    if (System.IO.File.Exists(p)) int.TryParse(System.IO.File.ReadAllText(p).Trim(), out last);
+                    _runIndex = last + 1;
+                    System.IO.File.WriteAllText(p, _runIndex.ToString());
+                }
+                catch { /* leave 0 = unknown run */ }
+                return _runIndex;
+            }
+        }
+
+        // Filename-safe version + run tag shared by every artifact this session ("v0.63.0-R8").
+        internal static string RunTag => $"v{PluginVersion}-R{RunIndex}";
 
         // 1x1 white texture for drawing dots/lines in OnGUI (IMGUI has no primitive line draw).
         private static Texture2D _px;
@@ -54,9 +82,9 @@ namespace NuclearOptionMouseAim
             // (It used to mirror the entire changelog; that lives in CHANGELOG.md now.)
             Logger.LogInfo($"{PluginName} v{PluginVersion} loaded — WT-style mouse-aim instructor (EvolvedLegacy law). "
                 + $"Keys: [{Cfg.ToggleKey.Value}] master on/off, [{Cfg.FlyLevelKey.Value}] fly level, "
-                + $"[{Cfg.RecordKey.Value}] maneuver recorder, [{Cfg.ControlLawKey.Value}] A/B law, F1 config, RMB free-look. "
+                + $"[{Cfg.RecordKey.Value}] maneuver recorder, F1 config, RMB free-look. "
                 + "Version history: CHANGELOG.md.");
-            Logger.LogInfo($"[session] {SessionId} — recordings, the anomaly file and this log share this id for cross-referencing.");
+            Logger.LogInfo($"[session] run R{RunIndex}  id {SessionId}  ({RunTag}) — recordings, the anomaly file and this log share this id for cross-referencing.");
         }
 
         // Master ON/OFF toast (v0.33): briefly surfaced when the toggle hotkey flips the mod, so the
@@ -93,30 +121,12 @@ namespace NuclearOptionMouseAim
                 _toastUntil = Time.time + 2f;
                 _toastOn = on; // reuse the toast: cyan "REC" on, amber off (label switched in OnGUI)
                 _toastRec = true;
-                _toastLaw = false;
             }
-            // Control-law cycle (v0.38; v0.42 made it a 2-way toggle). Ungated like the other hotkeys so it
-            // always works in flight; toggles Legacy <-> EvolvedLegacy, persists ControlLawMode (logged via
-            // the SettingChanged hook), and reuses the toast — labelled with the law name in OnGUI. BankToTurn
-            // is abandoned (not working) and excluded from the cycle; if ControlLawMode somehow holds it (a
-            // stale cfg value), the toggle rescues out to Legacy. ApplyBankToTurn is retained but unreachable.
-            else if (Input.GetKeyDown(Cfg.ControlLawKey.Value))
-            {
-                var next = Cfg.ControlLawMode.Value == ControlLawMode.Legacy
-                    ? ControlLawMode.EvolvedLegacy : ControlLawMode.Legacy;
-                Cfg.ControlLawMode.Value = next;
-                _toastUntil = Time.time + 2f;
-                _toastLaw = true;
-                _toastRec = false;
-                Log.LogInfo($"[controllaw] switched to {next}.");
-            }
-            else if (Time.time >= _toastUntil) { _toastRec = false; _toastLaw = false; }
+            else if (Time.time >= _toastUntil) { _toastRec = false; }
         }
 
         // True while the active toast is a recorder toast (so OnGUI labels it REC/REC OFF, not ON/OFF).
         private static bool _toastRec;
-        // True while the active toast is a control-law toast (so OnGUI names the law instead of ON/OFF).
-        private static bool _toastLaw;
 
         private void OnGUI()
         {
@@ -124,11 +134,11 @@ namespace NuclearOptionMouseAim
             if (Time.time < _toastUntil)
             {
                 var tc = GUI.color;
-                // Law toast is always cyan (informational); REC/master toasts stay cyan-on / amber-off.
-                GUI.color = (_toastLaw || _toastOn) ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
-                const float tw = 240f;
-                string msg = _toastLaw ? $"CONTROL LAW  {Cfg.ControlLawMode.Value}"
-                           : _toastRec ? (_toastOn ? "MouseAim  REC START" : "MouseAim  REC STOP")
+                // REC/master toasts are cyan-on / amber-off.
+                GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
+                const float tw = 300f;
+                string msg = _toastRec ? (_toastOn ? $"MouseAim  REC START  {ManeuverRecorder.Tag}"
+                                                   : $"MouseAim  REC STOP  {ManeuverRecorder.Tag}")
                                        : (_toastOn ? "WT MouseAim  ON"      : "WT MouseAim  OFF");
                 GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f), msg);
                 GUI.color = tc;
@@ -140,9 +150,9 @@ namespace NuclearOptionMouseAim
             {
                 var rc = GUI.color;
                 GUI.color = new Color(1f, 0.25f, 0.2f, 0.95f);
-                const float rw = 220f;
+                const float rw = 300f;
                 GUI.Label(new Rect((Screen.width - rw) * 0.5f, Screen.height * 0.08f, rw, 24f),
-                    $"● REC  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
+                    $"● REC  {ManeuverRecorder.Tag}  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
                 GUI.color = rc;
             }
 
@@ -216,7 +226,7 @@ namespace NuclearOptionMouseAim
                     ? $"spd={ChaseController._speed:0} m/s (fwd={ChaseController._vFwd:0}, heliBlend={ChaseController._heliBlend:0.00})"
                     : $"spd={ChaseController._speed:0} m/s";
                 GUI.Label(new Rect(12f, 12f, 560f, 22f),
-                    $"WT MouseAim  off={off:0.0}°  cone={half:0}°  law={Cfg.ControlLawMode.Value}  [{ctrl}]  {spd}");
+                    $"WT MouseAim  off={off:0.0}°  cone={half:0}°  law=EL  [{ctrl}]  {spd}");
                 // Instructor's live stick command (what the mod is telling the plane, before manual override).
                 GUI.Label(new Rect(12f, 30f, 560f, 22f),
                     $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +

@@ -264,6 +264,58 @@ def xcorr_lag(ts, a, b, max_lag=2.0):
     return bestlag, best
 
 
+def pitch_authority(rows):
+    """v0.63 — THE discriminator, added after the v62 FS-12 run where every failing capture scored
+    |achieved/commanded| == 1.00 and every healthy one did too.
+
+    The mod's own _pitchEff estimator takes abs() of both sides of the game FBW's commanded-vs-achieved
+    pitch rate, so it cannot tell "the plant delivered what I asked" from "the plant delivered the
+    OPPOSITE of what I asked, at equal magnitude" — which is exactly the post-stall reversal the FS-12
+    limit cycle rides. Score the SIGNED ratio instead. On the v62 set this separated perfectly:
+    12 healthy captures +0.88..+1.00 with 0% anti-phase frames, 4 failing ones -0.12..-1.00 with
+    52-89%. Returns (median signed ratio, anti-phase fraction, n) over frames where pitch is genuinely
+    commanded (same 0.05 rad/s noise gate the mod itself uses)."""
+    sgn = []
+    for r in rows:
+        c, a = r.get("fbwTgtPR", 0.0), r.get("fbwPR", 0.0)
+        if abs(c) > 0.05:
+            sgn.append(max(-1.0, min(1.0, a / c)))
+    if not sgn:
+        return None
+    s = sorted(sgn)
+    return (s[len(s) // 2], sum(1 for x in sgn if x < 0) / len(sgn), len(sgn))
+
+
+def convergence(rows):
+    """v0.63 — does the nose actually ARRIVE? The standing requirement is off-angle < 0.5 deg within
+    3 s of a settling episode, not the ~3 deg plateau the v62 captures show. A settling episode is a
+    stretch of >= 2.5 s with off < 10 deg; for each we report time-to-0.5 deg and the tail median.
+    Reported per episode because a single whole-file median hides one bad capture inside a good run."""
+    eps, i = [], 0
+    while i < len(rows):
+        if rows[i]["off"] < 10.0:
+            j = i
+            while j < len(rows) and rows[j]["off"] < 10.0:
+                j += 1
+            if rows[j - 1]["t"] - rows[i]["t"] >= 2.5:
+                eps.append(rows[i:j])
+            i = j
+        else:
+            i += 1
+    out = []
+    for seg in eps:
+        t0 = seg[0]["t"]
+        dur = seg[-1]["t"] - t0
+        t05 = next((s["t"] - t0 for s in seg if s["off"] < 0.5), None)
+        tail = [s for s in seg if s["t"] - t0 >= min(3.0, dur * 0.5)]
+        if not tail:
+            continue
+        to = sorted(s["off"] for s in tail)
+        ta = sorted(abs(s["azErr"]) for s in tail)
+        out.append((t0, dur, t05, to[len(to) // 2], ta[len(ta) // 2]))
+    return out
+
+
 def analyze(path):
     meta, rows = load(path)
     cfg = meta["cfg"]
@@ -296,6 +348,24 @@ def analyze(path):
     print(f"  model-fit pitchRate~-outP*G*9.81/V (corner {corner:.0f} m/s): "
           f"high-q {fmt(mf['hi'])} | low-q {fmt(mf['lo'])}"
           + ("   << LOW-Q NEGATIVE CORR: aircraft not following pitch commands" if neg_lo else ""))
+
+    pa = pitch_authority(auto)
+    rev = False
+    if pa:
+        med, anti, n = pa
+        rev = med < 0.0 and anti > 0.35
+        print(f"  pitch authority (SIGNED fbw achieved/commanded): median {med:+.2f}, "
+              f"anti-phase {anti * 100:.0f}% of {n} commanded frames"
+              + ("   << REVERSED: plant pitches OPPOSITE the command" if rev else ""))
+
+    convs = convergence(auto)
+    if convs:
+        bad = [c for c in convs if c[2] is None or c[2] > 3.0]
+        print(f"  convergence: {len(convs)} settling episode(s), {len(bad)} fail the <0.5deg-in-3s target")
+        for t0, dur, t05, moff, maz in convs:
+            mark = "  ok" if (t05 is not None and t05 <= 3.0) else " MISS"
+            print(f"    {mark} t{t0:7.1f} dur {dur:4.1f}s  ->0.5deg "
+                  f"{('%.2fs' % t05) if t05 is not None else 'NEVER'}   tail off {moff:.2f}deg (|azErr| {maz:.2f})")
 
     # v0.56 verdict split: FAIL needs DYNAMIC evidence (oscillation episode / growing azErr /
     # AoA blow-through); rail-only evidence is a WARN (benign max-performance reversal unless
@@ -330,6 +400,18 @@ def analyze(path):
             if name == "aoa" and ((e["trend"] == "GROW" and e["pp"] > pump_pp_grow)
                                   or (e["dur"] > 4 and e["pp"] > pump_pp)):
                 fail.append(f"AoA pump cycle {e['freq']:.2f} Hz pp {e['pp']:.0f} deg for {e['dur']:.0f}s ({e['trend']})")
+    # v0.63 — pitch-authority reversal. Stands alone as a FAIL: an airframe pitching opposite its own
+    # FBW's commanded rate for a third of the commanded frames is departed, and no amount of outer-loop
+    # tuning is valid in that regime. Caught the v62 FS-12 captures the episode scanners scored PASS
+    # (e.g. the 11-row 110641, 89% anti-phase but too short to form an episode).
+    if rev:
+        fail.append(f"PITCH AUTHORITY REVERSED (signed fbw ratio {pa[0]:+.2f}, "
+                    f"{pa[1]*100:.0f}% of commanded frames anti-phase)")
+    # v0.63 — convergence target: the nose must reach <0.5 deg within 3 s of settling.
+    if convs and all(c[2] is None or c[2] > 3.0 for c in convs):
+        worst = max(c[3] for c in convs)
+        warn.append(f"never converges to 0.5 deg (tail off up to {worst:.2f} deg across "
+                    f"{len(convs)} settling episode(s))")
     # v0.57 — high-frequency pitch buzz (canard-remap limit cycle; sub-episode amplitude)
     buzz_s, mod_s, buzz_pp, buzz_flip = buzz_scan(auto)
     if buzz_s >= 3.0:
@@ -361,7 +443,8 @@ def analyze(path):
 DIGEST_SIGS = [("off", 1.0, 1), ("azErr", 1.0, 1), ("elevErr", 1.0, 1),
                ("bank", 2.0, 1), ("targetBank", 2.0, 1), ("g", 0.15, 2),
                ("aoa", 0.5, 2), ("spd", 3.0, 0), ("yawWeak", 0.05, 2),
-               ("outP", 0.05, 3), ("outR", 0.05, 3), ("outY", 0.05, 3)]
+               ("outP", 0.05, 3), ("outR", 0.05, 3), ("outY", 0.05, 3),
+               ("settleOn", 0.5, 0)]  # v0.65 B2 gate: 0->1 when the sub-0.5deg fine-settle micro-bank engaged
 _LABEL = {"targetBank": "tgtBank"}
 
 

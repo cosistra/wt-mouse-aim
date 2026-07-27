@@ -15,12 +15,18 @@ namespace NuclearOptionMouseAim
         private static float _lastSample;           // throttle stamp (Time.time of last written row)
         private static int   _samples;              // rows written this recording
         private static string _path;                // current file path (for the summary line)
+        private static int   _recIndex;             // v0.63: 1-based index of this recording WITHIN the run
 
         public static bool IsRecording => _w != null;
         public static int  Samples     => _samples;
         public static float Elapsed    => IsRecording ? Time.time - _startTime : 0f;
         // Bare filename of the active recording (for the anomaly file's rec= tag); "" when not recording.
         public static string CurrentFile => _w != null ? System.IO.Path.GetFileName(_path) : "";
+        // "R<run>-<take>" identity of the current/just-finished take (the R2-05 part of the CSV name) —
+        // surfaced on the HUD indicator + stop toast so the maintainer can note which take they're on.
+        // _recIndex survives Stop() (per-session counter, only reset on a fresh session), so it's valid
+        // in the stop feedback too.
+        public static string Tag => $"R{WTMouseAimPlugin.RunIndex}-{_recIndex:00}";
 
         // CSV header — keep in lockstep with the Sample() row below. v0.55 adds assist (the game's
         // flight-assist toggle, 0/1 — closes the "was assist on?" ambiguity in every report) and the
@@ -29,7 +35,17 @@ namespace NuclearOptionMouseAim
             "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
             "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw," +
             "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend,headingRateFilt,azErrPred,tBankE," +
-            "assist,fbwTgtPR,fbwPR";
+            "assist,fbwTgtPR,fbwPR," +
+            // v0.63 INTERNAL PITCH TERMS. Everything above is an INPUT or an OUTPUT; none of it says WHY
+            // the law produced the pitch it did, so diagnosing the FS-12 wobble meant re-deriving the AoA
+            // gate/bias offline from the AoA trace and hoping the reimplementation matched. These six are
+            // the actual decision variables, logged as computed: tgtPRaw = the law's pitch BEFORE the AoA
+            // block, aoaGU/aoaGD = the two ceiling gates (1 = open), aoaRec = the recovery bias input,
+            // qSched = the final demand schedule after the AoA fold-in, pEff = the measured pitch
+            // effectiveness. With these, tgtPRaw -> outP is fully reconstructible from the CSV alone.
+            // v0.65 adds settleOn (0/1): did the B2 fine-settle micro-bank inject this frame — proves the
+            // gate engaged during a settle and stood down during a marker sweep (runtime-only, not derivable).
+            "tgtPRaw,aoaGU,aoaGD,aoaRec,qSched,pEff,settleOn";
 
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
@@ -43,7 +59,14 @@ namespace NuclearOptionMouseAim
             try
             {
                 string dir  = BepInEx.Paths.BepInExRootPath; // folder that holds LogOutput.log
-                string name = "mouseaim-rec-" + System.DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
+                // v0.63 FILENAME = self-identifying. Was "mouseaim-rec-<wallclock>.csv", which forced you
+                // to open the file to learn which build produced it and gave no ordering across boots —
+                // a folder of 17 of them is unsortable by eye and easy to mis-attribute to the wrong build
+                // (exactly the v0.61-vs-v0.62 confusion this is meant to end). Now: mod version, run index
+                // (survives restarts), and the 1-based recording index within that run, wallclock last.
+                _recIndex++;
+                string name = $"mouseaim-rec-{WTMouseAimPlugin.RunTag}-{_recIndex:00}-"
+                            + System.DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
                 _path = System.IO.Path.Combine(dir, name);
                 _w = new System.IO.StreamWriter(_path, false) { AutoFlush = true };
                 // Self-describing header block (v0.44): '#' comment lines (ignored as non-data by CSV
@@ -59,7 +82,8 @@ namespace NuclearOptionMouseAim
                     }
                 }
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }
-                _w.WriteLine($"# mouseaim recording  v{WTMouseAimPlugin.PluginVersion}  session={WTMouseAimPlugin.SessionId}");
+                _w.WriteLine($"# mouseaim recording  v{WTMouseAimPlugin.PluginVersion}  run=R{WTMouseAimPlugin.RunIndex}"
+                           + $"  rec={_recIndex}  session={WTMouseAimPlugin.SessionId}");
                 _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
                 _w.WriteLine($"# aircraft '{acName}'");
                 _w.WriteLine($"# config {Cfg.SnapshotString()}");
@@ -119,7 +143,8 @@ namespace NuclearOptionMouseAim
             float engP, float engR, float engY, float heliBlend, float vFwd,
             float rollRateF, float iPitch, float iYaw, float bankTR, float bankBlend,
             float headingRateFilt, float azErrPred, float tBankE,
-            bool assist, float fbwTgtPR, float fbwPR)
+            bool assist, float fbwTgtPR, float fbwPR,
+            float tgtPRaw, float aoaGU, float aoaGD, float aoaRec, float qSched, float pEff, bool settleOn)
         {
             if (_w == null) return;
             float now = Time.time;
@@ -132,9 +157,10 @@ namespace NuclearOptionMouseAim
                     $"{now:0.000},{off:0.00},{azErr:0.00},{elevErr:0.00},{phi:0.0},{bigTurn:0.000}," +
                     $"{bank:0.0},{targetBank:0.0},{outP:0.000},{outR:0.000},{outY:0.000}," +
                     $"{pitchRate:0.000},{yawRate:0.000},{rollRate:0.000},{yawEff:0.000},{yawWeak:0.000}," +
-                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},{Cfg.ControlLawMode.Value}," +
+                    $"{spd:0.0},{aoa:0.00},{g:0.00},{phase},{(flyLevel ? 1 : 0)},{engP:0.0},{engR:0.0},{engY:0.0},EvolvedLegacy," +
                     $"{heliBlend:0.000},{vFwd:0.0},{rollRateF:0.000},{iPitch:0.000},{iYaw:0.000},{bankTR:0.0},{bankBlend:0.000}," +
-                    $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0},{(assist ? 1 : 0)},{fbwTgtPR:0.000},{fbwPR:0.000}");
+                    $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0},{(assist ? 1 : 0)},{fbwTgtPR:0.000},{fbwPR:0.000}," +
+                    $"{tgtPRaw:0.000},{aoaGU:0.000},{aoaGD:0.000},{aoaRec:0.000},{qSched:0.000},{pEff:0.000},{(settleOn ? 1 : 0)}");
                 _samples++;
             }
             catch (System.Exception e)
@@ -165,10 +191,13 @@ namespace NuclearOptionMouseAim
             try
             {
                 string dir  = BepInEx.Paths.BepInExRootPath; // folder that holds LogOutput.log
-                string name = "mouseaim-anomalies-" + WTMouseAimPlugin.SessionId + ".log";
+                // v0.63: same self-identifying scheme as the recordings (version + run index) so the whole
+                // artifact set for one boot sorts and greps together.
+                string name = $"mouseaim-anomalies-{WTMouseAimPlugin.RunTag}-{WTMouseAimPlugin.SessionId}.log";
                 _path = System.IO.Path.Combine(dir, name);
                 _w = new System.IO.StreamWriter(_path, true) { AutoFlush = true }; // append: one file per session
-                _w.WriteLine($"# mouseaim anomalies  v{WTMouseAimPlugin.PluginVersion}  session={WTMouseAimPlugin.SessionId}");
+                _w.WriteLine($"# mouseaim anomalies  v{WTMouseAimPlugin.PluginVersion}  run=R{WTMouseAimPlugin.RunIndex}"
+                           + $"  session={WTMouseAimPlugin.SessionId}");
                 _w.WriteLine($"# opened {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
                 WTMouseAimPlugin.Log.LogInfo($"[anomaly] file -> {_path}");
             }

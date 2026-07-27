@@ -24,6 +24,10 @@ plans/
 .claude/hooks/
 .claude/worktrees/
 
-# Flight recordings + python cache (local debug data; the analyzer script IS committed)
-debugtests/**/*.csv
+# Flight recordings + python cache (local debug data). Capture folders under debugtests/ are
+# per-session dumps (CSV + LogOutput.log + anomaly logs) — local only. The tools at debugtests/
+# root ARE committed: check-architecture.py (release gate + Stop hook), analyze-wobble.py,
+# replay-pitcheff.py.
+debugtests/*/
+debugtests/*.csv
 __pycache__/

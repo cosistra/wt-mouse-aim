@@ -3,6 +3,333 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.68.0
+
+Compatibility fix for **Nuclear Option 0.34.0**. No control-law change.
+
+### The outage: `Leaderboard` was removed
+
+0.34 renamed the type and moved it out of the global namespace:
+
+```
+0.33  public class Leaderboard     : SceneSingleton<Leaderboard>        // global namespace
+0.34  public class LeaderboardMenu : SceneSingleton<LeaderboardMenu>    // namespace NuclearOption.UI
+```
+
+`Guards.MenusOpen()` (`AimRig.cs`) called `Leaderboard.IsOpen()`. That guard runs **every frame** from the
+aim update and the cursor-visibility path, and neither call site is inside a `try`/`catch` — so on 0.34 the
+first in-flight call threw and the aim rig went inert. The plugin still *loaded* cleanly (Harmony bound all
+four patches, zero log lines), which is why the failure looked like "the mod does nothing" rather than a
+crash: the faulting method is only JIT'd once you actually fly.
+
+Fixed by calling `NuclearOption.UI.LeaderboardMenu.IsOpen()`. The game's own code carries the identical
+three-condition guard (`!DynamicMap.mapMaximized && !RadialMenuMain.IsInUse() && !LeaderboardMenu.IsOpen()`),
+confirming the 1:1 successor. Two benign semantic shifts ride along: the open-test is now
+`gameObject.activeSelf` rather than `.enabled`, and the class now backs a two-mode menu
+(`MenuMode { Join, Leaderboard }`), so the guard also trips for the join/spectator menu — strictly more
+passivity, which is the safe direction for a guard.
+
+### Verified unchanged in 0.34 (audited, no action needed)
+
+All four Harmony targets — `PilotPlayerState.PlayerAxisControls`, `CameraCockpitState.UpdateState`,
+`CameraOrbitState.UpdateState`, `CameraStateManager.SwitchState` — kept their signatures, and every
+reflection/`Traverse` seam still resolves: the FBW probe fields (`gLimitPositive`, `alphaLimiter`,
+`alphaLimiterStrength`), `Aircraft.relaxedStabilityController`, `RelaxedStabilityController`
+(`canardRange`, `effectiveness`), `HeloControlsFilter.heloFlyByWire` and its nested fields, the
+`CameraOrbitState` Traverse fields, and `CursorManager.visible`. `Aircraft.FilterInputs()` is byte-identical.
+
+The changelog's **Rewired update was a red herring** — `PlayerAxisControls`, its single caller
+`FixedUpdateState`, and the `ControlInputs` struct it fills all diff to identical; nothing new writes the
+inputs downstream of the patch. The new cockpit camera-elevation control writes
+`cam.transform.localPosition`, while the mod's cockpit postfix only writes `localRotation`, so they compose
+without conflict.
+
+### Known drift, deliberately not changed (needs a flight to characterize)
+
+0.34 rewrote native `CameraOrbitState` framing from `2r behind + 0.8r up` to
+`pivot.position - 2r * pivot.forward`, with elevation now coming from `tiltView` (which `EnterState` seeds
+to 20°, was 0°), and `UpdateState` now clamps `tiltView` to ±89° and wraps `panView` *after* the mod's
+prefix writes them. `CameraPatches.PlaceOrbitCamera` keeps its own framing — it is the mod's deliberate,
+user-tunable geometry (`CameraDistanceOffset`/`HeightOffset`/`SideOffset`), not a mirror of native — so it
+still produces a valid camera. Left alone rather than re-tuned against an unflown inference; the handoff
+between mod and native orbit view may sit differently than before. Report it if the transition jumps.
+
+## 0.67.0
+
+Four v0.65 flight-assessment fixes (all one-law, keyed to live state / probed params, no new Cfg binds).
+
+### C1 estimator latch — the priority (rec14 regression)
+
+v0.65 C1 dropped the `_pitchEff` floor below `revThresh` so a reversed plant stops being forced — but
+the estimator *held* its value on a dead command (`|cmd| < 0.05`). A hard low-q pull mushed, `pEff→0`,
+C1 collapsed pitch to ~0, the stick sat at 0 → `cmd` stayed dead → the estimator could never re-measure:
+the pitch **froze for ~4 s** at railed bank with no pull (rec14). The dead-command branch now floors the
+estimate at `Max(_pitchEff, revThresh)` — a latched-low estimate rises toward the ~15% self-probe level
+(at the slow release tau) so pitch re-establishes and re-measures; a healthy estimate is untouched, so a
+brief neutral stick never drags a good jet down. A *genuine* reversal keeps `cmd > 0.05` and re-drops on
+the next real command (bounded pulse, not a freeze). The pre-C1 `effFloor=0.3` gave this self-probe for
+free; C1 removed it, this restores it at 0.15. Replay-verified: v64 rec04/rec05 (real reversal) stay
+collapsed and identical (not re-armed); v65 rec14 pins 30%→13% of frames at ~0 (latch lifted).
+
+### Settle-exit gain seam — high-speed roll relay (rec30/rec31)
+
+The turn-rate presence gate was a hard step at `|azErr| = 0.5°`: below it B2's V-independent micro-bank
+owns the settle, but it can't close azimuth at high q, so any drift walks azErr across 0.5° — and at that
+instant the full V-scaled `bankTR` (22–44°/° at 285 m/s) slammed a sub-1° error into 16–44° of bank →
+overshoot → reversal → a 0.43 Hz relay re-armed at the boundary (a step the heading-rate lead can't
+anticipate). Both lockstep sites now **ramp** the demand in proportionally over `[0.5°, 2.0°]`
+(`azTR = azErrPred · clamp01((|azErr|−0.5)/1.5)`) instead of stepping, so the lead/predFloor/slew get a
+graded signal. Still exactly 0 below 0.5° (B2 keeps ownership — no dead zone), and `azErrPred` is still
+predFloor-floored, so a genuine 1–2° error still sizes a real bank (the v0.61 reason the gate exists).
+
+### Down-hemisphere pushover — the below-target 90° hang (rec24)
+
+A target *below* the nose gives `phi ≈ ±180°`, so the roll-to-align setpoint `eAlignTgt` saturates to
+±1.5 and the half-committed blend finds a **false ~85° bank equilibrium** in the moderate-off band; at
+85° the target is abeam, pitch drops out, and yaw slowly wanders the nose down — the reported "rolls to
+90° then yaws down". The up hemisphere has no such trap (`phi ≈ 0` → pitch closes it directly). The
+roll-to-align is now suppressed for a below-target in the moderate band and a **bounded pushover** closes
+it instead (the `pullGate`/`aoaGateDn` pair already caps the nose-down authority — maintainer-blessed
+bounded negative-g). Keyed to live geometry only: belowness `clamp01(-alignFrac)`, gated to the
+azErr≈0 hang by `(1-lateralHold)` (a genuine down-lateral keeps its roll-and-pull), tapering back to full
+roll-and-pull for large below-reorientations (`bigTurn→1`). No per-plane constant.
+
+### AoA-ceiling turn demand cap (rec16)
+
+`omegaMax` (the achievability cap) folded the g-limit but not the *live* alpha-limiter, so at low q —
+where the wing stalls before it reaches gLimit — the law demanded a turn the limiter then chopped: the
+bank target railed, the pull was gated, AoA pinned ~20° on a 23° ceiling, and the roll hunted around a
+bank the wing couldn't sustain. `omegaMax` now folds the live alpha margin (`Max(0.3, aoaGateUp)`), so
+the demanded turn shrinks to what the wing can pull at this AoA and the roll stops hunting. Floored at
+0.3 (a wing at the ceiling still holds a sustained turn, not level). Both lockstep achievability sites
+inherit it (EL receives the capped `omegaMax`); rotorcraft untouched (`fbwOk` is `!_collective`).
+
+## 0.66.0
+
+### QoL — show the take identity while recording
+
+The on-screen `● REC` indicator and the start/stop toast now show the take's `R<run>-<take>` tag (the
+`R2-05` part of `mouseaim-rec-v0.66.0-R2-05-<stamp>.csv`), so the maintainer can note which take they're
+on mid-flight and see the same tag in the stop feedback afterwards. Surfaced straight from
+`ManeuverRecorder`'s run index + per-session take counter (new `ManeuverRecorder.Tag`) — not re-parsed
+from the filename. No new UI; reuses the existing overlay/toast.
+
+## 0.65.0
+
+### R1 — remove the `Unified` control law (one fixed-wing law now)
+
+The v0.60 `Unified` A/B alternative is **deleted** — the enum, the `ControlLawKey` (F9) toggle, the
+Cfg bind, the on-screen law toast, and all Unified-only state (`_rollEffFilt`/`_rollEffValid` roll-
+authority measurement, the `_prevRollSign` dead-astern hysteresis, `_lawOverrideLogged`, `qSchedRaw`).
+The v64 A/B evidence settled it: in the fine regime `bigTurn = 0` gates Unified's geodesic `|phi|` roll
+term OFF, so bank magnitude collapses to `|bankTR|`, and with yaw coordination-only and pitch `-local.y`
+≈ 0 on an abeam target, **nothing closes a near-boresight lateral error** — rec12 parked 5.7 s at
+`phi = +90°` with `outP ≈ 0` while EvolvedLegacy closes the same capture in 0.7 s. Fixing it means
+porting EL's fine stage back into Unified, at which point Unified is "EL plus a different pitch term" —
+not worth a parallel law. So `ApplyEvolvedLegacy` is now the only fixed-wing law (rotorcraft were
+already forced through it). Fail-soft on a stale cfg is automatic: BepInEx never binds the removed keys,
+so an orphan `ControlLawMode = Unified` / `ControlLawKey = F9` line is left untouched and unread — the
+same mechanism the removed `Legacy`/`BankToTurn` values already relied on. The recorder's `controlLaw`
+column now emits the literal `EvolvedLegacy` (44 columns unchanged by R1). Unified's one genuine idea —
+pitch as a desired rate normalized by probed authority — is documented in `plans` for possible revival
+as an EL pitch-mode flag, not a second law.
+
+### C1 — reversal-gate the EvolvedLegacy `_pitchEff` floor
+
+v0.64 gave EvolvedLegacy the signed `_pitchEff` scaling, but it floored the factor at `effFloor = 0.3`.
+On a **reversed** plant (rec04/rec05: `_pitchEff` median 0.04, 71% of frames anti-phase, AoA relaying
++25.9↔−10.8° at ~0.8 Hz) that floor clamped demand UP to 0.3 and kept feeding 30% pitch into a plant
+moving the opposite way — the forcing that sustained the 14 s relay. The floor now applies only above a
+`revThresh` (0.15): signed `_pitchEff` sits near 0 **only** on a reversed/lost plant, while genuine
+low-q mush reads a small positive ratio (~0.15–0.3), so below the threshold the demand is allowed to
+collapse to the measured near-0 value and the law stops forcing a reversed plant. Healthy
+(`≥ effFloor`) and mush (`[revThresh, effFloor)`) cases are byte-identical to v0.64. Single-site edit —
+R1 removed the Unified consumer, so no lockstep helper is needed.
+
+### B2 — sub-0.5° fine-settle micro-bank (EvolvedLegacy, azimuth only)
+
+The `bankTR` turn-rate bank is gated at 0.5° of azimuth error (its V-scaled slope, 22–44°/° at speed,
+is the rocking liability and must not extend below the gate), so at 220–470 m/s EL parks the last half-
+degree with no turn command (rec13 ~0.5° at 220 m/s, rec20 1.48° at 271 m/s) — and yaw barely turns the
+flight path at high q, so only a small coordinated bank can close it. B2 injects a **bounded, V-
+independent, heavily-damped** bank in the sub-gate cone: `tBankE = clamp(kSettle·azErr, ±settleCap)`
+with `kSettle = 8` deg/deg (≥3× below the 22°/° that already rocked at 220 m/s, so loop gain sits well
+inside margin) and `settleCap = 4°` (no large-signal relay to ride), flown by EL's existing rate-damped
+roll servo. It **cannot limit-cycle**: the gain cut is ≥3× and V-independent (unlike the V-scaled
+`bankTR`), the output is hard-capped, the term is convergent with no integrator (`→ 0` as `azErr → 0`),
+and it stands down whenever the marker is moving. The stand-down is a new `_settleOK` gate derived from
+the aim direction's own angular rate (low-passed; below `aimStillRate = 3` deg/s = quasi-stationary),
+so B2 never fights the user's live sub-degree aiming. A new recorder column `settleOn` (0/1) records
+whether the injection fired each frame — the gate engages on a runtime signal the CSV doesn't otherwise
+carry, so this is how a capture proves it engaged during a settle and stood down during a sweep. The
+CSV is now **45 columns**; the analyzer/replay tools read by header name and are unaffected.
+
+## 0.64.0
+
+### Fix the FS-12 pitch departure limit cycle (F1-F3 from `plans/v63-pitch-authority-reversal.md`)
+
+Root cause, from the v62 captures: past ~25-30 deg AoA the FS-12 delivers pitch rate **opposite to
+and ~3x larger than** what the game's own FBW commanded (`outP = -1.000` full nose-up, `fbwTgt =
+-0.523`, `fbwAch = +1.703`). Confirmed against the decompiled `ControlsFilter.FlyByWire`: both
+getters read the same body frame in rad/s, unfiltered, and the FBW's own PID subtracts them
+directly (`localAngularVelocity.x - targetPitchAngVel`), so a sustained sign disagreement cannot be
+a convention artifact -- it is genuine authority loss with the FBW's PID pinned at its clamp. The
+alpha limiter only attenuates (it cannot invert), and no thrust-vectoring or FS-12-specific pitch
+component exists in the game code at all.
+
+- **F1 - `_pitchEff` is now a SIGNED ratio.** It previously took `Mathf.Abs` of both sides, making
+  it blind to the one failure it exists to catch: in every failing v62 capture it read **1.00**
+  ("plant healthy") while the signed ratio was -1.00 for 52-89% of commanded frames. `Clamp01` now
+  floors a reversed plant to 0 with no added logic. The noise gate stays on magnitude -- gating on
+  the signed command would skip every nose-down command and silently make it one-sided.
+- **F2 - `ApplyEvolvedLegacy` consumes `_pitchEff`.** It was consumed only by `ApplyUnified`, so the
+  default law -- the one every v62 failure was flown on -- had no plant feedback whatsoever. Same
+  `effFloor = 0.3` shape as Unified so both laws degrade identically. Fixed-wing only: the estimator
+  is measured under a `!_collective` guard, so on rotorcraft it is a stale hold, not a live reading.
+  **Rotorcraft behaviour is bit-for-bit unchanged.**
+- **F3 - the AoA recovery bias is scaled by `_pitchEff`.** Past the ceiling on a reversed plant this
+  term was actively harmful: the traces show it commanding full nose-down at 12 deg AoA (rising, so
+  predicted past the ceiling) which, against the 0.31-0.75 s plant lag measured there (vs 0.12 s
+  when healthy), landed in phase with the next downswing and sustained the cycle. No `effFloor`
+  here on purpose -- unlike the law's P-term this *should* reach zero when authority does.
+
+**Offline verification** (`debugtests/replay-pitcheff.py`, new, with `--selftest`): replaying the
+estimator against all 17 v62 traces, the 5 reversal captures collapse (median 0.03-0.75, min 0.00,
+49-98% of frames below 0.5) and **all 12 healthy captures are unchanged**. The fix bites only where
+the failure is. This is not proof it flies -- there is no plant model, so it cannot predict the
+closed loop -- but it rules out a fix that is wrong on its face.
+
+## 0.63.0
+
+**Instrumentation only — no control-law change.** The v0.62 flight test showed the wobble is still
+there and that the existing artifacts could not explain it; this release closes the visibility gaps
+so the next law change is made against evidence rather than a replay guess.
+
+### Self-identifying artifacts
+
+- **Run index that survives restarts.** New `WTMouseAimPlugin.RunIndex`, backed by a one-line counter
+  file (`BepInEx/mouseaim-run.txt`), bumped once per `Awake`. Two boots of the game are now `R7` and
+  `R8` instead of two unorderable wallclock ids. Fail-soft: any IO problem yields run 0 = "unknown".
+- **Recording filenames carry version + run + index within run.**
+  `mouseaim-rec-v0.63.0-R8-03-20260719-111208.csv`. Previously the filename was wallclock-only, so a
+  folder of 17 captures could not be attributed to a build without opening each one — which is exactly
+  how the v0.61-vs-v0.62 comparison got muddled. The anomaly log gets the same tag, and both headers
+  now record `run=` and `rec=`.
+
+### New recorded signals (6 columns)
+
+- `tgtPRaw, aoaGU, aoaGD, aoaRec, qSched, pEff` — the pitch decision variables, logged as computed.
+  Everything previously recorded was an input or an output; nothing said *why* the law produced the
+  pitch it did, so diagnosing the FS-12 cycle meant re-deriving the AoA gate and recovery bias offline
+  and hoping the reimplementation matched. `tgtPRaw -> outP` is now fully reconstructible from the CSV.
+
+### Analyzer
+
+- **`pitch authority` check (the discriminator).** The mod's `_pitchEff` estimator takes `abs()` of
+  both sides of the FBW's commanded-vs-achieved pitch rate, so it cannot distinguish "the plant did
+  what I asked" from "the plant did the OPPOSITE, at equal magnitude". Scoring the **signed** ratio
+  separates the v62 set perfectly: 12 healthy captures `+0.88..+1.00` with 0% anti-phase frames,
+  5 failing ones `-0.12..-1.00` with 52-89%. Reversal is now a standalone FAIL — it caught two
+  captures the episode scanners scored PASS.
+- **`convergence` check.** Per settling episode: time to reach 0.5 deg off-angle and the tail median.
+  Encodes the standing requirement (<0.5 deg within 3 s); the v62 set plateaus at 1.4-3.7 deg.
+
+## 0.62.0
+
+### Fix the FS-12 pitch death-wobble (affects BOTH laws — shared post-dispatch code)
+
+- **Damp the v0.59 AoA recovery bias.** v0.61 flight recordings (`debugtests/v61/`, FS-12 Revoker,
+  alphaLimiter 27) show a 0.54 Hz rail-to-rail pitch limit cycle with AoA swinging **+43° → −47°** —
+  a ~1:1 overshoot, the signature of an undamped bang-bang element. Cause: `aoaRecover` was fed the
+  *gates'* one-sided predicted AoA (`aoaPredUp` clips rate to ≥0, `aoaPredDn` to ≤0). That clipping
+  is deliberate hysteresis for the gates, but it made the recovery bias blind to the recovery it was
+  itself producing: while AoA plunged from +43° at ~60°/s, `max(0, rate)` was 0, so the bias held
+  near its +0.5 nose-down asymptote until AoA physically re-entered the envelope — by which point the
+  plant carried −2.1 rad/s of pitch rate (2.3× the FBW's own `maxPitchAngVel`) straight through to
+  AoA −47°, where the mirrored term fired with equal authority and restarted the cycle.
+  The bias now uses a **two-sided** predicted AoA (`aoaNow + _aoaRateFilt * aoaLead`); the lead term
+  *is* its damping, making it a PD that fades as recovery develops instead of holding to the crossing.
+  Gates keep their one-sided predictions — that asymmetry is still correct for them.
+  Replayed against the recorded trace: bias at t=393.62 drops **+0.338 → +0.075** and releases 0.15 s
+  earlier. Identical on the approaching side by construction (the clip only differs while recovering).
+
+## 0.61.0
+
+### Track A — surgical shared-code fixes (affects BOTH laws)
+
+- **Fix S1 counter-roll at maneuver onset.** The `_eAlignSlew` anti-relay slew was a persistent
+  static, never reset, rate-limited toward `clamp(phi/90)` at a fixed 3/s. On a fresh down-lateral
+  demand it ramped the previous sign *through zero* (~0.3 s of wrong-way roll), and a near-boresight
+  HOLD frame — where `phi = atan2(local.x, local.y)` is numerically meaningless — seeded it with
+  saturated junk. It is now gated to the dead-astern **wrap region** (`|phi| > 135°`, the only place
+  `phi` is discontinuous) and zeroed where `lateral` is below the atan2 conditioning floor; elsewhere
+  it passes through (no lag, no counter-roll). Reset on engage. The v0.57 dead-astern relay protection
+  is retained. (rec `20260718-232130`)
+- **Fix S2 (partial) — azTR presence gate keyed to raw azErr.** The turn-rate bank zeroed on
+  `|azErrPred| ≤ 0.5°`, but `azErrPred` is floored at `0.30·azErr`, so a genuine 1–2° error was
+  shrunk below the 0.5° gate and routed to yaw instead of a bank. The presence gate now keys off the
+  **raw** `azErr` (is there a turn to make?) while the magnitude stays the lead-shaped `azErrPred`.
+  Both lockstep sites updated identically. (rec `20260719-084655`)
+- **Fix S3c — Trainer AoA relay.** The AoA fade width was proportional (`min(6, 0.25·lim)`),
+  collapsing to 2.5° on a low limiter — narrower than the one-lead-time AoA overshoot a low-q plant
+  produces, so the ceiling gate became a relay (a 0.46 Hz AoA pump). Floor the fade at **4°** (jets
+  with `alphaLimiter ≥ 16°` are byte-identical — the floor only widens low-limit STOL/trainers), and
+  make the recovery bias **continuous** (tanh: same initial slope and same ±0.5 asymptote as the old
+  hard clamp, but rolls off smoothly instead of a fixed-step relay). (rec `20260719-083213`)
+
+### Track B — geodesic roll/pitch restructure (Unified only; EvolvedLegacy unchanged)
+
+- **Roll direction from body-frame bearing `phi`, magnitude from `bankTR`.** v0.60 computed the
+  geometric roll solution (`phi`, the bank that puts the target in the lift plane) and threw it away,
+  driving roll from the horizontal-plane `azErr` chain — which is exactly why down-lateral demands
+  broke (S1 wrong-sign, S2 yaw-carry). Unified now takes roll **direction** from `phi` and keeps
+  `bankTR` only as the roll **magnitude** reference; a dead-astern sign flip is handled by
+  `_prevRollSign` hysteresis (no rate limiter, so no S1 lag).
+- **Roll loop normalized by measured roll authority.** New `_rollEffFilt` estimator (the roll twin of
+  `_pitchEff` / `_yawEffFilt`): low-passed `|rollRate|/|outR|`, spike-guarded, so a fixed
+  `RollGain`/`RollDamping` no longer has to serve an order-of-magnitude plant swing (GENERALITY
+  finding 5). Fail-soft to the pre-0.61 fixed-gain path until a real command has been measured.
+  (rec `20260719-085036`)
+- **Pitch: `coordPull` dropped** (the pull is explicit in the normalized rate term — as roll pulls the
+  target into the lift plane, `local.y` grows and the pull emerges). **Yaw: coordination only** (the
+  `fineGain` boost — the S2 over-yaw amplifier — and the yaw-weakness fade removed; `_iYaw` still
+  closes fine-lateral residual). Subsumes the S1/S2 root cause for Unified: down-lateral targets
+  bank+pull instead of yaw-slewing. EvolvedLegacy (the F9 A/B fallback) retains all of it.
+
+## 0.60.0
+
+- **New `Unified` control law — rate-normalized pitch + measured pitch effectiveness.** Behind the
+  F9 A/B switch (now **EvolvedLegacy ↔ Unified**), `Unified` reuses EvolvedLegacy's proven roll and
+  yaw verbatim and replaces **only the pitch error term** with the one structural pattern the v0.58
+  helo path already uses: command a desired pitch **rate** and normalize by the probed achievable
+  rate (`stick = k·err/ωmax`). This realizes GENERALITY-REVIEW findings 1 + 2 for fixed-wing pitch.
+  EvolvedLegacy is **byte-unchanged** and stays the default + safe fallback (and is still forced for
+  all rotorcraft); `Unified` is fixed-wing only.
+- **Measured pitch-effectiveness estimator (`_pitchEff`).** The pitch twin of `_yawWeak`: a
+  low-passed achieved/commanded ratio of the game FBW's own pitch-rate pair (already logged by the
+  recorder), with fast-attack/slow-release hysteresis, so loadout/mass/density/damage/mush all show
+  up generically as achieved &lt; commanded and back the demand off — no schedule guessing. It scales
+  `Unified`'s normalized pitch command; the two demand *schedules* (`qSched`, the AoA-utilization
+  fold-in) are demoted to safety nets on this law (`qSchedRaw`, the q-only value, is retained as an
+  instantaneous low-q floor). No FineGainBoost on the normalized branch — fine capture is closed by
+  the shared `_iPitch` integrator, which structurally removes the "boost rails the stick near the
+  alpha ceiling" mode. Fail-soft throughout: any FBW probe miss degrades pitch to EvolvedLegacy's
+  exact pre-normalization raw term.
+- **`Legacy` and `BankToTurn` laws removed.** Both were superseded — Legacy by EvolvedLegacy (v0.42),
+  BankToTurn abandoned since v0.41. Their methods, enum members, and BankToTurn-only config binds
+  (`BankToTurnOmegaMax`, `BankToTurnDeadband`) are deleted. Config serializes enums by name, so a
+  stale cfg holding either falls back to the bound default `EvolvedLegacy` (F9 then rescues to
+  `Unified`).
+- **`BankToTurnVmin` renamed `BankSpeedFloor`** and now used at all three lockstep bank-target sites
+  (Apply's shared `bankTR`, EvolvedLegacy, Unified) — fixing GENERALITY-REVIEW finding 8, where the
+  shared site used a hardcoded `50` while the law used the bind. Default stays **50**, so behaviour is
+  identical at defaults; an old cfg line named `BankToTurnVmin` is orphaned and `BankSpeedFloor` binds
+  at 50 (numerically the same). No migration needed.
+- **Findings status:** 1, 2, 8 fixed; 9 resolved by construction (Legacy deleted — the only fixed-wing
+  alternative is `Unified`, which carries its own low-q/loaded protection). Roll normalization
+  (finding 5) deferred: the FBW roll authority isn't read anywhere yet and needs a decompiled-source
+  check of `GetFlyByWireParameters` before a principled fix.
+
 ## 0.59.0
 
 - **AoA-utilization demand schedule — the loaded-jet pitch-oscillation fix.** The v58 Discord

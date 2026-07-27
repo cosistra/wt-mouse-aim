@@ -13,7 +13,7 @@ namespace NuclearOptionMouseAim
             Time.timeScale == 0f ||
             DynamicMap.mapMaximized ||
             RadialMenuMain.IsInUse() ||
-            Leaderboard.IsOpen();
+            NuclearOption.UI.LeaderboardMenu.IsOpen(); // game 0.34 renamed Leaderboard -> NuclearOption.UI.LeaderboardMenu
     }
 
     // ---------------------------------------------------------------------------------------------

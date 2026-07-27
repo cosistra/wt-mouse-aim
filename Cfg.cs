@@ -23,12 +23,10 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float> AimDistance;      // metres ahead the aim point is placed (projection only)
         public static ConfigEntry<bool>  InvertPitch;
 
-        // --- Control-law A/B switch (v0.38). Pick which law turns the marker error into stick commands,
-        // and a hotkey that cycles it in flight so Legacy vs the rearch laws can be compared back-to-back.
-        public static ConfigEntry<ControlLawMode> ControlLawMode;  // active control law (default Legacy)
-        public static ConfigEntry<KeyCode>        ControlLawKey;   // cycle the active law in-flight (default F9)
-
         // --- Chase law (writes flight controls). Per-axis gains may be negative to flip a sign.
+        // (v0.65: the ControlLawMode/ControlLawKey A/B switch was removed — one fixed-wing law now.
+        // A stale cfg holding those keys is ignored: BepInEx never binds them, so the orphan lines
+        // are left untouched and unread — same fail-soft as the removed Legacy/BankToTurn enum values.)
         public static ConfigEntry<bool>  WriteControl;        // actually drive the stick (off = overlay only)
         public static ConfigEntry<bool>  ControlRotorcraft;   // fly collective aircraft (helis/hover-VTOLs) too, not just fixed-wing
         public static ConfigEntry<float> PitchYawSensitivity; // base chase gain on the body-frame aim direction
@@ -88,16 +86,13 @@ namespace NuclearOptionMouseAim
         // ChaseController FBW probe now reads the per-airframe params and normalizes pitch exactly.
         public static ConfigEntry<float> BankSlewRate;        // deg/s: rate limit on EvolvedLegacy's bank target (v0.54 anti-relay)
 
-        // --- Bank-to-turn law (Phase 1, v0.39): physics-based unified law knobs that have no Legacy
-        // equivalent. The rest of the BankToTurn law REUSES the existing Control gains (MaxBankAngle,
-        // RollGain/PitchGain/YawGain, RollDamping, RollRateSmoothing, ChaseDamping, the integrator trio,
-        // and AssistTurnRateGain as the turn-rate gain Kturn).
-        public static ConfigEntry<float> BankToTurnVmin;      // m/s: airspeed floor in atan(omega*V/g) so low-speed/hover stays sane
-        public static ConfigEntry<float> BankToTurnOmegaMax;  // rad/s: cap on the demanded turn rate (limits commanded bank + load factor)
-        public static ConfigEntry<float> BankToTurnDeadband;  // deg: pointing-error deadband on the turn-rate demand (anti on-heading wobble)
+        // --- Shared bank-target airspeed floor (v0.60, was BankToTurnVmin): the V floor in the
+        // atan(omega*V/g) bank math, used at both lockstep sites (Apply's shared bankTR and
+        // EvolvedLegacy) so low-speed/hover stays sane.
+        public static ConfigEntry<float> BankSpeedFloor;      // m/s: airspeed floor in atan(omega*V/g)
 
-        // --- EvolvedLegacy law (Phase 2, v0.40): knob for the final-leg align-hold that has no Legacy
-        // equivalent. All other EvolvedLegacy gains reuse the existing Control/Assist binds.
+        // --- EvolvedLegacy law: knob for the final-leg align-hold. All other law gains reuse
+        // the existing Control/Assist binds.
         public static ConfigEntry<float> EvolvedAlignHoldDeg; // deg: |azErr| below which the align-hold releases (leveling is allowed)
 
         // --- Hover / "flown-like-a-helicopter" regime (v0.43, EvolvedLegacy only). On collective aircraft
@@ -183,10 +178,6 @@ namespace NuclearOptionMouseAim
             InvertPitch      = cf.Bind("Aim", "InvertPitch", false,
                 "Flips vertical mouse so the circle (and the plane) aim up vs. down. Also flips the camera-follow tilt, since both follow the same circle.");
 
-            ControlLawMode      = cf.Bind("Control", "ControlLawMode", NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy,
-                "Which control law turns the aim-marker error into stick commands (A/B switch, v0.38). EvolvedLegacy = the DEFAULT as of v0.42 (graduated): evolved Legacy with a universal atan(omega*V/g) bank at all speeds (not just when yaw-weak) + final-leg align-hold that keeps the roll-to-align contribution engaged until the target is genuinely close laterally (no early wings-level / park-short). Legacy = the accreted v0.37 law, kept as the pristine A/B reference (pick it to compare). BankToTurn = the abandoned Phase-1 experiment (not working) — HIDDEN from the F9 cycle as of v0.42; code retained but not reachable via the toggle. Cycle Legacy<->EvolvedLegacy in flight with ControlLawKey (default F9); an on-screen toast confirms the active law and the maneuver-recorder CSV tags each row with it.");
-            ControlLawKey       = cf.Bind("Control", "ControlLawKey", KeyCode.F9,
-                "Key that toggles the active control law in flight (Legacy <-> EvolvedLegacy as of v0.42; BankToTurn is excluded — abandoned), updating ControlLawMode. Default F9 (F7=Fly Level, F8=Record, F10=master toggle are taken). A brief on-screen toast names the law it switched to. Pick any single key.");
             WriteControl        = cf.Bind("Control", "WriteControl", true,
                 "Let the mod actually fly the plane (drive the stick). Off = overlay/camera only, you keep manual control — handy for A/B comparing the feel.");
             ControlRotorcraft   = cf.Bind("Control", "ControlRotorcraft", true,
@@ -303,17 +294,11 @@ namespace NuclearOptionMouseAim
             BankSlewRate        = cf.Bind("Control", "BankSlewRate", 60f, new ConfigDescription(
                 "EvolvedLegacy law only (v0.54). Rate limit (deg/s) on the atan(omega*V/g) bank target the roll servo chases. Nineteen v0.53 recordings (KR67 + AB4 Alcyon, 450-536 m/s) showed the brake-clamped lead rectifying heading-rate ripple into a bank target that BANGED 0<->48-65 deg at ~1.5 Hz from a 1-3 deg aim error — the roll servo faithfully chased it (corr 0.79-0.96) and the wings rocked +/-14-30 deg while station-keeping. A target that can only move this fast can't flap above the airframe's own roll response, and a slower-moving target also shrinks the 15-20 deg bank overshoot that sustained the slower 0.5 Hz cycle in big turns. 60 deg/s still reaches the full 72 deg bank in ~1.2 s (about what a real roll-in takes). 0 = off (instant target, old behaviour). Lower toward 40 if the wings still rock; raise toward 90-120 if turn entry feels lazy.",
                 new AcceptableValueRange<float>(0f, 360f)));
-            BankToTurnVmin      = cf.Bind("Control", "BankToTurnVmin", 50f, new ConfigDescription(
-                "Bank-to-turn law (Phase 1) only. Airspeed FLOOR (m/s) used inside the speed-correct bank/load-factor physics phi=atan(omega*V/g) and n=sqrt(1+(omega*V/g)^2). The law banks and pulls in proportion to airspeed V; at very low speed / hover V->0 would collapse the commanded bank to nothing, so V is floored at this value to keep the maths sane (a gentle, sensible bank rather than zero). Has no effect above this speed. ~50 m/s is a safe floor; raise it if low-speed turns feel too weak, lower it toward true stall speed for more honest slow-flight banking.",
+            BankSpeedFloor      = cf.Bind("Control", "BankSpeedFloor", 50f, new ConfigDescription(
+                "Airspeed FLOOR (m/s) used inside the speed-correct bank physics phi=atan(omega*V/g) at both lockstep sites (Apply's shared bank target and the EvolvedLegacy law). The bank is sized in proportion to airspeed V; at very low speed / hover V->0 would collapse the commanded bank to nothing, so V is floored here to keep the maths sane (a gentle, sensible bank rather than zero). Has no effect above this speed. ~50 m/s is a safe floor; raise it if low-speed turns feel too weak, lower it toward true stall speed for more honest slow-flight banking. (v0.60: renamed from BankToTurnVmin — an old cfg line with that key is ignored and this binds at the identical default 50, so behaviour is unchanged.)",
                 new AcceptableValueRange<float>(10f, 150f)));
-            BankToTurnOmegaMax  = cf.Bind("Control", "BankToTurnOmegaMax", 0.6f, new ConfigDescription(
-                "Bank-to-turn law (Phase 1) only. CAP (rad/s) on the demanded turn rate omega. The law asks for a turn rate proportional to the pointing error (omega = Kturn*err, Kturn = AssistTurnRateGain), then sizes the bank phi=atan(omega*V/g) and the load factor n=sqrt(1+(omega*V/g)^2) to sustain it. This cap bounds how aggressive a large pointing error gets: it limits the steepest commanded bank and the hardest pull (more G the faster you go, since n scales with V). ~0.6 rad/s (~34 deg/s) is a firm but controlled slew. Lower for gentler maximum turns; raise if large reorientations feel sluggish (watch for over-G / energy bleed at high speed).",
-                new AcceptableValueRange<float>(0.1f, 1.5f)));
-            BankToTurnDeadband  = cf.Bind("Control", "BankToTurnDeadband", 0.5f, new ConfigDescription(
-                "Bank-to-turn law (Phase 1) only. Pointing-error DEADBAND (deg) on the turn-rate demand — the BankToTurn replacement for FineBankDeadzone. Below this nose-to-marker error the demanded turn rate is ZERO (wings level, no pull), so the law doesn't chase sub-degree noise into an on-heading roll/pitch dither; the retained fine integrator still lands the nose on the marker. Above it the demand ramps in smoothly (error past the deadband feeds the turn rate). 0 = off; raise if the wings/nose still wobble when on-heading, lower if small corrections feel like they ignore the first fraction of a degree.",
-                new AcceptableValueRange<float>(0f, 5f)));
             EvolvedAlignHoldDeg = cf.Bind("Control", "EvolvedAlignHoldDeg", 5.0f, new ConfigDescription(
-                "EvolvedLegacy law only. When the total nose-off-marker angle (off) drops inside FineAngle, Legacy immediately snaps the roll blend to pure wings-level (bigTurn->0) even if the target is still a few degrees SIDEWAYS — it stops rolling to align early and the nose parks short. This knob keeps the roll-to-align contribution alive through the final degrees: the blend weight is MAX(bigTurn, lateralHold) where lateralHold = clamp01(|azErr|/EvolvedAlignHoldDeg), so as long as |azErr| exceeds this value the law keeps rolling to put the target at 12-o'clock instead of leveling early. When BOTH off and |azErr| are near zero the law settles wings-level on target — convergent, no limit cycle. ~5 deg is a reasonable start: raise if the nose still parks short or wings-level too early; lower toward 1-2 if it over-rolls past the target in the final stage.",
+                "EvolvedLegacy law. When the total nose-off-marker angle (off) drops inside FineAngle, the roll blend would snap to pure wings-level (bigTurn->0) even if the target is still a few degrees SIDEWAYS — rolling to align stops early and the nose parks short. This knob keeps the roll-to-align contribution alive through the final degrees: the blend weight is MAX(bigTurn, lateralHold) where lateralHold = clamp01(|azErr|/EvolvedAlignHoldDeg), so as long as |azErr| exceeds this value the law keeps rolling to put the target at 12-o'clock instead of leveling early. When BOTH off and |azErr| are near zero the law settles wings-level on target — convergent, no limit cycle. ~5 deg is a reasonable start: raise if the nose still parks short or wings-level too early; lower toward 1-2 if it over-rolls past the target in the final stage.",
                 new AcceptableValueRange<float>(0f, 15f)));
 
             HeliForwardSpeed    = cf.Bind("Control", "HeliForwardSpeed", 60f, new ConfigDescription(
@@ -411,7 +396,7 @@ namespace NuclearOptionMouseAim
         public static string SnapshotString()
         {
             return
-                $"law={ControlLawMode.Value} sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
+                $"law=EvolvedLegacy sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
                 $"pitchG={PitchGain.Value:0.0} yawG={YawGain.Value:0.0} rollG={RollGain.Value:0.00} rollDamp={RollDamping.Value:0.00} rollSm={RollRateSmoothing.Value:0.00} " +
                 $"bankGain={FineBankGain.Value:0.0} bankDz={FineBankDeadzone.Value:0.0} maxBank={MaxBankAngle.Value:0} " +
                 $"fineAng={FineAngle.Value:0} fineBoost={FineGainBoost.Value:0.0} align={AlignAngle.Value:0} " +

@@ -5,12 +5,9 @@ using UnityEngine;
 namespace NuclearOptionMouseAim
 {
     // ---------------------------------------------------------------------------------------------
-    // Which control law produces the per-axis stick targets (A/B switch, v0.38). Legacy is the
-    // accreted v0.37 law (default during development); BankToTurn / EvolvedLegacy are the phased
-    // rearch laws. Cycled in flight via ControlLawKey (F9); selectable live in the F1 menu. See the
-    // phased rearchitecture plan: Apply branches on this to pick ApplyLegacy/ApplyBankToTurn/ApplyEvolvedLegacy.
-    internal enum ControlLawMode { Legacy, BankToTurn, EvolvedLegacy }
-
+    // ONE fixed-wing control law now (EvolvedLegacy — the Unified A/B alternative was removed in
+    // v0.65; see CHANGELOG). Rotorcraft are force-flown through the same law (every bit of heli
+    // handling lives in it). No law enum / no in-flight law toggle any more.
     // ---------------------------------------------------------------------------------------------
     // The chase controller (thin "instructor"). Point-and-chase law from brihernandez/MouseFlight
     // (MIT), spec §3.1/3.2: compute the marker direction in the body frame, pitch/yaw toward it, and
@@ -135,6 +132,29 @@ namespace NuclearOptionMouseAim
         private static bool  _prevAzErrValid;   // skip the first frame's bogus derivative
         private static float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
 
+        // Measured pitch-effectiveness estimate (v0.60) — the pitch twin of _yawWeak, consumed by
+        // ApplyEvolvedLegacy. 1 = the plant delivers the commanded pitch rate; < 1 = it's under-delivering
+        // (loaded / mushing / low-q / damaged). Low-passed achieved/commanded ratio of the game FBW's
+        // own pitch rate pair, with the same fast-attack/slow-release asymmetry (memory/hysteresis) as
+        // _yawWeak. Computed in Apply's shared pre-compute; reset to 1 on engage.
+        private static float _pitchEff = 1f;
+        // v0.65 C1 reversal threshold AND v0.67 dead-command self-probe level — one const so they can't
+        // drift apart. Below this, _pitchEff means "reversed/lost plant" (C1 drops the floor); it is also
+        // the level a GATED-OUT command drifts toward so the pitch loop keeps a ~15% self-probe alive
+        // (v0.67 latch fix — see the estimator + C1 comments).
+        private const float PEffRevThresh = 0.15f;
+
+        // B2 fine-settle marker-stationary gate (v0.65). _aimRateFilt = low-passed angular speed of the
+        // aim direction (deg/s); _settleOK latches quasi-stationary (below aimStillRate) so the law may
+        // inject a small V-INDEPENDENT sub-gate micro-bank that closes a high-q azimuth residual without
+        // re-arming the V-scaled bank relay. _settleOn = did that injection fire this frame (recorder
+        // column settleOn). _prevAim/_prevAimValid feed the rate. Reset on engage like the other estimators.
+        private static Vector3 _prevAim;
+        private static bool    _prevAimValid;
+        private static float   _aimRateFilt;
+        private static bool    _settleOK;
+        private static bool    _settleOn;
+
         // Hover / "flown-like-a-helicopter" regime state (v0.43). _collective latches the airframe class
         // (true = takeoffDistance==0 = heli/hover-VTOL) on engage; _heliBlend in [0,1] is the per-frame
         // regime blend (0 = fixed-wing bank-to-turn, 1 = hover yaw-to-point), computed in Apply from
@@ -191,7 +211,6 @@ namespace NuclearOptionMouseAim
         private static TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
         private static SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
         private static bool _hasCompound;                        // CompoundHeloController present (log-only for now)
-        private static bool _lawOverrideLogged;                  // one [law] line per airframe when collective forces EvolvedLegacy
 
         public static bool IsFlying => _active;
 
@@ -372,7 +391,7 @@ namespace NuclearOptionMouseAim
         // the archetype refs null — exact pre-0.58 behaviour (hot direct gains, speed-only blend).
         private static void ResolveHelo(Aircraft ac)
         {
-            _heloOk = false; _twc = null; _sds = null; _hasCompound = false; _lawOverrideLogged = false;
+            _heloOk = false; _twc = null; _sds = null; _hasCompound = false;
             if (!_collective) return; // fixed-wing: nothing to probe, keep the refs null
             try
             {
@@ -486,7 +505,10 @@ namespace NuclearOptionMouseAim
                 _prevFwdValid = false; // don't compute a huge rotation rate across the engage gap
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
                 _headingRateFilt = 0f; _tBankSlewed = 0f; // fresh heading-rate lead (v0.51) + bank-target slew (v0.54)
+                _eAlignSlew = 0f; // v0.61: clear cross-engagement carry (was a persistent static → stale seed on re-engage)
                 _alphaSchedFilt = 1f; // fresh AoA-utilization demand schedule (v0.59)
+                _pitchEff = 1f; // fresh measured pitch-effectiveness estimate (v0.60)
+                _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -564,6 +586,20 @@ namespace NuclearOptionMouseAim
                 _prevFwd = t.forward;
                 _prevUp  = t.up;
                 _prevFwdValid = true;
+
+                // B2 MARKER-STATIONARY GATE (v0.65) — angular speed of the aim direction (deg/s),
+                // low-passed. HIGH = the user is sweeping the mouse, so the sub-gate fine-settle
+                // micro-bank in ApplyEvolvedLegacy stands down (the main law + manual override own a
+                // moving marker); quasi-stationary = it may inject. aimDir is already in hand — no new
+                // game signal. Convergent/gated design is documented at the injection site.
+                if (_prevAimValid && dt > 1e-5f)
+                {
+                    float aimRate = Vector3.Angle(_prevAim, aimDir) / dt;
+                    _aimRateFilt += (dt / (0.15f + dt)) * (aimRate - _aimRateFilt);
+                }
+                _prevAim = aimDir; _prevAimValid = true;
+                const float aimStillRate = 3f; // deg/s — above frame noise (~0.8 deg/s), below a deliberate sweep
+                _settleOK = _aimRateFilt < aimStillRate;
 
                 // PITCH/YAW: straight PROPORTIONAL pull toward the marker, MINUS a damping term on the
                 // nose's own turn rate so the inputs fade out as it closes instead of overshooting (the
@@ -774,6 +810,52 @@ namespace NuclearOptionMouseAim
                     qSched   = Mathf.Clamp(qRatio, 0.3f, 1f); // the game's own q clamp, reused as the schedule
                 }
 
+                // MEASURED PITCH-EFFECTIVENESS (v0.60) — the pitch twin of _yawWeak, consumed by
+                // ApplyEvolvedLegacy. Read the game FBW's OWN commanded vs achieved pitch rate (the recorder
+                // already logs this pair) and low-pass the achieved/commanded ratio with the same
+                // fast-attack/slow-release asymmetry as _yawWeak, so loadout/mass/density/damage/mush
+                // all appear generically as achieved < commanded. Magnitude-only (the game rate pair is
+                // +=nose-down; sign is irrelevant to a ratio). Fail-soft: any miss holds the last value.
+                // Attack 0.10 s catches mush onset in ~2-3 frames without reacting to single-frame noise;
+                // release 1.0 s gives the estimate memory so demand can't snap hot again as the plant
+                // momentarily recovers mid-cycle. Regime (loop-shaping) constants, not per-plane.
+                float pitchEffInst = _pitchEff; // default = hold (fail-soft: probe miss / manual / read error)
+                if (fbwResolved && !_collective && _fbwFbw != null && !manualNow)
+                {
+                    try
+                    {
+                        // v0.64: SIGNED ratio. Through v0.63 both sides were Mathf.Abs'd, which made the
+                        // estimator blind to the one failure it exists to catch: a plant that delivers the
+                        // OPPOSITE of what was asked. In the v62 FS-12 captures |ach/cmd| read 1.00 through
+                        // every departure — "plant healthy" — while the signed ratio was -1.00 for 52-89%
+                        // of commanded frames (aircraft pitching nose-DOWN at 3x magnitude under a full
+                        // nose-UP command, post-stall). Clamp01 now floors a reversed plant to 0 with no
+                        // extra logic. Noise gate stays on MAGNITUDE — gating on the signed cmd would skip
+                        // every nose-down command and silently make this a one-sided estimator.
+                        float cmd = _fbwFbw.GetTargetPitchAngVel();
+                        float ach = _fbwFbw.GetPitchAngVel();
+                        // v0.67 C1-LATCH FIX (rec14). A gated-out command (|cmd| < 0.05) carries NO
+                        // information — but pure-HOLDING _pitchEff there latches a transient low-q mush at
+                        // ~0 forever: C1 keeps pitch ×0 → the stick sits at 0 → cmd stays < 0.05 → it can
+                        // never re-measure (rec14 froze the pull ~4 s at railed bank). Instead, with no
+                        // command to measure, floor the estimate at the small self-probe level via
+                        // Max(_pitchEff, revThresh): a LATCHED-low estimate rises toward ~15% (inst > cur ⇒
+                        // the slow RELEASE tau) so pitch re-establishes → cmd > 0.05 → re-measure; a HEALTHY
+                        // estimate (already ≥ revThresh) is left untouched, so a brief neutral stick never
+                        // drags a good jet's authority down. A genuine reversal produces cmd > 0.05 with ach
+                        // reversed, so it re-drops on the next real command (bounded slow pulse, not a
+                        // freeze) — the pre-C1 effFloor=0.3 gave this self-probe for free; C1 removed it,
+                        // this restores it at the lower 0.15. Gated on a LIVE readable FBW (inside this
+                        // block), so a probe miss still holds — no per-plane constant.
+                        pitchEffInst = Mathf.Abs(cmd) > 0.05f ? Mathf.Clamp01(ach / cmd)
+                                                             : Mathf.Max(_pitchEff, PEffRevThresh);
+                    }
+                    catch { /* leave hold */ }
+                }
+                const float pEffAtk = 0.10f, pEffRel = 1.0f; // regime constants: drop fast, recover slow
+                float pTau = pitchEffInst < _pitchEff ? pEffAtk : pEffRel;
+                _pitchEff = Mathf.Clamp01(_pitchEff + (dt / (pTau + dt)) * (pitchEffInst - _pitchEff));
+
                 // MOD-SIDE AoA CEILING gates (v0.55) — computed here, applied to the pitch command
                 // post-law below (and freezing _iPitch while biting). Mirrors the game's own limiter
                 // shape (only cut the command DRIVING AoA further past the limit, per sign) so recovery
@@ -789,7 +871,13 @@ namespace NuclearOptionMouseAim
                     // turning AoA (v55 recordings). Proportional margins free it; FS-12 (27) keeps exactly 4/6.
                     // ponytail: fixed fractions, promote to Cfg only if flight tuning demands it
                     float lim = fbwOk ? _fbwAlphaLimit : 25f;
-                    float aoaMargin = Mathf.Min(4f, 0.15f * lim), aoaFade = Mathf.Min(6f, 0.25f * lim);
+                    float aoaMargin = Mathf.Min(4f, 0.15f * lim);
+                    // v0.61: floor the fade at 4 deg. The proportional fade collapses to 2.5 deg on a low
+                    // limiter (lim 10), narrower than the one-lead-time AoA overshoot a low-q plant produces —
+                    // that turns the gate into a relay (the Trainer AoA pump). Floor keeps it a graded fade,
+                    // never bang-bang. For lim >= 16 (0.25*lim >= 4) the floor is INACTIVE, so FS-12 (lim 27,
+                    // fade 6) and every jet with lim >= 16 are byte-identical; only low-limit STOL/trainers widen.
+                    float aoaFade = Mathf.Max(4f, Mathf.Min(6f, 0.25f * lim));
                     float aoaCeil = lim - aoaMargin;
                     // v0.57 PREDICTIVE LEAD — the assist-off anti-pump. The v56 recordings showed the
                     // reactive gate is a relay on a fast pull: AoA blows 1.3-2.5x past the ceiling before
@@ -834,9 +922,36 @@ namespace NuclearOptionMouseAim
                     // unopposed -18 bunt). Command a restoring pitch proportional to the PREDICTED excess
                     // past either ceiling, normalized by the airframe-proportional fade width: continuous
                     // (no discontinuity to relay on), symmetric, exactly zero inside the envelope.
-                    aoaRecover = (Mathf.Max(0f, aoaPredUp - aoaCeil) - Mathf.Max(0f, -aoaPredDn - aoaCeil)) / aoaFade;
+                    // v0.62: use a TWO-SIDED predicted AoA, NOT the gates' one-sided aoaPredUp/Dn. The
+                    // gates clip the rate term per side on purpose (lead INTO a ceiling only = hysteresis,
+                    // which is what stops THEM relaying). Feeding that same one-sided prediction to the
+                    // recovery bias made it blind to the recovery it was itself producing: while AoA
+                    // plunged from +43 at ~60 deg/s, max(0,rate) was 0, so the bias held near its +0.5
+                    // asymptote until AoA was physically back inside — by which point the plant carried
+                    // -2.1 rad/s of pitch rate (2.3x the FBW's own maxPitchAngVel) straight through to
+                    // AoA -47, where the mirrored term fired with equal authority. Position feedback on a
+                    // rate-input plant with no damping = bang-bang; v61 rec 103523/103331 show the ~1:1
+                    // overshoot signature (+43 -> -47) at 0.54 Hz, both laws (this block is shared, post-
+                    // dispatch). The symmetric lead IS the damping term: pred = AoA + rate*lead makes the
+                    // bias a PD, so it fades as the recovery develops instead of holding to the crossing.
+                    float aoaPredSym = aoaNow + _aoaRateFilt * aoaLead;
+                    aoaRecover = (Mathf.Max(0f, aoaPredSym - aoaCeil) - Mathf.Max(0f, -aoaPredSym - aoaCeil)) / aoaFade;
                 }
                 else _alphaSchedFilt = 1f; // rotorcraft: schedule inert (the helo path is rate-normalized)
+
+                // v0.67 AoA-MARGIN TURN CAP (rec16). omegaMax folds the g-limit (gLimit·9.81/V) but NOT the
+                // live alpha-limiter, so at low q — where the wing hits its alpha ceiling BEFORE gLimit — the
+                // turn-rate demand exceeded what the limiter would fly: tBankE railed to MaxBank, the pull was
+                // gated, AoA pinned ~20° on a 23° ceiling, and the roll HUNTED around a bank the wing couldn't
+                // sustain (rec16, off never closing). aoaGateUp already IS the live nose-up authority remaining
+                // (1 wide-open .. 0 at the ceiling, predictive), so fold it into the achievable-rate cap: the
+                // demanded turn shrinks to what the wing can pull at this AoA and the law stops asking for a
+                // turn the limiter will chop. Floored at 0.3 so a wing AT the ceiling still holds a sustained
+                // turn (mirrors the qSched floor) instead of leveling. Applied to omegaMax ITSELF, so BOTH
+                // lockstep achievability sites (this shared block's omegaDes clamp AND EL's local omega clamp,
+                // which receives this same capped omegaMax as a param) cap identically. fbwOk is already
+                // !_collective — rotorcraft keep omegaMax untouched. Keyed to live AoA + probed ceiling only.
+                if (fbwOk) omegaMax *= Mathf.Max(0.3f, aoaGateUp);
 
                 // FINE-CAPTURE GAIN (moved below the AoA block in v0.59 — see the fineBlend comment above).
                 // The boost is gated by the AoA-utilization schedule: at 3.5x near boresight it railed the
@@ -885,7 +1000,18 @@ namespace NuclearOptionMouseAim
                 // deprojects both terms at once. ApplyEvolvedLegacy inherits this via the parameter —
                 // the v0.51/v0.55 lockstep between the two bank-target sites is preserved untouched.
                 azErrPred *= hdgConf;
-                float azTR     = Mathf.Abs(azErrPred) <= 0.5f ? 0f : (Mathf.Abs(azErrPred) - 0.5f) * Mathf.Sign(azErrPred); // noise gate only
+                // SETTLE-EXIT RAMP (v0.67, rec30/rec31). The old presence gate was a HARD step:
+                // |azErr|<=0.5 -> azTR=0, above 0.5 -> full azErrPred. Below 0.5 B2's V-independent micro-
+                // bank owns the settle, but it can't close azimuth at high q, so any drift walks azErr across
+                // 0.5, and at that instant the full V-scaled bankTR (22-44 deg/deg at 285 m/s) slammed a
+                // 0.5-1 deg error into 16-44 deg of bank -> overshoot -> reversal -> 0.43 Hz relay re-armed
+                // at the gate boundary (a step excitation the heading-rate lead can't anticipate). Ramp the
+                // turn-rate demand in PROPORTIONALLY over [0.5, 0.5+azRampW] instead, so the lead/predFloor/
+                // slew get a graded signal, not a step. STILL exactly 0 below 0.5 (B2 keeps ownership — no
+                // dead zone reintroduced), and azErrPred is still predFloor-floored, so a genuine 1-2 deg
+                // error still sizes a real bank (v0.61 reason the gate exists is preserved).
+                const float azRampW = 1.5f; // deg; regime constant (geometry of the hand-off, not per-plane). LOCKSTEP with EL.
+                float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
                 float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
                 // ACHIEVABILITY CAP (v0.55) — the low-speed anti-windup. Below corner speed the FBW's
                 // deliverable pitch rate collapses (x q_ratio, see the probe above) but the turn-rate
@@ -898,7 +1024,7 @@ namespace NuclearOptionMouseAim
                 // sites must stay identical (same rule as the azErrPred lockstep note in that method).
                 bool yawCapped = Mathf.Abs(omegaDes) > omegaMax;
                 if (yawCapped) omegaDes = Mathf.Clamp(omegaDes, -omegaMax, omegaMax);
-                float bankTR   = Mathf.Atan(omegaDes * Mathf.Max(50f, vMag) / 9.81f) * Mathf.Rad2Deg; // deg, signed
+                float bankTR   = Mathf.Atan(omegaDes * Mathf.Max(Cfg.BankSpeedFloor.Value, vMag) / 9.81f) * Mathf.Rad2Deg; // deg, signed (v0.60: shared floor with EvolvedLegacy — finding 8)
                 float bankBlend  = Cfg.YawAssistEnabled.Value ? _yawWeak * (1f - bigTurn) : 0f;
                 float targetBank = Mathf.Clamp(Mathf.Lerp(linBank, bankTR, bankBlend),
                                                -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);
@@ -935,48 +1061,19 @@ namespace NuclearOptionMouseAim
                 }
                 else { _iPitch = _iYaw = 0f; }
 
-                // ---- PER-AXIS CONTROL LAW (A/B switch, v0.38) ----------------------------------------
-                // Branch on the active law to turn the shared pre-compute above into the three target stick
-                // values tgtP/tgtR/tgtY. Everything above (aimDir/local/off/phi/rates/azErr/flight state/
-                // yaw-weakness/targetBank/integrator) and everything below (slew, manual override, write-out,
-                // anomaly/recorder/phase) is SHARED across all laws — only the per-axis shaping differs here.
-                // pullGate/yawScale/coordPull are surfaced for the debug trace (the only post-stage consumers).
+                // ---- PER-AXIS CONTROL LAW ------------------------------------------------------------
+                // Turn the shared pre-compute above into the three target stick values tgtP/tgtR/tgtY. ONE
+                // fixed-wing law now (EvolvedLegacy — the Unified A/B alternative was removed in v0.65);
+                // rotorcraft are force-flown through it too (every bit of heli handling — bank fade, hover
+                // roll gate, yaw boost, rate normalization — lives only there). Everything above (aimDir/
+                // local/off/phi/rates/azErr/flight state/yaw-weakness/targetBank/integrator/_settleOK) and
+                // below (slew, manual override, write-out, anomaly/recorder/phase) is SHARED — only the
+                // per-axis shaping differs here. pullGate/yawScale/coordPull are surfaced for the debug trace.
                 float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
-                _tBankFlown = targetBank; // Legacy/BankToTurn fly the shared target; EvolvedLegacy overwrites with its slewed tBankE
-                // v0.58: rotorcraft ALWAYS fly EvolvedLegacy — every bit of heli handling (bank fade,
-                // hover roll gate, yaw boost, rate normalization) lives only there. Legacy/BankToTurn on
-                // a heli is the raw fixed-wing law, and users A/B into it expecting a fix (v57 rec
-                // 20260711-224117: same ~1 Hz pitch buzz on Legacy — the switch silently dropped ALL
-                // heli logic). Fixed-wing law selection is untouched.
-                var lawMode = Cfg.ControlLawMode.Value;
-                if (_collective && lawMode != NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy)
-                {
-                    if (!_lawOverrideLogged)
-                    {
-                        _lawOverrideLogged = true;
-                        WTMouseAimPlugin.Log.LogInfo(
-                            $"[law] collective airframe — ControlLawMode '{lawMode}' overridden to EvolvedLegacy (all rotorcraft handling lives there).");
-                    }
-                    lawMode = NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy;
-                }
-                switch (lawMode)
-                {
-                    case NuclearOptionMouseAim.ControlLawMode.BankToTurn:
-                        ApplyBankToTurn(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
-                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
-                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
-                        break;
-                    case NuclearOptionMouseAim.ControlLawMode.EvolvedLegacy:
-                        ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
-                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
-                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
-                        break;
-                    default: // Legacy (the hard-won v0.37 law; default during development)
-                        ApplyLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
-                            phi, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
-                            out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
-                        break;
-                }
+                _tBankFlown = targetBank; // the law overwrites this with its own slewed tBankE below
+                ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
+                    phi, lateral, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
+                    out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
 
                 // v0.56: the v0.55 assist-off pitch normalization (tgtP *= protected/achievable) was
                 // DELETED — assist OFF is now a PERFORMANCE MODE: the game's raw law passes through at
@@ -992,6 +1089,7 @@ namespace NuclearOptionMouseAim
                 // against the +ceiling, nose-down against the mirrored -ceiling — so recovery in the
                 // opposite direction is never blocked. Active regardless of the assist state: assist-OFF
                 // gets the AoA protection the game withholds.
+                float tgtPRaw = tgtP; // v0.63: the law's pitch BEFORE the AoA block, for the recorder
                 tgtP *= tgtP < 0f ? aoaGateUp : aoaGateDn;
                 // v0.59 AoA RECOVERY BIAS — applied AFTER the gates (it must survive them: it's the term
                 // that flies the nose back INSIDE the envelope) and BEFORE the canard inversion (it's a
@@ -1000,8 +1098,22 @@ namespace NuclearOptionMouseAim
                 // side. Capped well below full deflection — it recovers, it doesn't bunt. The integrator
                 // is already frozen whenever this is nonzero (the gates are < 1 there).
                 // ponytail: fixed gain/cap, promote to Cfg if flight tuning demands it.
+                // v0.64: scale the recovery bias by measured pitch authority. Past the ceiling on a
+                // REVERSED plant this term was actively harmful, not merely useless — the v62 traces show
+                // it commanding full nose-down at AoA 12 deg (rising, so predicted past the ceiling) which,
+                // against the 0.31-0.75 s plant lag measured there, landed in phase with the next
+                // downswing and sustained the cycle. If the plant is not following, adding command is
+                // pumping. effFloor-free on purpose: unlike the law's P-term this SHOULD go to zero when
+                // authority is zero, because there is nothing to recover with. Fixed-wing only, same
+                // reason as the law scaling (the estimator is not live for rotorcraft).
+                if (!_collective) aoaRecover *= _pitchEff;
                 if (aoaRecover != 0f)
-                    tgtP = Mathf.Clamp(tgtP + Mathf.Clamp(aoaRecover * 0.25f, -0.5f, 0.5f), -1f, 1f);
+                    // v0.61: continuous (tanh) recovery bias — was a hard clamp(aoaRecover*0.25, ±0.5) that
+                    // saturated to a FIXED ±0.5 step past the ceiling (a relay element on a low-q plant).
+                    // tanh keeps the same initial slope (≈aoaRecover*0.25 for small excess, so in-envelope and
+                    // light excursions are unchanged) and the same ±0.5 asymptote (no added authority), but
+                    // rolls off smoothly instead of clipping — removes the discontinuity a relay rides.
+                    tgtP = Mathf.Clamp(tgtP + 0.5f * (float)System.Math.Tanh(aoaRecover * 0.5f), -1f, 1f);
 
                 // v0.57 CANARD LINEARIZATION — invert the Ifrit's relaxed-stability pitch remap so the
                 // FBW receives the pitch the law (and the AoA gate above) intended. tgtP here is the
@@ -1150,7 +1262,8 @@ namespace NuclearOptionMouseAim
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
                         spdR, aoaNow, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
-                        aircraft.flightAssist, fbwTgtPR, fbwPR);
+                        aircraft.flightAssist, fbwTgtPR, fbwPR,
+                        tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn);
                 }
 
                 // Chase trace. Normal cadence ~2.5/sec; inside 10deg ("fine capture") ~5/sec at higher
@@ -1199,165 +1312,10 @@ namespace NuclearOptionMouseAim
             else { LastPitch = LastYaw = LastRoll = 0f; }
         }
 
-        // ---- CONTROL LAW: LEGACY (v0.37) ---------------------------------------------------------
-        // The accreted v0.37 per-axis law, extracted VERBATIM from Apply (pure refactor, no behaviour
-        // change — with ControlLawMode=Legacy the mod is byte-for-byte identical to before). Takes the
-        // shared pre-computed locals from Apply, mutates the legacy member integrators/filters it already
-        // owned (_iPitch/_iYaw are wound above; _rollRateFilt is the roll-rate low-pass), and returns the
-        // three target stick values plus the pullGate/yawScale/coordPull terms the debug trace logs.
-        private static void ApplyLegacy(
-            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
-            float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
-            out float tgtP, out float tgtR, out float tgtY,
-            out float pullGate, out float yawScale, out float coordPull)
-        {
-            // off/vMag/azErrPred/omegaMax/qSched are unused by Legacy (shared-signature parity; the lead
-            // AND the v0.55 achievability cap already shaped the targetBank computed in Apply, which is
-            // all the speed/lead awareness Legacy sees).
-            // PITCH — pull up toward the target, gated so a big turn only pulls once the lift vector is
-            // ON it (and NEVER pushes: the gate is clamped at 0, killing the negative-G bunt the old
-            // |local.y| symmetric coord term produced when a roll swung the target momentarily below the
-            // nose). In the fine cone (bigTurn->0) the gate is 1 — the old direct pull, so a gentle
-            // nose-down to a low marker is still allowed. -local.y is the pull command (nose-up = -pitch).
-            pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
-            // COORDINATING PULL (v0.35, reshaped v0.36) — the "pitch INTO the bank" half of the assist
-            // and the REAL driver of the correction. Once banked, a level turn needs back-pressure or
-            // gravity just drops the nose and the bank does nothing (the v0.35 tail mushed at 0.7-0.9g
-            // with ~0 pull). Add a nose-up pull (nose-up = NEGATIVE pitch) proportional to the commanded
-            // bank, scaled by assist. v0.37: the pull stays at FULL strength outside CoordPullReleaseAngle
-            // (~2 deg) and only eases inside it — so the loaded turn holds its G right through the tail of
-            // the correction (the v0.36 taper over the whole 6 deg fine cone was already half-gone at 3 deg,
-            // so the nose mushed) and then releases cleanly onto aim. With the turn-rate bank above keeping
-            // sin(targetBank) high in the tail, this is what actually loads the G. ALWAYS a pull: clamped
-            // >= 0 (never a push/bunt) and capped (CoordPullCap). Convergent: -> 0 as azErr -> 0 (taper)
-            // and as the bank rolls out.
-            float pullTaper = Mathf.Clamp01(Mathf.Abs(azErr) / Mathf.Max(0.5f, Cfg.CoordPullReleaseAngle.Value));
-            coordPull = Mathf.Clamp(
-                Cfg.CoordPullGain.Value * Mathf.Abs(Mathf.Sin(targetBank * Mathf.Deg2Rad))
-                * pullTaper * assist,
-                0f, Cfg.CoordPullCap.Value);
-            tgtP = Mathf.Clamp((-local.y * sens * fineGain * pullGate + _iPitch + pitchRate * pitchDamp - coordPull) * Cfg.PitchGain.Value, -1f, 1f);
-
-            // YAW — ease rudder authority down during a big turn (the logs showed yaw pinned ±1 adding to
-            // the messy feel) so the bank + pull do the work; full authority returns in the fine cone for
-            // final alignment. v0.36: ALSO fade the rudder P-term out as the assist rises (YawWeakFade) —
-            // when the rudder is measured weak it's pure sideslip/drag doing nothing for the heading, so
-            // commit to bank+pull instead. Keep the small capped _iYaw integrator for final low-speed
-            // alignment (assist ~ 0 there, so this is identically stock at low speed).
-            yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
-            float yawWeakFade = 1f - Cfg.YawWeakFade.Value * assist;
-            tgtY = Mathf.Clamp(( local.x * sens * fineGain * yawScale * yawWeakFade + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
-
-            // ROLL (v0.26): blend the FINE wings-level/azimuth bank servo (small errors) with a BODY-
-            // FRAME roll-to-align (big turns), in matched sin-magnitude units so RollGain/RollDamping
-            // keep their meaning. targetBank was computed up front (assist-aware bank servo) so the
-            // coordinating pull could size off it; here it just becomes the roll error.
-            //   eFine  — the v0.25 bank servo error: a target bank proportional to the heading (azimuth)
-            //            error, capped at MaxBankAngle, null at that bank. t.right.y is the world-up
-            //            component on the right wing (0 = level, <0 = right wing down), so
-            //            (t.right.y + sin(targetBank)) is the bank error. Used inside the fine cone where
-            //            the horizon bank is meaningful and the wings should level on-heading. v0.35: the
-            //            deadband/gain that built targetBank are assist-aware, so when the rudder is weak
-            //            a small side nudge banks instead of waiting on it (the wobble-guard deadband
-            //            still applies at assist 0 — normal on-heading flight is unchanged).
-            //   eAlign — roll the SHORT way to put the target at 12 o'clock: monotonic in phi (no false
-            //            equilibrium except exactly ±180°, broken by any noise), so a target straight off
-            //            the wing or below still rolls in the short way instead of pinning. This is
-            //            attitude-robust where eFine degenerates (steep nose => meaningless horizon bank).
-            // bigTurn blends fine->align; subtract the roll RATE (RollDamping) so it eases on without
-            // overshooting. As the turn completes off shrinks, bigTurn->0, and the fine servo levels out.
-            float eFine  = t.right.y + Mathf.Sin(targetBank * Mathf.Deg2Rad);
-            float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
-            float rollErr = Mathf.Lerp(eFine, eAlign, bigTurn);
-
-            // ROLL-RATE LOW-PASS (v0.31) — fix for the high-speed roll wobble. When level on-heading the
-            // roll P-term (eFine) is ~0, so the command is essentially -rollRate*RollDamping*RollGain. The
-            // rollRate is a one-frame finite difference (~60 Hz); at high dynamic pressure the airframe is
-            // responsive enough that this DELAYED rate feedback flips from damping to DRIVING at ~6-7 Hz —
-            // a self-sustaining limit cycle (logs: R=±0.05 tracking rr=±0.2, bank<0.2deg). Its amplitude is
-            // set by the loop delay, not the gain, which is why the v0.30 qScale gain-cut to 0.35x left it
-            // unchanged. Smoothing the rate (first-order LPF, time constant RollRateSmoothing) rolls off the
-            // high-freq content so the damping only opposes real low-freq roll motion — breaking the cycle
-            // while keeping turn damping. tau=0 -> raw rate (old behaviour).
-            float rollTau = Cfg.RollRateSmoothing.Value;
-            if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
-            else _rollRateFilt = rollRate;
-            float rollRateF = _rollRateFilt;
-
-            tgtR = Mathf.Clamp((rollErr - rollRateF * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
-        }
-
-        // ---- CONTROL LAW: BANK-TO-TURN (Phase 1, repaired v0.41) ---------------------------------
-        // Full-sphere point-and-pull law. ROLL the lift vector (body-up) onto the target via phi
-        // (eAlign = phi/90, clamped ±1.5 — full authority at phi=±180, no dead spot below the nose),
-        // then PULL with a speed-aware load factor; in the fine cone use a SIGNED direct nudge that
-        // allows nose-down. bigTurn blends fine<->big-turn regimes (same as Legacy). No new config
-        // added: reuses BankToTurnVmin/OmegaMax/Deadband/AssistTurnRateGain/RollGain/RollDamping/
-        // RollRateSmoothing/PitchGain/YawGain/TurnYawScale/ChaseDamping and the wound _iPitch/_iYaw.
-        private static void ApplyBankToTurn(
-            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
-            float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
-            out float tgtP, out float tgtR, out float tgtY,
-            out float pullGate, out float yawScale, out float coordPull)
-        {
-            // azErrPred/omegaMax/qSched unused here (parity only — abandoned law): BankToTurn sizes its
-            // pull off `off`, not azErr, and already carries its own BankToTurnOmegaMax cap.
-            const float g = 9.81f;
-
-            // --- ROLL: lift vector onto target, full-sphere (no phi=180 dead spot) ------------------
-            // phi is the target's bearing around the boresight: 0=above/12-o'clock, ±90=off a wing,
-            // ±180=below. eAlign = phi/90 (clamped to ±1.5) rolls the SHORT way to put the target at
-            // 12 o'clock. Unlike the old sin(phi) shaping (which gave ~0 at phi=±180 and created a
-            // DEAD SPOT for below-nose targets), the linear clamp stays at full authority through
-            // phi=±180, so the aircraft rolls toward inverted to point the lift vector at a below target.
-            // In the fine cone (bigTurn~0) blend to eLevelFine (wings-level) so there's no spurious
-            // bank when nearly on target.
-            float eAlign     = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
-            float eLevelFine = t.right.y;                              // wings-level error: 0=level, <0=right wing down
-            float rollErr    = Mathf.Lerp(eLevelFine, eAlign, bigTurn);
-
-            // ROLL-RATE LOW-PASS (anti high-speed roll-PIO, identical to Legacy/EvolvedLegacy).
-            // The bank loop MUST be PD-damped; the low-pass prevents the high-freq delay from
-            // turning rate feedback into a self-sustaining limit cycle (v0.31 fix, v0.38 noted).
-            float rollTau = Cfg.RollRateSmoothing.Value;
-            if (rollTau > 1e-4f) _rollRateFilt += (dt / (rollTau + dt)) * (rollRate - _rollRateFilt);
-            else _rollRateFilt = rollRate;
-            tgtR = Mathf.Clamp((rollErr - _rollRateFilt * Cfg.RollDamping.Value) * Cfg.RollGain.Value, -1f, 1f);
-
-            // --- PITCH: fine = signed direct nudge (allows nose-down); big = speed-aware load-factor ---
-            // FINE CONE (bigTurn~0): -local.y*sens*fineGain is SIGNED — target above => local.y>0 =>
-            // nose-up (negative pitch); target BELOW => local.y<0 => nose-DOWN (positive pitch). This
-            // restores the nose-down capability that was broken when the old code clamped pull to >=0.
-            //
-            // BIG TURN (bigTurn~1): compute the speed-aware load factor from the pointing error past the
-            // deadband. The desired turn rate omega = Kturn*errDeg(rad/s) capped at OmegaMax; the
-            // load factor that physically holds that turn at speed V is n = sqrt(1+(omega*V/g)^2).
-            // The pull (nDes-1)*sens is gated by pullGate=clamp01(alignFrac): ROLL BEFORE PULL —
-            // the pull only engages once the lift vector faces the target (alignFrac>0). Clamped >=0
-            // so the big-turn pull is always nose-up; it is FADED OUT (bigTurn->0) before the fine
-            // signed nudge takes over, so nose-down is always available in the fine cone.
-            float offRad = Mathf.Max(0f, off - Cfg.BankToTurnDeadband.Value) * Mathf.Deg2Rad;
-            float omega  = Mathf.Min(offRad * Cfg.AssistTurnRateGain.Value, Cfg.BankToTurnOmegaMax.Value);
-            float V      = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);
-            float nDes   = Mathf.Sqrt(1f + (omega * V / g) * (omega * V / g));
-            pullGate     = Mathf.Clamp01(alignFrac);                  // roll-then-pull gate (0 when lift vector faces away)
-            float bigPull   = (nDes - 1f) * sens * pullGate;          // >=0, nose-UP in big turns
-            float finePitch = -local.y * sens * fineGain;             // SIGNED: nose-down for below target
-            coordPull = bigPull;                                       // surfaced for debug trace
-            // nose-up = NEGATIVE pitch; fine term already signed; big pull enters as -bigPull (nose-up).
-            tgtP = Mathf.Clamp((Mathf.Lerp(finePitch, -bigPull, bigTurn) + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
-
-            // --- YAW: coordination, full in fine cone, eased in big turn (same as Legacy) -----------
-            yawScale = Mathf.Lerp(1f, Cfg.TurnYawScale.Value, bigTurn);
-            tgtY = Mathf.Clamp((local.x * sens * fineGain * yawScale + _iYaw - yawRate * damp) * Cfg.YawGain.Value, -1f, 1f);
-        }
-
         // ---- CONTROL LAW: EVOLVED LEGACY (Phase 2, v0.40) ----------------------------------------
         // NOTE: body-rate Cascade (originally planned for this slot) is deferred.
-        // This slot now holds the EvolvedLegacy law: a copy of ApplyLegacy's body with two targeted
-        // changes:
+        // This slot holds the EvolvedLegacy law. It began as a copy of the (now-removed, v0.60) Legacy
+        // law's body with two targeted changes:
         //   2a — Universal speed-aware bank: use atan(omega*V/g) for the bank target at ALL speeds/
         //        regimes, not just when yaw-weakness is high. Decouples the high-speed bank sizing
         //        from the weakness estimator (_yawWeak gating), making the loaded-turn bank the
@@ -1368,7 +1326,7 @@ namespace NuclearOptionMouseAim
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
         private static void ApplyEvolvedLegacy(
             Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float azErrPred, float phi, float pitchRate, float yawRate, float rollRate,
+            float targetBank, float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
@@ -1386,16 +1344,43 @@ namespace NuclearOptionMouseAim
             // v0.51: PREDICTED error (azErr - headingRate*TurnLeadTime, computed in Apply), not raw —
             // the anticipatory lead that kills the death-wobble limit cycle. This local copy and the
             // shared bankTR block in Apply MUST stay in lockstep on which error they see.
-            float azTR  = Mathf.Abs(azErrPred) <= 0.5f ? 0f : (Mathf.Abs(azErrPred) - 0.5f) * Mathf.Sign(azErrPred); // noise gate
+            // v0.67 SETTLE-EXIT RAMP — LOCKSTEP with Apply's shared azTR site (see the full rationale
+            // there): ramp the turn-rate demand in proportionally over [0.5, 0.5+azRampW] instead of the
+            // hard 0.5° step, so the settle→bankTR hand-off is no longer a gain cliff that re-arms the
+            // high-q relay (rec30). Still exactly 0 below 0.5° (B2 owns it); azErrPred still predFloor-floored.
+            const float azRampW = 1.5f; // deg; regime constant. MUST match the shared site.
+            float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
             float omega  = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;                              // rad/s, signed
             // v0.55 ACHIEVABILITY CAP — the SAME clamp Apply's shared bankTR block applies to omegaDes
             // (see the comment there); the two sites MUST stay in lockstep, same rule as the azErrPred
             // note above. At low speed this shrinks the bank target physically instead of letting it slam
             // +/-MaxBankAngle into a turn the collapsed pitch rate can't fly (the low-speed oscillation).
             omega = Mathf.Clamp(omega, -omegaMax, omegaMax);
-            float Vb     = Mathf.Max(Cfg.BankToTurnVmin.Value, vMag);                                        // airspeed floor (reuse BankToTurnVmin)
+            float Vb     = Mathf.Max(Cfg.BankSpeedFloor.Value, vMag);                                        // airspeed floor (shared with Apply's bankTR — v0.60)
             float bankTRdeg = Mathf.Atan(omega * Vb / gAcc) * Mathf.Rad2Deg;                                // speed-correct bank, signed deg
             float tBankE = Mathf.Clamp(bankTRdeg, -Cfg.MaxBankAngle.Value, Cfg.MaxBankAngle.Value);         // universal bank target
+            // B2 FINE-SETTLE (v0.65). bankTR is zero here whenever |azErr| <= 0.5 (the omega presence gate),
+            // so the last half-degree of azimuth gets no turn command and the law parks at the gate — rec13
+            // ~0.5° at 220 m/s, rec20 1.48° at 271 m/s, where a coordinated turn (not yaw) is the only thing
+            // that moves the flight path (yaw barely turns it at high q). Inject a SMALL, V-INDEPENDENT,
+            // heavily-damped bank so that residual closes on a gentle turn. V-INDEPENDENT on purpose: the
+            // V-scaled bankTR slope is 22-44°/° at speed (the rocking liability this must not re-arm), so the
+            // sub-gate path must NOT inherit V. Convergent (kSettle*azErr -> 0 as azErr -> 0; no integrator)
+            // and gated to a quasi-stationary marker (_settleOK) so it never fights the user's own sub-degree
+            // aiming. The existing roll servo (with its -rollRateF*RollDamping term) flies it — no new loop.
+            // Fixed-wing only; the hover fade below still zeroes it on a collective airframe. See §"Why B2-A
+            // cannot limit-cycle" in the v0.65 plan for the full stability argument.
+            _settleOn = false;
+            const float settleGate = 0.5f; // = the bankTR presence gate (hand-off boundary)
+            const float kSettle    = 8f;   // deg bank per deg azErr, V-INDEPENDENT; <=3x below the 22 deg/deg
+                                           // that already rocked at 220 m/s, so loop gain stays inside margin
+            const float settleCap  = 4f;   // deg — a transient can never command more than this (no large-signal relay)
+            if (!_collective && _settleOK && Mathf.Abs(azErr) < settleGate && Mathf.Abs(tBankE) < 1e-3f)
+            {
+                float settleConf = new Vector2(t.forward.x, t.forward.z).magnitude; // = cos(pitch); same deprojection as bankTR (hdgConf)
+                tBankE = Mathf.Clamp(kSettle * azErr, -settleCap, settleCap) * settleConf;
+                _settleOn = true;
+            }
             // HOVER REGIME (v0.43): fade the commanded bank to zero as _heliBlend->1. This neutralises the
             // eFine leveler base (eFine = t.right.y + sin(0) = t.right.y) and self-cancels the coordinating
             // pull (coordPull ∝ sin(tBankE) -> 0). NOTE: it does NOT by itself stop roll — the eAlign
@@ -1458,6 +1443,22 @@ namespace NuclearOptionMouseAim
                 wMaxY = Mathf.Max(0.05f, _heloMaxAngVel.y);
                 pErrTerm = -Mathf.Clamp(kHelo * Mathf.Asin(Mathf.Clamp(local.y, -1f, 1f)) / wMaxP, -1f, 1f) * pullGate;
             }
+            // PLANT-AUTHORITY SCALING (v0.64; reversal-gated floor v0.65 C1) — the fix for the FS-12
+            // 0.5 Hz departure limit cycle. _pitchEff is the measured achieved/commanded pitch ratio
+            // (SIGNED: a reversed plant reads ~0). Scale the P demand by it so a mushing/reversed airframe
+            // gets proportionally less command instead of pumping the cycle. v0.65: the 0.3 floor exists
+            // for a healthy-but-noisy plant, but on a REVERSED plant (rec04/rec05: pEff median 0.04, 71%
+            // of frames anti-phase) it clamped demand UP to 0.3 and kept feeding 30% pitch into a plant
+            // moving the OPPOSITE way — the forcing that sustained the 14 s relay. Gate the floor behind
+            // revThresh: signed _pitchEff sits near 0 ONLY on a reversed/lost plant; genuine low-q mush
+            // reads a small POSITIVE ratio (~0.15-0.3). Below revThresh, DON'T floor — let demand collapse
+            // to the measured (near-0) value so the law stops forcing a reversed plant. Healthy
+            // (>=effFloor) and mush ([revThresh,effFloor)) cases are byte-identical to v0.64. Fixed-wing
+            // only: _pitchEff is measured under a !_collective guard (see the estimator), so on rotorcraft
+            // it is a stale hold, not a live reading — scaling by it there would apply a meaningless number.
+            // Rotorcraft keep pre-v0.64 behaviour exactly.
+            const float effFloor = 0.3f; // regime constant (revThresh is the shared PEffRevThresh field)
+            if (!_collective) pErrTerm *= _pitchEff >= PEffRevThresh ? Mathf.Max(effFloor, _pitchEff) : _pitchEff;
             tgtP = Mathf.Clamp(((pErrTerm - coordPull) * qSched + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
 
             // YAW — Legacy, plus the hover-regime authority boost (v0.43). With the wings held level by the
@@ -1489,18 +1490,28 @@ namespace NuclearOptionMouseAim
             //       t.right.y = pure wings-leveler; yaw alone points the nose. Fixed-wing (_heliBlend==0)
             //       is byte-identical to before.
             float eFine  = t.right.y + Mathf.Sin(tBankE * Mathf.Deg2Rad); // 2a: tBankE (universal speed-aware)
-            float eAlign = Mathf.Clamp(phi / 90f, -1.5f, 1.5f);
-            // v0.57 — SLEW-LIMIT eAlign. Third member of the v0.53 raw-az->roll family: when the target
-            // crosses dead-astern, phi flips sign in ONE tick (+162 -> -147 in the v56 FS-12 scissors
-            // captures) and eAlign followed it rail-to-rail — an unslewed relay that bypasses BOTH the
-            // v0.53 fine-cone deadzone (this is the bigTurn path) and the v0.54 tBankE slew (eAlign never
-            // goes through the bank target). 0.9-1.0 Hz roll-stick chatter needs ~5.5/s of eAlign swing
-            // to sustain; capping at 3/s (full +/-1.5 reversal in ~1 s) breaks it, while a genuine
-            // over-the-top phi sweep (already +/-1.5-saturated beyond |phi|=135) barely notices.
-            // ponytail: fixed 3/s, promote to Cfg if flight tuning demands it. EvolvedLegacy only —
-            // Legacy/BankToTurn keep the raw term (hidden/abandoned laws, not worth the parity plumbing).
-            _eAlignSlew = Mathf.MoveTowards(_eAlignSlew, eAlign, 3f * dt);
-            eAlign = _eAlignSlew;
+            // v0.61 — gate the anti-relay slew to the dead-astern WRAP region it was built for, and never let
+            // near-boresight junk phi seed it (S1 counter-roll fix). Below the wrap gate phi is continuous
+            // frame-to-frame, so the slew there only adds lag that ramps a reversing setpoint THROUGH zero,
+            // holding the old sign for the crossing (~0.3 s at 3/s) = wrong-way roll at maneuver onset; pass
+            // through instead. In the wrap region (|phi|>phiWrapGate) phi can flip ±180 in one tick — keep the
+            // 3/s slew there (the v0.57 dead-astern relay fix, the ONE place the slew is genuinely needed).
+            // The lateral gate zeroes eAlign where phi is ill-conditioned (both local.x/local.y ~0), so a
+            // near-boresight HOLD frame can't seed the next real maneuver with saturated junk.
+            // ponytail: phiWrapGate is the geometric atan2 wrap boundary and eAlignLatGate the atan2
+            // conditioning floor (~sin FineAngle) — regime constants, not per-plane; promote to Cfg only if
+            // flight tuning demands.
+            const float phiWrapGate = 135f;    // deg; |phi|>135 is the only place phi is discontinuous (±180 wrap)
+            const float eAlignLatGate = 0.10f; // ~sin(FineAngle 6°); below this |lateral| phi is meaningless
+            float eAlignTgt = (lateral > eAlignLatGate) ? Mathf.Clamp(phi / 90f, -1.5f, 1.5f) : 0f;
+            // Two-rate slew (single MoveTowards, so it's continuous at the gate — no exit snap if phi sweeps
+            // back below 135° before the slow slew converged): 3/s inside the wrap region (the anti-relay
+            // clamp — the ONE place phi is discontinuous), 30/s elsewhere (fast catch-up ≈ pass-through;
+            // closes any ≤3.0 residual in ≤0.1 s, so the S1 wrong-way window stays ≲2 frames). Both rates are
+            // regime constants (geometry-driven), not per-plane.
+            float eAlignRate = (Mathf.Abs(phi) > phiWrapGate) ? 3f : 30f;
+            _eAlignSlew = Mathf.MoveTowards(_eAlignSlew, eAlignTgt, eAlignRate * dt);
+            float eAlign = _eAlignSlew;
             // 2b: lateral-error hold weight — stays > 0 while |azErr| > EvolvedAlignHoldDeg.
             //   v0.53: subtract FineBankDeadzone first (same guard the linear bank servo has at azBank).
             //   Near boresight phi snaps ±90° with the SIGN of a sub-degree azErr — eAlign is a full-scale
@@ -1512,6 +1523,22 @@ namespace NuclearOptionMouseAim
             float azAl = Mathf.Max(0f, Mathf.Abs(azErr) - Cfg.FineBankDeadzone.Value);
             float lateralHold = Mathf.Clamp01(azAl / Mathf.Max(0.01f, Cfg.EvolvedAlignHoldDeg.Value));
             float blendWeight = Mathf.Max(bigTurn, lateralHold) * (1f - _heliBlend); // 2b + hover gate: kill roll-to-align in hover
+            // v0.67 DOWN-HEMISPHERE PUSHOVER (rec24) — a target BELOW the nose gives phi≈±180, so eAlignTgt
+            // saturates to ±1.5 and the half-committed roll-to-align finds a FALSE ~85° bank equilibrium in
+            // the moderate-off band (rollErr=0 ⇒ sin(bank)=eAlignTgt·w/(1-w), which rails once w≳0.4); at 85°
+            // the target is abeam, pitch (-local.y)→0, and yaw slowly wanders the nose down — the reported
+            // "rolls to 90° then yaws the nose down". The UP hemisphere has no such trap (phi≈0 ⇒ eAlignTgt≈0,
+            // pitch closes it directly). Restore the symmetry: SUPPRESS roll-to-align for a below-target in
+            // the moderate band and let a BOUNDED pushover close it — pullGate already leaves ~0.4-0.55
+            // nose-down authority here (maintainer-blessed bounded negative-g, and the aoaGateDn mirror caps
+            // it), and with the wings held level local.y stays negative so that pushover actually points at
+            // the target. Keyed to LIVE geometry only: Clamp01(-alignFrac)=belowness; (1-lateralHold) limits
+            // it to the azErr≈0 hang (a genuine down-LATERAL with large azErr keeps its roll-and-pull); the
+            // bigTurn taper hands full roll-and-pull back for large below-reorientations. No per-plane constant.
+            const float downAlignTaper = 0.3f; // top fraction of the bigTurn ramp over which roll-to-align returns
+            float belowSuppress = Mathf.Clamp01(-alignFrac) * (1f - lateralHold)
+                                * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
+            blendWeight *= (1f - belowSuppress);
             float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
 
             // ROLL-RATE LOW-PASS — identical to Legacy (anti high-speed roll PIO).
@@ -1736,7 +1763,7 @@ namespace NuclearOptionMouseAim
             string line =
                 $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
                 $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
-                $"law={Cfg.ControlLawMode.Value}{(rec.Length > 0 ? $" rec={rec}" : "")}";
+                $"law=EvolvedLegacy{(rec.Length > 0 ? $" rec={rec}" : "")}";
             WTMouseAimPlugin.Log.LogWarning(line);
             AnomalyLog.Write(line);
             if (Cfg.AnomalyContext.Value) DumpTrail(now);
