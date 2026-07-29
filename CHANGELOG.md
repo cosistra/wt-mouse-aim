@@ -3,6 +3,68 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.84.0
+
+**The harness was manufacturing false positives; this is the gate on every A/B downstream of it.**
+Forensics over ten sequential replicates of one card, one build, one config
+(`debugtests/R21-FINDINGS.md`) found the replicates are **not exchangeable**: `terminalOffDeg`
+correlates with run index at **r = −0.824** and `gSustained` at **−0.839**. Split the ten runs of that
+*single unchanged arm* in half and the halves differ by **0.077° against their own 0.073° minimum
+detectable effect** — doing nothing scored as a statistically significant result. Nothing in this
+release touches the control law; it is entirely about making a measurement mean something.
+
+- **The entry condition now actually re-establishes the entry condition.** Reading the ten captures
+  back, the *placement* was never the problem — the first recorded sample of all ten runs is 250.1 m/s
+  at 4000.0 m, the recorder's own precision. Three things leaked around it, and all three landed on
+  the 6 s `arm` window, i.e. on the state the **scored** segment starts from:
+  - **Position was never reset.** Only an altitude delta was applied, so the aircraft walked **30 km
+    downrange** across the batch (`posZ` 527 → 30 395 m) and no two replicates flew the same air.
+    The placement now snaps back to an **anchor** — position *and* heading, captured from the pilot
+    on the first placement of a run and re-imposed by every replicate after it. Held in the
+    `GlobalPosition` (datum-relative) frame, so a floating-origin rebase partway through a long batch
+    cannot move the target out from under it.
+  - **The aim demand was stale for one tick.** The placement returned without writing one, so `Apply`
+    ran that same tick against the *previous* card's last marker and the freshly levelled attitude.
+    Measured at the first recorded sample: `outP` +0.089 / +0.021 / +0.061 on runs 1–3 against
+    **−0.487 / −0.487 / −0.487** on runs 8–10 — half a stick of leftover pitch. Those runs climbed
+    during `arm` (3972 m vs 3965 m) and therefore entered `turn360` **slower** (271.3 vs 273.2 m/s).
+    That is the observed entry-airspeed drift, visible in the recorded columns. The placement now
+    writes the demand the card is about to ask for.
+  - **The controller carried over.** `ChaseController` became per-*aircraft* in v0.82 and every
+    replicate is flown by the same aircraft, so integrators, the heading/marker-rate filters, the
+    `_pitchEff` estimator and the slewed output all crossed from the end of one run's 80°-bank
+    descending turn into the next run's entry. The placement now calls `ChaseController.Forget(ac)`;
+    `For()` rebuilds it on the next postfix call, probes and all.
+
+  Both physics-write rules are unchanged and still mandatory: `Pilot.velocityPrev` is zeroed before
+  the velocity write, and the snap-back is one rigid transform applied to **every** `partLookup[].rb`
+  so no `FixedJoint` sees a relative change (a 30 km root-only move would be a spectacular version of
+  the R15 explosion).
+
+- **What is deliberately NOT reset, and what now records it.** *Engine spool* is not reset and does
+  not drift — `OwnInputs` pins `ci.throttle` on every tick a card is loaded, including across the
+  card boundary, so the engine is at the same steady state for every replicate after the first (`thr`
+  records the commanded value, first-sample `spd` the achieved one). *Airframe damage* has no repair
+  call and is permanent, so it is instrumented instead. *Session age* is unresettable by definition
+  and is already the `tWall` column. New `# entry` header line per capture carries the reset
+  provenance — pre-placement speed and altitude, `snapBackM` (how far the aircraft had wandered from
+  the anchor), the fuel write, and `ctrlReset=1` — so a batch can covary out what it could not undo
+  rather than be silently poisoned by it.
+
+- **`ScenarioArmToggle` — A/B arms interleave ABBA instead of blocking A×N then B×N.** Name any ON/OFF
+  setting (`RelativeTurnLead`, `IntegralStallGate`, …; `Section/Key` if it is not in `Control`) and
+  one press of the run key flies both sides of it, alternating **off, on, on, off, off, on, on, off**
+  by run. Blocking is exactly the design that converts a one-way session drift into a fake effect;
+  ABBA lands the drift on both arms equally and demotes it to nuisance variance. The full schedule and
+  its A/B tally are printed **before the batch flies** (and a count that is not a multiple of 4 is
+  warned about, loudly), the knob is put back the way you left it when the suite ends, and each
+  capture **names its own arm on its `# config` header line** — `arm=0` is A, `arm=1` is B, `armKnob=`
+  names the setting. No filename convention, and `arm=` falls straight out of `scorecard.py`'s
+  existing `cfg_params()` regex with no change on the Python side. Empty by default: off.
+
+  *Follow-up, not done here:* `compare-runs.py` groups by airframe only, so grouping a batch **by
+  arm** is a one-function change in `debugtests/` that this release does not make.
+
 ## 0.83.0
 
 **The two defects behind the standing sustained-turn lag** (`debugtests/R21-FINDINGS.md`, ten

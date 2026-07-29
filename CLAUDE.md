@@ -102,14 +102,18 @@ Machine-specific paths are written as placeholders:
     the fine integrator actually used — with `IntegralStallGate` off it equals the old `fineBlend`
     exactly) and `leadDeg` (the anticipatory lead actually subtracted from `azErr`), under the same
     rule and on both sides of both v0.83 toggles. **New columns are appended at the END** — the Python
-    tools index by header name but the contract in `Recording.cs` is positional-safe; keep it.
+    tools index by header name but the contract in `Recording.cs` is positional-safe; keep it. v0.84
+    added no column: it added the `# entry` **header line** (`EntryNote`, set by `ScenarioPlayer` at
+    its placement) carrying the per-replicate reset provenance — `snapBackM`, the pre-placement
+    speed/altitude, the fuel write, `ctrlReset` — i.e. the record of what the reset had to undo, so a
+    batch can covary out what it *couldn't* undo (damage, session age) instead of being poisoned by it.
   - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). Scripted **test cards**: plays a
     card by writing `AimRig.SetAimForward` from the *seam prefix* (so `Apply` reads the demand the
     same tick — zero-tick lag is structural, don't move it), tags each segment via
     `ManeuverRecorder.SegmentTag`, and brackets the run with the recorder. Also **records** a card
     from a human flight (samples the aim demand on the fixed step) and binds one config checkbox per
     card so F1 is the selection UI. Entirely idle unless a card is running.
-    **The only place the mod writes aircraft PHYSICS state** (`ForceEntryCondition`). Two pairings
+    **The only place the mod writes aircraft PHYSICS state** (`PlaceOnCondition`). Two pairings
     there are mandatory and both were learned by destroying the airframe: (1) zero
     `Pilot.velocityPrev` before the velocity write — the game reads G as a velocity difference across
     fixed steps; (2) move the **whole assembly** — under complex physics an aircraft is one `Rigidbody`
@@ -120,6 +124,24 @@ Machine-specific paths are written as placeholders:
     is deferred to end-of-frame, so a FixedUpdate caller still simulates with live stretched joints,
     and destroying components silently invalidates anything the game cached (Unity reports a destroyed
     object as `null` without throwing).
+    **v0.84 — `PlaceOnCondition` is a full RESET, and the harness interleaves A/B arms.** Ten identical
+    replicates of one card came out non-exchangeable (`terminalOffDeg` vs run index r = −0.824; a
+    first-half/second-half split of one *unchanged* arm beat its own detection threshold, i.e. doing
+    nothing scored as significant). The placement itself was fine — the leaks were around it, and all
+    three landed on the `arm` window and therefore on the state the *scored* segment starts from:
+    position was never reset (30 km of downrange walk); the aim demand was **stale for one tick**
+    (`Apply` runs from the same call's postfix, so the teleport tick chased the previous card's marker
+    from the new attitude — `outP` −0.487 at the first sample of the late runs); and the per-*aircraft*
+    `ChaseController` (v0.82) carried integrators/filters/`_pitchEff` between replicates flown by the
+    same aircraft. So the placement now snaps back to an **anchor** (position + heading, captured on
+    the first placement of a run, held in the datum-relative `GlobalPosition` frame so a floating-origin
+    rebase can't move it), writes the demand, and calls `ChaseController.Forget(ac)`. Engine spool is
+    deliberately not reset (throttle is pinned across the card boundary, so it doesn't drift); damage
+    and session age can't be reset and are **recorded** in the `# entry` header line instead.
+    `Cfg.ScenarioArmToggle` names a bool knob the runner alternates **ABBA** by queue index
+    (`((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns drift into a fake effect —
+    restoring it at suite end, and each capture self-identifies via `arm=`/`armKnob=` on its
+    `# config` line (`arm=` parses out of `scorecard.py`'s existing `cfg_params()` regex unchanged).
   - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81, **phase 1** of the uncrewed
     harness). Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger. `TestDrone` is the manager (live list + a dictionary keyed by

@@ -132,6 +132,22 @@ namespace NuclearOptionMouseAim
             }
         }
 
+        // v0.84. One '#' header line the ScenarioPlayer fills in at its entry placement, emitted into
+        // the capture that opens immediately after. It carries the per-replicate reset provenance —
+        // the state the aircraft was in BEFORE being put on condition, how far it had to be snapped
+        // back to the run's anchor, the fuel write, and that the controller was dropped. That is the
+        // record of what the reset had to undo, so a batch can covary out whatever it could not undo
+        // (airframe damage, session age) instead of being silently poisoned by it. Empty for a
+        // hand-flown capture, in which case no line is written and the header is byte-identical to
+        // before. Sanitised on assignment: a newline here would corrupt the header block.
+        private static string _entryNote = "";
+        public static string EntryNote
+        {
+            get => _entryNote;
+            set => _entryNote = string.IsNullOrEmpty(value) ? ""
+                              : value.Replace('\r', ' ').Replace('\n', ' ');
+        }
+
         // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
         public static bool Toggle()
         {
@@ -184,6 +200,7 @@ namespace NuclearOptionMouseAim
                 _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
                 _w.WriteLine($"# aircraft '{acName}'");
                 if (!string.IsNullOrEmpty(_cardTag)) _w.WriteLine($"# card {_cardTag}"); // M1: scripted run
+                if (!string.IsNullOrEmpty(_entryNote)) _w.WriteLine($"# entry {_entryNote}"); // v0.84: reset provenance
                 _w.WriteLine($"# config {Cfg.SnapshotString()}");
                 _w.WriteLine($"# fbw {fbwLine}");
                 _w.WriteLine(Header);

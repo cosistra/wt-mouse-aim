@@ -94,6 +94,26 @@ namespace NuclearOptionMouseAim
         private static float      _auditSpeed;     // what the placement commanded, to audit against
         private static bool       _placed;         // this card has had its placement applied
 
+        // --- entry ANCHOR (v0.84). See PlaceOnCondition: one spot on the map + one heading, captured
+        // on the first placement of a run and re-imposed by every replicate after it. Held in the
+        // GlobalPosition (datum-relative) frame so a floating-origin rebase mid-session cannot move it.
+        private static bool       _anchorSet;
+        private static Vector3    _anchorPos;
+        private static Vector3    _anchorFwd;      // horizontal unit heading captured with it
+
+        // --- A/B arm interleaving (v0.84). See ApplyArm. ---
+        private static ConfigEntry<bool> _armEntry;      // the toggle being alternated; null = no schedule
+        private static bool              _armSaved;      // its value before the suite, restored by Finish
+        private static int               _armIdx = -1;   // arm the CURRENT card is flying (-1 = no schedule)
+
+        // The arm, folded into Cfg.SnapshotString() and therefore into every capture's `# config`
+        // header. `arm=` is a bare number so scorecard.py's existing cfg_params() regex picks it up
+        // with no change on the Python side; `armKnob=` names WHICH toggle, because "arm=1" alone is
+        // only meaningful if you already know what was being swept. Empty when nothing is scheduled,
+        // so the startup config line and every hand-flown capture read exactly as they did before.
+        public static string ArmTag =>
+            _armEntry == null ? "" : $"arm={_armIdx} armKnob={_armEntry.Definition.Key} ";
+
         // --- card-recording state ---
         private static bool       _recording;
         private static Quaternion _recFrame;
@@ -350,6 +370,53 @@ namespace NuclearOptionMouseAim
             return sel;
         }
 
+        // =========================================================================================
+        // A/B ARMS (v0.84). A batch flown as A×N then B×N converts ANY one-way session drift into a
+        // fake effect: the R21 forensics measured 0.077 deg of pure first-half/second-half drift in
+        // terminalOffDeg against that split's own 0.073 deg minimum detectable effect, i.e. doing
+        // nothing at all read as significant. ABBA spreads a monotonic trend evenly over both arms,
+        // which turns it from a confound into nuisance variance.
+        //
+        // ABBA by QUEUE INDEX: ((i+1) >> 1) & 1 gives 0,1,1,0, 0,1,1,0, … With more than one card in
+        // the selection the queue is already blocked (c1,c2,c1,c2 — see SelectCards), so indexing on
+        // the queue also alternates each card's own arms. Balanced when the total run count is a
+        // multiple of 4; the suite-start log prints the whole schedule and its A/B tally so an
+        // unbalanced batch is visible BEFORE it flies rather than after.
+        //
+        // ponytail: one toggle, one fixed sequence, no factorial designs, no per-card arms. The
+        // ceiling is a single boolean knob swept over one batch. If a real 2-factor experiment is
+        // ever needed the upgrade is a list of (knob, value) pairs and a Latin square here — but
+        // that is a different tool, and this one has to stay something you can read in ten seconds.
+        private static int ArmOf(int queueIndex) => ((queueIndex + 1) >> 1) & 1;
+
+        // The Cfg toggle named by ScenarioArmToggle, or null (no schedule). "Key" or "Section/Key";
+        // bare keys default to Control, which is where every control-law A/B lever lives.
+        private static ConfigEntry<bool> ResolveArm()
+        {
+            string spec = Cfg.ScenarioArmToggle.Value;
+            if (_cf == null || string.IsNullOrEmpty(spec)) return null;
+            spec = spec.Trim();
+            int slash = spec.IndexOf('/');
+            string sec = slash > 0 ? spec.Substring(0, slash).Trim() : "Control";
+            string key = slash > 0 ? spec.Substring(slash + 1).Trim() : spec;
+            if (_cf.TryGetEntry<bool>(sec, key, out var e)) return e;
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[card] ScenarioArmToggle names '{sec}/{key}', which is not a bound ON/OFF setting — "
+                + "arms are NOT being interleaved. Check the spelling against the F1 panel.");
+            Notify($"ARM: '{key}' is not a setting — not interleaving");
+            return null;
+        }
+
+        // Put the current card's arm into the config, once per card, BEFORE the recorder opens — so
+        // the value lands in that capture's own `# config` header and the capture self-identifies.
+        // Idempotent: ConfigEntry only fires SettingChanged on a real change.
+        private static void ApplyArm()
+        {
+            if (_armEntry == null) { _armIdx = -1; return; }
+            _armIdx = ArmOf(_qi);
+            _armEntry.Value = _armIdx == 1;
+        }
+
         // Standalone entry-condition key. Puts the aircraft exactly where a run would start it WITHOUT
         // starting the run — so you can get on condition, look around and press the run key when ready,
         // and so the teleport can be exercised on its own when it misbehaves (it has, twice).
@@ -372,6 +439,10 @@ namespace NuclearOptionMouseAim
                 Notify("ENTRY: no card declares one — see F1 > Scenario Cards");
                 return;
             }
+            // F3 means "put me on condition HERE", so it always re-anchors to where you are now. A run
+            // started afterwards then anchors on the same spot, which is what makes this key an honest
+            // preview of where the run begins.
+            _anchorSet = false;
             PlaceOnCondition(ac, c);
         }
 
@@ -421,6 +492,44 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogInfo($"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}'.");
             _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
+            _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
+            ManeuverRecorder.EntryNote = "";   // an UNGATED card must not inherit the last one's note
+
+            // Arm schedule. Resolved and PRINTED IN FULL before a single run flies — the schedule and
+            // its A/B tally are the whole check on this feature, and reading them after the batch is
+            // three minutes per run too late.
+            _armEntry = ResolveArm();
+            _armSaved = _armEntry != null && _armEntry.Value;
+            if (_armEntry != null)
+            {
+                // The balance check is on the SUM OF RUN INDICES per arm, not on the counts. Equal
+                // counts are not the point — ABBA works by giving both arms the same average position
+                // in the batch, so that a trend linear in run order cancels. A,B (n=2) has equal
+                // counts and is still a fully confounded blocked design; ABBAAB (n=6) has equal counts
+                // and still leans A early. Both are caught by comparing sum(i), and neither is by
+                // comparing n. Balanced exactly when the run count is a multiple of 4.
+                var sb = new System.Text.StringBuilder(sel.Count);
+                int nA = 0, sumA = 0, sumB = 0;
+                for (int i = 0; i < sel.Count; i++)
+                {
+                    bool b = ArmOf(i) == 1;
+                    sb.Append(b ? 'B' : 'A');
+                    if (b) sumB += i; else { nA++; sumA += i; }
+                }
+                int nB = sel.Count - nA;
+                string key = _armEntry.Definition.Key;
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[card] A/B arms on '{key}' (A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
+                    + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
+                    + $"'{key}' is restored to {_armSaved} when the suite ends.");
+                if (nA != nB || sumA != sumB)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] arm schedule is UNBALANCED over {sel.Count} run(s): {nA}/{nB} runs, mean run index "
+                        + $"{(nA > 0 ? (float)sumA / nA : 0f):0.0} vs {(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm "
+                        + "sits earlier in the batch than the other, so a one-way session drift will still lean on it "
+                        + "— use a run count that is a MULTIPLE OF 4 (cards x ScenarioRepeat).");
+                Notify($"ARMS {sb} on {key}");
+            }
         }
 
         public static void ToggleRecord()
@@ -637,6 +746,13 @@ namespace NuclearOptionMouseAim
             ManeuverRecorder.Stop(reason);
             ManeuverRecorder.SegmentTag = "";
             ManeuverRecorder.CardTag    = "";
+            ManeuverRecorder.EntryNote  = "";
+            // Hand the arm knob back. A suite is a scoped experiment; leaving the mod flying whichever
+            // arm happened to be last is a footgun you only notice days later, in a capture you then
+            // can't explain. The value is logged either way (SettingChanged -> [config]).
+            if (_armEntry != null) { _armEntry.Value = _armSaved; _armEntry = null; }
+            _armIdx = -1;
+            _anchorSet = false;
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
         }
 
@@ -682,6 +798,10 @@ namespace NuclearOptionMouseAim
 
             if (!_frameSet)
             {
+                // Arm BEFORE the placement, so the whole run — including the placement tick's own pass
+                // through Apply — flies one arm, and so the value is already in the config when
+                // StartCard opens the recorder and stamps the '# config' header.
+                ApplyArm();
                 // Place first, start second — and place ONCE PER CARD, so every card in a suite gets its
                 // own entry condition rather than inheriting the state the previous one left behind.
                 // Returning after the placement gives it a tick to settle before the card is timed.
@@ -752,9 +872,34 @@ namespace NuclearOptionMouseAim
         // metrics now resolve, and the R13 session showed the residue: with everything else held,
         // turn360's deltaEnergyHeightM still spread 35% on throttle-setting alone.
         //
-        // Heading is PRESERVED (only pitch/roll are zeroed) so the card's world-fixed frame still
-        // points where the pilot set up, and the card's opening `arm` segment — excluded from scoring
-        // — absorbs the transient. Runs on the fixed step, from StartCard, before any demand is written.
+        // v0.84 — WHAT "THE SAME STATE" HAD TO GROW TO MEAN. Ten replicates of one card (R21) came out
+        // NOT exchangeable: terminalOffDeg correlated with run index at r = -0.824, and a first-half /
+        // second-half split of a single unchanged arm produced 0.077 deg of pure drift against that
+        // split's own 0.073 deg minimum detectable effect — i.e. changing nothing measured as
+        // significant. Reading the ten captures back, the placement itself was fine (first sample of
+        // every run: 250.1 m/s, 4000.0 m, to the recorder's own precision). Three things leaked around
+        // it, all of them landing on the 6 s `arm` window and therefore on the state the SCORED segment
+        // actually starts from:
+        //
+        //   1. POSITION was never reset. Only an altitude delta was applied, so the aircraft walked
+        //      30 km downrange over the batch (posZ 527 -> 30 395 m) and no two replicates flew the
+        //      same piece of map.
+        //   2. THE AIM DEMAND WAS STALE FOR ONE TICK. The placement returned without writing one, so
+        //      Apply ran that same tick against the PREVIOUS card's last demand and the freshly levelled
+        //      attitude. Measured at the first recorded sample: outP +0.089 / +0.021 / +0.061 on runs
+        //      1-3 against -0.487 / -0.487 / -0.487 on runs 8-10 — half a stick of leftover pitch. Those
+        //      runs climbed during `arm` (3972 m vs 3965 m) and therefore entered the scored segment
+        //      slower (271.3 vs 273.2 m/s). That is the drift, in the recorded columns.
+        //   3. THE CONTROLLER CARRIED OVER. ChaseController is per-AIRCRAFT (v0.82) and every replicate
+        //      is flown by the SAME aircraft, so integrators, the heading/marker-rate filters, the
+        //      _pitchEff estimator and the slewed output all crossed the boundary from the end of one
+        //      run's 80-degree-bank descending turn into the next run's entry.
+        //
+        // So the placement now re-establishes an ANCHOR (position + heading, captured on the first
+        // placement of a run), writes the demand the card is about to ask for, and drops the controller.
+        // Heading is anchored rather than merely preserved: it still points where the pilot set up — it
+        // is captured from them on the first placement — but every replicate after that gets the same
+        // one, which is what makes the trajectories comparable instead of merely the entry states.
         //
         // MASS is pinned here too, via fuel. Fuel burn is a ONE-WAY drift across a session, which is
         // the dangerous kind: the R13 Ifrit runs lost 1255 kg (5.1% of gross) monotonically over four
@@ -770,6 +915,21 @@ namespace NuclearOptionMouseAim
         // ponytail: stores are NOT touched. A card fires nothing, so loadout mass is already constant
         // within a session; revisit if a card ever shoots.
         //
+        // WHAT IS DELIBERATELY *NOT* RESET, and why — an uncontrolled quantity that is not written down
+        // is the exact failure this whole function exists to stop, so each one either has an argument or
+        // an instrument:
+        //   - ENGINE SPOOL / RPM. Not reset, and it does not drift: OwnInputs pins ci.throttle to
+        //     ScenarioThrottle on EVERY tick a card is loaded, including across the card boundary, so
+        //     the engine is at the same steady state for every replicate after the first. The `thr`
+        //     column records the commanded value and the first-sample `spd` records the achieved one,
+        //     so a disagreement is visible rather than assumed away.
+        //   - AIRFRAME DAMAGE. The game exposes no repair we can call, and a damaged airframe is
+        //     permanently different. Not resettable, so it is INSTRUMENTED instead: the `# entry`
+        //     header line records the pre-placement speed/altitude and how far the aircraft had to be
+        //     snapped back, and the audit two frames later logs the achieved speed. A run that
+        //     silently stopped performing shows up as a drifting `snapBackM` and a failing audit.
+        //   - WALL-CLOCK / SESSION AGE. Unresettable by definition; already a column (`tWall`), which
+        //     is what lets a batch covary it out instead of arguing about it.
         private static bool PlaceOnCondition(Aircraft ac, Card c)
         {
             try
@@ -777,13 +937,25 @@ namespace NuclearOptionMouseAim
                 var rb = ac.rb;
                 if (rb == null) return false;
 
-                // Keep the heading, level the attitude. A flattened forward vanishes only if the nose
-                // is exactly vertical; fall back to the current transform forward rather than snapping
-                // to an arbitrary world axis.
-                Vector3 fwd = ac.transform.forward; fwd.y = 0f;
-                fwd = fwd.sqrMagnitude > 1e-6f ? fwd.normalized : ac.transform.forward;
+                var g = ac.GlobalPosition();                    // the game's own datum-relative struct
+                Vector3 gp0 = new Vector3(g.x, g.y, g.z);
+                float alt0 = gp0.y, v0 = rb.velocity.magnitude;
 
-                float alt0 = ac.GlobalPosition().y, v0 = rb.velocity.magnitude;
+                // THE ANCHOR. Captured from the pilot on the FIRST placement of a run (so this is still
+                // "where you set up"), then re-imposed by every replicate after it. Held in the
+                // GlobalPosition frame — datum-relative — so a floating-origin rebase partway through a
+                // long batch cannot move the target out from under us.
+                if (!_anchorSet)
+                {
+                    Vector3 f0 = ac.transform.forward; f0.y = 0f;
+                    // A flattened forward vanishes only if the nose is exactly vertical; fall back to the
+                    // current transform forward rather than snapping to an arbitrary world axis.
+                    _anchorFwd = f0.sqrMagnitude > 1e-6f ? f0.normalized : ac.transform.forward.normalized;
+                    _anchorPos = gp0;
+                    _anchorSet = true;
+                }
+                Vector3 fwd = _anchorFwd;
+
                 float fuel0 = -1f, fuelTgt = Cfg.ScenarioEntryFuel.Value;
                 if (fuelTgt > 0f)
                 {
@@ -795,23 +967,43 @@ namespace NuclearOptionMouseAim
                 ResetGLoadTrackers(ac);                 // MUST precede the velocity write — see above
                 _auditAc = ac; _auditSpeed = c.startSpeed; _auditFrame = Time.frameCount + 2;
 
-                // Shift by the altitude ERROR. A delta is the same in the global and local frames as
-                // long as they differ only by a translation, which avoids having to know whether the
-                // floating origin shifts y at all.
-                Vector3 dPos = Vector3.zero;
-                if (c.startAlt > 0f)
-                {
-                    float err = c.startAlt - alt0;
-                    if (Mathf.Abs(err) > 1f) dPos = Vector3.up * err;
-                }
+                // Snap back to the anchor in ALL THREE axes, not just altitude. A delta is the same in
+                // the global and the physics frame as long as they differ only by a translation, which
+                // is why this can be computed in GlobalPosition and applied to rb.position without
+                // having to know whether (or when) the floating origin rebased.
+                Vector3 tgt  = new Vector3(_anchorPos.x, c.startAlt > 0f ? c.startAlt : alt0, _anchorPos.z);
+                Vector3 dPos = tgt - gp0;
                 Quaternion rot1 = Quaternion.LookRotation(fwd, Vector3.up);
                 MoveAssembly(ac, rb, rot1 * Quaternion.Inverse(rb.rotation), rb.position, dPos,
                              rot1, fwd * c.startSpeed);
 
+                // NO STALE DEMAND. Apply runs from this same call's POSTfix, so without this the tick
+                // that teleports the aircraft is also a tick chasing the previous card's last marker
+                // from a brand-new attitude — worth half a stick of pitch, and the measured source of
+                // the entry drift (see the v0.84 note above). The card's opening `arm` segment holds
+                // az=0/el=0 in a frame captured from this very heading, so the level forward IS the
+                // demand one tick from now. (A card whose `arm` is off-axis gets that step a tick
+                // later than it would have; bounded by the card's own arm azimuth, and no card ships
+                // one — not worth resolving the frame twice to remove.)
+                AimRig.SetAimForward(fwd);
+
+                // DROP THE CONTROLLER. Per-aircraft state (v0.82) — integrators, the heading and
+                // marker-rate filters, _pitchEff, the slewed output — otherwise crosses from one
+                // replicate into the next, because every replicate is flown by the same aircraft.
+                // For() rebuilds it on the postfix's very next call, probes and all.
+                ChaseController.Forget(ac);
+
+                float snapBack = new Vector2(dPos.x, dPos.z).magnitude;
                 string fuelMsg = fuel0 >= 0f ? $", fuel {fuel0:0.00} -> {fuelTgt:0.00}" : "";
+                // Into the CAPTURE, not just the log: this is the per-replicate record of everything the
+                // reset had to undo, which is what lets an analysis covary out whatever it could not.
+                ManeuverRecorder.EntryNote =
+                    $"v={v0:0.0}->{c.startSpeed:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
+                    + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
+                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[card] entry condition set: {v0:0} -> {c.startSpeed:0} m/s, {alt0:0} -> {c.startAlt:0} m"
-                    + $"{fuelMsg}, wings level (heading unchanged).");
+                    + $"{fuelMsg}, wings level, snapped back {snapBack:0} m to the anchor heading, controller reset.");
                 Notify($"ON CONDITION  {c.startSpeed:0} m/s  {c.startAlt:0} m"
                     + (fuel0 >= 0f ? $"  fuel {fuelTgt:P0}" : ""));
                 return true;
@@ -882,6 +1074,10 @@ namespace NuclearOptionMouseAim
             // No separate settle gap: the next card opens with its own `arm` segment, which IS the
             // settle (steady demand on the heading the previous card left the aircraft on).
             _card = _queue[_qi]; _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+            // A card that declares no entry condition (startSpeed 0 — the hover card) never reaches
+            // PlaceOnCondition, so without this its capture would inherit the PREVIOUS card's reset
+            // provenance and claim a placement that never happened.
+            ManeuverRecorder.EntryNote = "";
         }
 
         // World-fixed heading frame: the aircraft's heading projected onto the horizontal plane, so a

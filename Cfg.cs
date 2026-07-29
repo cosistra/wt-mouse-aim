@@ -125,6 +125,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<float>   ScenarioEntryFuel;  // fuel ratio pinned at card start (mass control); <=0 leaves it alone
         public static ConfigEntry<float>   ScenarioThrottle;   // throttle held for the whole card (cruise, deliberately not full)
         public static ConfigEntry<int>     ScenarioRepeat;     // replicate count: the whole selection, flown back to back
+        public static ConfigEntry<string>  ScenarioArmToggle;  // v0.84: name of a bool knob to alternate ABBA across replicates (A/B arm)
 
         // --- Test drone (v0.81, phase 1 of the uncrewed harness): spawn/fly/despawn aircraft nobody is
         // sitting in, so a card suite can run unattended and N replicates can fly side by side.
@@ -373,6 +374,8 @@ namespace NuclearOptionMouseAim
             ScenarioRepeat      = cf.Bind("Scenario", "ScenarioRepeat", 1, new ConfigDescription(
                 "REPLICATE COUNT: how many times the whole selection is flown, back to back, from ONE press of the run key. A single run of a card measures nothing on its own — every metric needs a spread before a change can be called real — and replicates were previously only reachable by typing a card name repeatedly into ScenarioCardSet, which is a text field nobody finds. Each replicate re-applies the entry condition (speed, altitude, attitude, fuel) and writes its OWN capture file, so 4 replicates give 4 independent CSVs, not one long one. The selection repeats as a BLOCK (A,B,A,B — not A,A,B,B) so that any one-way drift across the session lands on every card equally instead of stacking on the last one.",
                 new AcceptableValueRange<int>(1, 20)));
+            ScenarioArmToggle   = cf.Bind("Scenario", "ScenarioArmToggle", "",
+                "A/B ARM: the name of an ON/OFF setting to alternate BETWEEN REPLICATES, so one press of the run key flies both sides of a change. Empty (default) = off, every run flies whatever the config says. Give it a setting name as it appears in the F1 panel — 'RelativeTurnLead', 'IntegralStallGate', 'MarkerRateFeedForward' — or 'Section/Key' if it is not in the Control section. The arms run ABBA (off, on, on, off, off, on, on, off...), NOT A-times-N then B-times-N: a session drifts one way (the aircraft is somewhere else on the map, the air is different, the airframe is older), and a blocked design turns that drift into what reads as a real effect. Measured on ten identical replicates of one card: a first-half/second-half split produced 0.077 deg of pure drift against that split's own 0.073 deg detection threshold, i.e. changing NOTHING scored as significant. ABBA lands the drift on both arms equally. Use a run count that is a multiple of 4 (cards x ScenarioRepeat) or the balance is only approximate — the schedule and its A/B tally are printed to the log before the batch flies. Each capture names its own arm on the '# config' header line (arm=0 is A / arm=1 is B, armKnob= names the setting), so the arm is recoverable from the file with no filename convention. The setting is put back the way you left it when the suite ends.");
 
             DroneEnabled        = cf.Bind("Drone", "DroneEnabled", false,
                 "Master ON/OFF for the UNCREWED TEST HARNESS (v0.81). When ON, a hotkey spawns aircraft nobody is sitting in, flies them, and despawns them — the point being that a test card no longer needs a human in a cockpit for its full length, and that several replicates can fly SIDE BY SIDE instead of back to back. OFF by default and genuinely inert while off: the spawn/despawn keys are not even read, no aircraft is created, and the per-aircraft seam that writes drone controls costs one integer compare per aircraft per physics step. Requires an ACTIVE SERVER — single player counts (single player is a host) and so does hosting a multiplayer game, but as a multiplayer CLIENT the spawn is refused with a log line rather than attempted. Phase 1: the drones fly a deliberately trivial built-in wings-level altitude hold, NOT this mod's control law — that is phase 2.");
@@ -489,6 +492,12 @@ namespace NuclearOptionMouseAim
                 $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
                 $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} mrFF={(MarkerRateFeedForward.Value ? 1 : 0)} " +
                 $"relLead={(RelativeTurnLead.Value ? 1 : 0)} iStall={(IntegralStallGate.Value ? 1 : 0)} " +
+                // v0.84 A/B ARM, empty unless a suite is interleaving one. Here rather than on its own
+                // header line because '# config' is the line every offline tool already parses — the
+                // bare `arm=` number falls straight out of scorecard.py's existing cfg_params() regex
+                // with no Python change, and `armKnob=` (non-numeric, so that regex skips it) says
+                // which knob, because "arm=1" is only meaningful next to the name of what was swept.
+                ScenarioPlayer.ArmTag +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
         }
 
