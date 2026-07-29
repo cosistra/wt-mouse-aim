@@ -30,11 +30,24 @@ answer, because the airframe's reorientation ceiling is computable from paramete
 so it is ONE-LAW clean and comparable across a light jet, a loaded jet, a trainer and a helo:
 
 ```
-n_avail     = max(1.05, aircraftGLimit * min(1, (V/cornerSpeed)^2))   # lift-limited below corner
-omega_turn  = deg(9.81 * sqrt(n_avail^2 - 1) / V)                     # steady turn rate
-omega_pitch = deg(maxPitchAngularVel)                                 # FBW body-rate cap
-omega_avail = min(omega_turn, omega_pitch)
+q_ratio     = (rho/RHO0) * (V/cornerSpeed)^2          # cornerSpeed is a SEA-LEVEL number
+n_avail     = max(1.05, aircraftGLimit * min(1, q_ratio))
+omega_turn  = deg(9.81 * sqrt(n_avail^2 - 1) / V)     # steady turn rate
+omega_avail = min(omega_turn, omega_pitch_cap)
 ```
+
+Two corrections found while implementing this, both worth keeping in mind:
+
+- **The density term is not optional.** Omitting it says n=9.0 at 180 m/s at 4 km when the truth is
+  6.4 — 40% high, which silently misclassifies slow-at-altitude ticks as *airframe-limited* and hides
+  real law defects. With `rho` included, the design-point shortcut agrees with a full
+  `n = q·S·Cl(alphaLimiter)/(m·g)` computation off the sidecar's Cl curve **to within 0.5%** — the
+  game defines `cornerSpeed` consistently with its own aero, so the shortcut is exact, not a fit.
+- **`maxPitchAngularVel` is the assist-OFF cap.** With assist on — `assist=1` in 100% of 50,062 rows
+  on file — the game uses `gLimit*9.81/max(V, 0.75*fbwCornerSpeed)` (note `fbwCornerSpeed`, not
+  `cornerSpeed`). At R21's sustained point that branch independently yields **19.26 °/s against
+  `omega_turn`'s 19.14** — a useful cross-check that the turn-rate formula is right. The flat 43 °/s
+  cap never binds on any capture on file.
 
 **The demand**: `omega_target = min(omega_avail, off / tau_feel)`, where `tau_feel = 0.25 s` is the
 first-order time constant that reads as "instant" under a mouse. That is deliberately the *one*
@@ -124,6 +137,27 @@ becomes a **sweep of the demand space**. The axes:
 pure-horizontal demand has an unambiguous axis allocation — roll or pull, obviously. An oblique 5°
 step is exactly where roll-vs-yaw allocation is ambiguous, which is what the maintainer described.
 The current card set under-samples it.
+
+### What the current card set gets wrong — measured, not guessed
+
+Scoring the existing cards exposed four defects in the *cards themselves*, independent of the law:
+
+- **`micro1..10` and `fine` are entirely sub-degree**, so at the default 1° cone they read 100%
+  `ON_TARGET` and score nothing at all. The fine-aim case — the maintainer's actual complaint — was
+  invisible to measurement by construction. They only score under `--cone 0.2`, where they turn in
+  0.58–0.92 with **11–29% REGRESSING** and 1.1–1.7 command reversals/sec (against 0.1 in a sustained
+  turn). Either size the segment to the cone or state the cone as part of the card.
+- **`turn360` has zero `WORKING` ticks**, so the churn ratio — and therefore `S` — is *undefined* on
+  the whole R21 corpus. A segment that only ever stalls cannot exercise the smoothness axis. Cards
+  need segments that **mix closing and stalling** for `S` to mean anything.
+- **`arm` scores nothing** — a 6 s wings-level hold with no demand. Pure overhead per replicate.
+- **`reversal` / `astern` / `az150` are 48–55% `AIRFRAME_LIMITED`.** They largely measure the
+  airframe, not the law. Fine as capability references, near-useless as A/B discriminators — a law
+  change cannot move a tick that was already at the envelope.
+
+Ranked by law headroom, the segments worth tuning against today are `turn360` (0.493, 95% stalled,
+0% airframe-limited), `az10` (0.580), and `elDn` (0.621 — and **24% REGRESSING with ~3× the jerk of
+any other segment**, the clearest cross-fighting case in 162 captures).
 
 **Two coverage holes the ONE-LAW rule already forbids** and no capture has ever closed:
 

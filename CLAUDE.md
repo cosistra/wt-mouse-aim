@@ -71,10 +71,26 @@ Machine-specific paths are written as placeholders:
     `_headingRateFilt`) is added at UNIT gain to `omega` at **both** lockstep sites, before the
     achievability cap so `omegaMax` bounds it — the fix for the standing 9.5° lag a P-only loop must
     hold to fly a sweeping marker; gated by `Cfg.MarkerRateFeedForward` as the in-session A/B lever.
+    **v0.83** fixes the two law defects R21 pinned behind the *rest* of that lag (see
+    `debugtests/R21-FINDINGS.md`), each behind its own checkbox, both default ON:
+    (a) `Cfg.RelativeTurnLead` — the v0.51 anticipatory lead subtracted the **absolute** nose heading
+    rate, but `d(azErr)/dt = markerRate − noseRate`, so that was the true derivative only against a
+    **stationary** marker; tracking a sweep it braked the tracking rotation itself (7.85° of lead
+    against a real 9.31° error) and cancelled `TurnLeadTime·AssistTurnRateGain = 0.60` of the unit-gain
+    v0.78 feed-forward. Now `leadRate = _headingRateFilt − _aimAzRateFilt`, i.e. true PD on the azimuth
+    error. **`predFloor` stays** — it guards the v0.54 rectifier, which lives entirely in the
+    stationary-marker regime where the two lead forms are identical; the change just stops it binding
+    in a matched turn. (b) `Cfg.IntegralStallGate` — `_iPitch`/`_iYaw` wound on `fineBlend`, i.e. on
+    error **magnitude**, so the anti-residual term was identically zero at `off > FineAngle` (R21:
+    ±0.001 against a 0.12 cap for a whole 30 s turn). The gate is now `max(fineBlend, _stallFilt)`
+    where `_stallFilt` is the **dimensionless** fraction of the nose's own rotation *not* going into
+    closing the error, held through a slow-attack (4 s) / fast-release (0.2 s) filter — the persistence
+    filter **is** the anti-windup, and `yawCapped` suppresses the new path only. New recorder columns
+    `iGate`/`leadDeg`.
     Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
-    v0.69/0.70 added the instructor-loop instrumentation: 58 CSV columns (alt/airDensity/pos/vel/
+    v0.69/0.70 added the instructor-loop instrumentation (60 CSV columns as of v0.83): alt/airDensity/pos/vel/
     segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
     snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
     `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
@@ -82,7 +98,11 @@ Machine-specific paths are written as placeholders:
     v0.78 added `aimRate` (SIGNED marker azimuth rate, deg/s) — the v0.78 feed-forward adds exactly
     this quantity to the turn demand, and it is recorded on BOTH sides of the `MarkerRateFeedForward`
     toggle, because otherwise a capture cannot tell "the feed-forward fired and helped" from "the
-    feed-forward never fired" (both read as a smaller azimuth lag).
+    feed-forward never fired" (both read as a smaller azimuth lag). v0.83 added `iGate` (the wind gate
+    the fine integrator actually used — with `IntegralStallGate` off it equals the old `fineBlend`
+    exactly) and `leadDeg` (the anticipatory lead actually subtracted from `azErr`), under the same
+    rule and on both sides of both v0.83 toggles. **New columns are appended at the END** — the Python
+    tools index by header name but the contract in `Recording.cs` is positional-safe; keep it.
   - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). Scripted **test cards**: plays a
     card by writing `AimRig.SetAimForward` from the *seam prefix* (so `Apply` reads the demand the
     same tick — zero-tick lag is structural, don't move it), tags each segment via

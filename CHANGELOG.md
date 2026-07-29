@@ -3,6 +3,69 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.83.0
+
+**The two defects behind the standing sustained-turn lag** (`debugtests/R21-FINDINGS.md`, ten
+replicates of `fixedwing-sweep` on the KR-67). The card parked at a 9.4° azimuth lag that never
+closed, with **nothing saturated**: 5.44 g of 9, 6.96° AoA of a 27° limiter, 39% pitch-stick reserve,
+and only 63% of the airframe's available turn rate commanded. Every limit that *was* binding
+(`predFloor` 82%, `MaxBankAngle` 97%, the roll blend 97%) was a limit in the **law**, not the plant.
+Both fixes are behind their own checkbox, both default **ON**, and both are toggleable in-session
+via F1 with no rebuild — the flip genuinely restores the old path.
+
+- **`RelativeTurnLead` — the anticipatory lead was leading against the wrong rate.** `azErrPred =
+  azErr - headingRateFilt·TurnLeadTime` treats the *absolute* nose heading rate as overshoot to be
+  braked. But `azErr` is the nose-to-marker heading angle, so its own derivative is
+  `markerRate - noseRate`; the v0.51 form is the true derivative **only when the marker is standing
+  still** — which is exactly the regime it was measured in (eight recordings of a pilot correcting
+  onto a fixed point). Tracking a *sweeping* marker, the nose is deliberately rotating **at** the
+  target and the lead was braking that tracking rotation: measured 7.85° of lead against a real 9.31°
+  error, i.e. **84% of a genuine error cancelled**, with `headingRate − aimRate = +0.009 °/s`. It also
+  fought the v0.78 feed-forward head-on — that term adds `aimRate` to `omega` at unit gain while this
+  one subtracted `TurnLeadTime·AssistTurnRateGain = 0.60` of the same rate back out, so **60% of the
+  feed-forward never reached the plant**. Leading on the *relative* rate
+  (`headingRateFilt − _aimAzRateFilt`) makes the term true PD damping on the azimuth error: identical
+  to v0.82 against a stationary marker (marker rate is zero there), and no braking at all in a matched
+  sustained turn, where the standing error finally sees the full configured `AssistTurnRateGain`.
+  **Bounded by construction** — the brake/floor clamp still confines the result to
+  `[azErr·predFloor, azErr]`, so no marker sweep in either direction can command more bank than the
+  raw error already justified, and the v0.52 anti-relay argument is untouched.
+- **`predFloor` was reviewed for deletion and KEPT.** It was binding on 100% of the settled window and
+  holding the effective proportional gain at 0.28 of a configured 0.92, so it looked like the third
+  stacked saturation to remove. It isn't: what it defends against is the v0.54 *rectifier* — heading-
+  rate ripple pinning the prediction to 0 while degrees of real error remain, which produced the 0↔65°
+  bank sawtooth at ~1.5 Hz — and that failure lives entirely in the **stationary-marker** regime, where
+  `_aimAzRateFilt` is zero and the relative-rate lead is bit-identical to the absolute one. The change
+  removes nothing the floor was guarding. What it does instead is make the floor **self-release** in
+  the sustained case: with the tracking rotation no longer subtracted, `azErrPred` lands near `azErr`
+  and the floor simply stops being the binding constraint. Deletion over addition, except when the
+  thing being deleted is still load-bearing somewhere else.
+- **`IntegralStallGate` — the integrator was gated dead exactly where it was needed.** `_iPitch`/
+  `_iYaw` wound on `fineBlend = clamp01(1 − off/FineAngle)`, i.e. on error **magnitude**. At the
+  observed `off ≈ 10.2°` against `FineAngle = 6` that gate is *identically zero*, and the capture
+  bears it out: `iPitch` at ±0.001 against its 0.12 cap for the whole 30 s turn. The term whose entire
+  stated purpose is killing steady-state residual was switched off precisely because a steady-state
+  residual existed. The condition for integral action is not "is the error small" but "**has the
+  proportional path failed to close this error**", so the gate is now `max(fineBlend, stall)` where
+  `stall` is a **dimensionless ratio** — what fraction of the nose's own rotation is going into
+  shrinking the error (R21: nose 11.58 °/s, error closing 0.033 °/s → 0.3% → stalled). A ratio on
+  purpose: an absolute deg/s "is it closing" threshold is a per-airframe constant in disguise.
+- **Windup is what the persistence half exists for.** The ratio alone cannot tell "stalled forever"
+  from "hasn't started yet" — only time separates them — so it is held through an asymmetric filter,
+  4 s to believe a stall and 0.2 s to drop it. Through a full-authority roll-in the gate reaches only
+  ~0.25, and the instant the pull starts closing the error it collapses, leaving the existing leak the
+  whole pull phase to bleed off whatever wound. Cap, leak and both v0.55 anti-windup freezes are
+  unchanged, and `yawCapped` additionally suppresses the *new* path only — winding against a turn
+  demand the airframe cannot fly is the one way a persistence gate winds forever, and that is the
+  regime a low-limit STOL trainer lives in.
+- **Recorder: 58 → 60 columns**, `iGate` and `leadDeg`, for the same reason `aimRate` exists. Both
+  fixes make a standing lag smaller and so does a fix that never fired; without these a capture cannot
+  tell those apart. `iGate` is the wind gate the integrator *actually* used (with the toggle off it
+  equals the old `fineBlend` exactly, so "the gate never opened" is visible rather than inferred);
+  `leadDeg` is the lead *actually* subtracted from `azErr`. Since `azErr`, `headingRateFilt` and
+  `aimRate` are already columns, which branch ran is checkable by arithmetic, and `predFloor` binding
+  is recoverable as `azErrPred` vs `azErr − leadDeg`. Both recorded on **both** sides of both toggles.
+
 ## 0.82.0
 
 **`ChaseController` is one instance per aircraft instead of one pile of statics.** This is the

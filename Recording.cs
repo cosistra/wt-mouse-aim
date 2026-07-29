@@ -80,7 +80,20 @@ namespace NuclearOptionMouseAim
             // measurement artefact. It is also the falsifier for the A/B — the column must be ~0 through
             // every step-and-hold segment and ~the card's sweep rate through turn360, on BOTH sides of
             // the MarkerRateFeedForward toggle (the signal is always computed, only its use is gated).
-            "aimRate";
+            "aimRate," +
+            // v0.83. The two decision variables behind the sustained-turn fixes, for exactly the reason
+            // aimRate exists: both changes make a standing azimuth lag smaller, and so does the fix never
+            // having fired, so without these a capture cannot tell them apart.
+            //   iGate   = the wind gate the fine integrator ACTUALLY used this frame. With
+            //             IntegralStallGate OFF this equals the old fineBlend = clamp01(1 - off/FineAngle)
+            //             exactly, so a run where the gate never opened is visible as iGate == 0 at a
+            //             standing error instead of having to be inferred from iPitch being flat.
+            //   leadDeg = the anticipatory lead ACTUALLY subtracted from azErr (deg, signed). With
+            //             RelativeTurnLead OFF it is headingRateFilt*TurnLeadTime; with it ON it is
+            //             (headingRateFilt - aimRate)*TurnLeadTime — and since all three of azErr,
+            //             headingRateFilt and aimRate are already columns, which branch ran is checkable
+            //             by arithmetic, and predFloor binding is recoverable as azErrPred vs azErr-leadDeg.
+            "iGate,leadDeg";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -238,7 +251,7 @@ namespace NuclearOptionMouseAim
             float headingRateFilt, float azErrPred, float tBankE,
             bool assist, float fbwTgtPR, float fbwPR,
             float tgtPRaw, float aoaGU, float aoaGD, float aoaRec, float qSched, float pEff, bool settleOn,
-            float aimRate,
+            float aimRate, float iGate, float leadDeg,
             Aircraft ac)
         {
             if (_w == null) return;
@@ -278,7 +291,8 @@ namespace NuclearOptionMouseAim
                     $"{headingRateFilt:0.00},{azErrPred:0.00},{tBankE:0.0},{(assist ? 1 : 0)},{fbwTgtPR:0.000},{fbwPR:0.000}," +
                     $"{tgtPRaw:0.000},{aoaGU:0.000},{aoaGD:0.000},{aoaRec:0.000},{qSched:0.000},{pEff:0.000},{(settleOn ? 1 : 0)}," +
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
-                    $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}");
+                    $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
+                    $"{iGate:0.000},{leadDeg:0.00}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }

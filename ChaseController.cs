@@ -54,6 +54,20 @@ namespace NuclearOptionMouseAim
         // outer loop asymptotes and parks short; these wind in the steady bias that closes the last bit.
         private float _iPitch, _iYaw;
 
+        // CLOSURE-STALL GATE (v0.83) — the persistence half of the integrator gate. Through v0.82 the
+        // only thing that let _iPitch/_iYaw wind was fineBlend, a function of error MAGNITUDE (off <
+        // FineAngle), so the term whose whole job is killing steady-state residual was switched OFF
+        // exactly where a residual stood: R21's ten sustained-turn replicates parked at off ~10.2 deg
+        // with FineAngle 6, and recorded iPitch at +/-0.001 against its 0.12 cap for the whole 30 s.
+        // The condition for integral action is "the proportional path has FAILED to close this error",
+        // not "the error is small". _stallFilt in [0,1] is that measurement: 1 = the nose is rotating
+        // but none of that rotation is shrinking the error. _prevOffTrk is the previous frame's off
+        // (< 0 = no valid previous sample). Deliberately NOT the anomaly detector's _prevOff — that one
+        // is only updated inside DetectAnomalies, which runs only while AnomalyLogging is on, so
+        // borrowing it would make the control law depend on a diagnostics toggle.
+        private float _prevOffTrk = -1f;
+        private float _stallFilt;
+
         // Fly Level autopilot (v0.24). When active, the chase ignores the marker and flies straight-and-
         // level at the heading captured on toggle-on (horizontal projection of the nose at that instant).
         public bool FlyLevelActive;
@@ -616,6 +630,7 @@ namespace NuclearOptionMouseAim
                 _pitchEff = 1f; // fresh measured pitch-effectiveness estimate (v0.60)
                 _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
                 _aimAzRateFilt = 0f; _aimAzAcId = -1;     // fresh marker-rate feed-forward (v0.78)
+                _prevOffTrk = -1f; _stallFilt = 0f;       // fresh closure-stall gate (v0.83) — never wind on an engage step
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -1098,7 +1113,35 @@ namespace NuclearOptionMouseAim
                 // Feeds ONLY the turn-rate bank paths (here + ApplyEvolvedLegacy's local copy); the
                 // linear servo (azBank/linBank above) and the coordPull release taper keep RAW azErr —
                 // release timing must track real arrival, not the prediction (v0.36→v0.37 mush lesson).
-                float azErrPred = azErr - _headingRateFilt * Cfg.TurnLeadTime.Value;
+                // RELATIVE-RATE LEAD (v0.83) — the lead was leading against the wrong rate. azErr is the
+                // angle between the nose heading and the marker heading, so its OWN derivative is
+                //     d(azErr)/dt = markerAzRate - noseHeadingRate,
+                // and the anticipatory term azErr + T*d(azErr)/dt is therefore
+                //     azErr - (_headingRateFilt - _aimAzRateFilt) * T.
+                // Through v0.82 the marker term was missing, i.e. the lead was the true derivative ONLY
+                // when the marker stood still — which is exactly the regime v0.51 was measured in (eight
+                // recordings of a pilot correcting onto a fixed point). Against a SWEEPING marker the nose
+                // is deliberately rotating AT the target, and the absolute-rate form read that tracking
+                // rotation as overshoot and braked it: R21 measured _headingRateFilt*T = 7.85 deg of lead
+                // against a real 9.31 deg error (84% of it removed), with headingRate - aimRate = +0.009
+                // deg/s — i.e. essentially ALL of the lead was cancelling rotation that was tracking the
+                // target. It also fought the v0.78 feed-forward directly: that term adds aimRate to omega
+                // at unit gain, while this one subtracted T*AssistTurnRateGain = 0.65*0.92 = 0.60 of the
+                // same rate back out again, so 60% of the feed-forward never reached the plant.
+                // With the relative rate the term becomes true PD damping on the azimuth error:
+                //   - stationary marker  -> _aimAzRateFilt == 0 -> byte-identical to v0.82;
+                //   - matched sustained turn -> the two rates cancel -> no braking, and the standing error
+                //     finally sees the full configured AssistTurnRateGain instead of the predFloor's 30%.
+                // BOUNDED BY CONSTRUCTION: the change can only move azErrPred by +T*_aimAzRateFilt, and the
+                // brake/floor clamp below still confines the result to [azErr*predFloor, azErr]. So neither
+                // sign of marker sweep can command more bank than the RAW error already justified — the
+                // v0.52 relay argument survives untouched.
+                // Cfg.RelativeTurnLead is the A/B lever: off = bit-identical to v0.82, no restart needed.
+                // Feeds the SINGLE azErrPred site; ApplyEvolvedLegacy inherits it as a parameter, so the
+                // v0.51/v0.55 two-site lockstep is unaffected (there is only one lead computation).
+                float leadRate = _headingRateFilt - (Cfg.RelativeTurnLead.Value ? _aimAzRateFilt : 0f);
+                float leadDeg  = leadRate * Cfg.TurnLeadTime.Value; // deg of lead ACTUALLY applied (recorder column)
+                float azErrPred = azErr - leadDeg;
                 // BRAKE-ONLY LEAD (v0.52). Unclamped, the lead term closed its own fast loop: near
                 // boresight azErrPred is DOMINATED by -headingRate·lead (v51 recordings: 2.1-2.7× the
                 // real error), and the V-scaled atan slope (~44° bank/° at 470 m/s) turned that ±2°
@@ -1113,6 +1156,18 @@ namespace NuclearOptionMouseAim
                 // into a bank target banging 0<->65 deg at ~1.5 Hz. Floor the prediction at a fraction
                 // of the real error instead: rollout still starts early (the lead's job), but level
                 // flight is never commanded while error remains; the floor self-releases as azErr -> 0.
+                // v0.83: predFloor was reviewed for DELETION once the lead above went relative-rate, and
+                // KEPT. What it protects is the v0.54 rectifier, which lives entirely in the STATIONARY-
+                // marker regime (a pilot correcting onto a fixed point, heading-rate ripple pinning the
+                // prediction to 0 while degrees of real error remain) — and that regime is precisely where
+                // _aimAzRateFilt == 0 and the relative-rate lead is bit-identical to the absolute one. The
+                // relative form removes nothing this floor was defending against; deleting it would re-open
+                // the v0.53 0<->65 deg bank sawtooth. What the v0.83 change DOES do is make the floor
+                // self-release in the sustained-tracking case: with the tracking rotation no longer
+                // subtracted, azErrPred lands near azErr instead of at 0.30*azErr, so the floor stops being
+                // the binding constraint (R21: binding on 100% of the settled window, holding the effective
+                // proportional gain at 0.28 of a configured 0.92) without being removed from the regime it
+                // was built for.
                 const float predFloor = 0.30f; // ponytail: fixed fraction, promote to Cfg if flight tuning wants it
                 azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
                                         : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
@@ -1191,19 +1246,62 @@ namespace NuclearOptionMouseAim
                 // signal as the proportional term (so it reinforces), gated to the fine cone (fineBlend),
                 // leaked toward zero so it can't run away, hard-capped, and suspended on manual override /
                 // Fly Level. As the error -> 0 the steady value -> 0, so it stays convergent (no limit cycle).
+                // CLOSURE-STALL GATE (v0.83) — gate the integrator on error PERSISTENCE, not error
+                // MAGNITUDE. fineBlend answers "is the error small"; the question that decides whether an
+                // integral term belongs is "has the proportional path failed to close this error". Measure
+                // that as a DIMENSIONLESS ratio — what fraction of the nose's own rotation this tick is
+                // actually going into shrinking the error:
+                //     closeFrac = (d(off)/dt shrinking) / (total nose rotation rate)
+                // 1 = every degree the nose sweeps is a degree of error closed (a slew converging normally);
+                // 0 = the nose is rotating hard and the error is not moving (tracking a sweeping marker
+                // from behind — R21: nose 11.58 deg/s, error closing 0.033 deg/s, closeFrac 0.003).
+                // A RATIO on purpose: an absolute deg/s "is it closing" threshold would be a per-airframe
+                // constant in disguise (what counts as slow closure on a 19 deg/s fighter is fast on a
+                // trainer), which the one-law rule forbids. noseTurnDeg is roll-blind (it differences the
+                // FORWARD axis), so a pure roll-in cannot fake closure in either direction.
+                float closeFrac = 1f; // no valid previous sample => assume closing => never wind on frame 1
+                if (_prevOffTrk >= 0f && dt > 1e-5f)
+                    closeFrac = Mathf.Clamp01(((_prevOffTrk - off) / dt) / Mathf.Max(noseTurnDeg / dt, 1e-3f));
+                _prevOffTrk = off;
+                // PERSISTENCE. The ratio alone cannot tell "stalled forever" from "hasn't started yet":
+                // the instant a marker jumps, closure is 0 and the raw ratio screams stall. Only TIME
+                // separates them, so hold it through an asymmetric filter — slow to believe a stall, quick
+                // to drop it. This is the anti-windup for the whole change: through a full-authority roll-in
+                // the gate only reaches ~0.25, and the moment the pull starts closing the error it collapses
+                // inside 0.2 s, so the existing leak has the entire pull phase to bleed off whatever wound.
+                // ponytail: 4 s attack — long against the law's own worst LEGITIMATE "not closing yet"
+                // transient (a full roll-in is MaxBankAngle/BankSlewRate = 1.2 s at stock), short against a
+                // sustained track (a 30 s turn360 segment). Replace with 4*MaxBankAngle/BankSlewRate if an
+                // airframe ever shows a roll-in past ~2 s. Release matches the existing _closeRateFilt tau.
+                const float stallAttackTau = 4.0f, stallReleaseTau = 0.2f;
+                float stallInst = 1f - closeFrac;
+                float stallTau  = stallInst > _stallFilt ? stallAttackTau : stallReleaseTau;
+                _stallFilt += (dt / (stallTau + dt)) * (stallInst - _stallFilt);
+
                 float iCap = Cfg.FineIntegralCap.Value;
+                float iGate = 0f; // the wind gate ACTUALLY applied this frame (recorder column iGate)
                 if (Cfg.FineIntegralGain.Value > 0f && iCap > 0f && !flyLevel)
                 {
                     float ki = Cfg.FineIntegralGain.Value, leak = Cfg.FineIntegralLeak.Value;
+                    // MAX, not replace: inside the fine cone the old blend still owns the gate, so fine
+                    // capture is unchanged wherever the error is closing (stall ~0 there). yawCapped
+                    // suppresses only the NEW path — winding against a turn demand the airframe cannot
+                    // fly is the one way a persistence gate can wind forever, and it is exactly the
+                    // regime a low-limit STOL trainer lives in. The existing !yawCapped guard on _iYaw
+                    // makes this redundant for yaw and load-bearing for pitch, which in a banked turn is
+                    // the axis actually flying the turn. IntegralStallGate off => iGate == fineBlend,
+                    // i.e. bit-identical to v0.82.
+                    iGate = Mathf.Max(fineBlend,
+                        Cfg.IntegralStallGate.Value && !yawCapped ? _stallFilt : 0f);
                     if (_engP > 0f) _iPitch = 0f; // you own pitch — don't wind against your stick
                     else if (aoaGateUp >= 1f && aoaGateDn >= 1f) // v0.55 anti-windup: FREEZE while the AoA
                     // ceiling is biting — winding in nose-up bias the ceiling won't let fly would just
                     // dump in as a lurch on unload. Freeze (hold), not reset: the fine bias is still valid.
-                        _iPitch = Mathf.Clamp(_iPitch + (-local.y * ki * fineBlend - _iPitch * leak) * dt, -iCap, iCap);
+                        _iPitch = Mathf.Clamp(_iPitch + (-local.y * ki * iGate - _iPitch * leak) * dt, -iCap, iCap);
                     if (_engY > 0f) _iYaw = 0f;
                     else if (!yawCapped) // v0.55 anti-windup: same freeze while the turn-rate demand is
                     // beyond the achievable pitch rate — the heading can't close any faster than the cap.
-                        _iYaw   = Mathf.Clamp(_iYaw   + ( local.x * ki * fineBlend - _iYaw   * leak) * dt, -iCap, iCap);
+                        _iYaw   = Mathf.Clamp(_iYaw   + ( local.x * ki * iGate - _iYaw   * leak) * dt, -iCap, iCap);
                 }
                 else { _iPitch = _iYaw = 0f; }
 
@@ -1410,6 +1508,7 @@ namespace NuclearOptionMouseAim
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
                         aircraft.flightAssist, fbwTgtPR, fbwPR,
                         tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn, _aimAzRateFilt,
+                        iGate, leadDeg,
                         aircraft); // M0: the recorder reads alt/airDensity/pos/vel off it (fail-soft)
                 }
 
