@@ -28,7 +28,19 @@ namespace NuclearOptionMouseAim
     //
     // Nothing here runs until a hotkey starts it: with no card running Tick() is two field reads and a
     // return, so flight behaviour is byte-identical to a build without this file.
-    internal static class ScenarioPlayer
+    //
+    // ONE INSTANCE PER AIRCRAFT (v0.86), same registry as ChaseController (v0.82) and ManeuverRecorder.
+    // The reason is the whole point of the uncrewed harness: N drones flying N cards side by side cost
+    // one card length of wall clock instead of N, and one shared _si/_tSeg/_frame would make that N
+    // aircraft all flying whichever card was started last, from whichever heading frame was captured
+    // last. Split by the same test the recorder uses — DOES THIS VALUE REACH A CSV ROW OR A PER-FLIGHT
+    // DECISION? — which lands three groups on the static side, each saying why in place:
+    //   * the CARD LIBRARY (_cards/_enable/_cf): shared, read-only config. Loaded once, never mutated
+    //     by playback; N players reading it is exactly right.
+    //   * the ON-SCREEN NOTICE: one screen per process, the same judgment as AnomalyLog's one stream.
+    //   * the A/B ARM SCHEDULE: the knob it flips is a process-global ConfigEntry that the control law
+    //     reads globally, so N aircraft CANNOT fly different arms at the same instant. See ApplyArm.
+    internal sealed class ScenarioPlayer
     {
         // -----------------------------------------------------------------------------------------
         // CARD MODEL. JsonUtility shape: [Serializable], PUBLIC FIELDS ONLY. Unity's own serializer
@@ -76,35 +88,117 @@ namespace NuclearOptionMouseAim
             new Dictionary<string, ConfigEntry<bool>>();
         private static ConfigFile _cf;             // kept so a freshly recorded card can bind live
 
-        // --- playback state (null card == not running: the whole hot-path gate) ---
-        private static List<Card> _queue;
-        private static int        _qi;             // index into _queue
-        private static Card       _card;
-        private static int        _si;             // index into _card.segments
-        private static float      _tSeg;           // seconds into the current segment
-        private static bool       _frameSet;       // card frame captured (false => StartCard on next tick)
-        private static Quaternion _frame;          // heading frame captured at CARD START (world-fixed)
-        private static int        _acId;           // aircraft the card started on (respawn => abort)
-        private static int        _lastLogSeg = -1;
-        private static float      _derivedRate;    // per-airframe sweep rate for deriveAzRate segments
+        // --- playback state, PER AIRCRAFT (null card == not running: the whole hot-path gate) ---
+        private List<Card> _queue;
+        private int        _qi;             // index into _queue
+        private Card       _card;
+        private int        _si;             // index into _card.segments
+        private float      _tSeg;           // seconds into the current segment
+        private bool       _frameSet;       // card frame captured (false => StartCard on next tick)
+        private Quaternion _frame;          // heading frame captured at CARD START (world-fixed)
+        private int        _acId;           // aircraft the card started on (respawn => abort)
+        private int        _lastLogSeg = -1;
+        private float      _derivedRate;    // per-airframe sweep rate for deriveAzRate segments
 
         // --- entry placement audit (see AuditEntry) ---
-        private static Aircraft   _auditAc;
-        private static int        _auditFrame = -1;
-        private static float      _auditSpeed;     // what the placement commanded, to audit against
-        private static bool       _placed;         // this card has had its placement applied
+        private Aircraft   _auditAc;
+        private int        _auditFrame = -1;
+        private float      _auditSpeed;     // what the placement commanded, to audit against
+        private bool       _placed;         // this card has had its placement applied
 
         // --- entry ANCHOR (v0.84). See PlaceOnCondition: one spot on the map + one heading, captured
         // on the first placement of a run and re-imposed by every replicate after it. Held in the
         // GlobalPosition (datum-relative) frame so a floating-origin rebase mid-session cannot move it.
-        private static bool       _anchorSet;
-        private static Vector3    _anchorPos;
-        private static Vector3    _anchorFwd;      // horizontal unit heading captured with it
+        //
+        // v0.86: PER AIRCRAFT, which is the only reading that survives N of them. One shared anchor
+        // would stack every drone on the same spot on the first replicate — a mid-air collision, not a
+        // measurement. Each aircraft anchors where it ALREADY IS on its own first placement, so the
+        // lateral separation is the one TestDrone already built (AbeamM + LaneM * slot, laid out on the
+        // launch stagger) rather than a second spacing constant invented here to fight the first.
+        private bool       _anchorSet;
+        private Vector3    _anchorPos;
+        private Vector3    _anchorFwd;      // horizontal unit heading captured with it
 
-        // --- A/B arm interleaving (v0.84). See ApplyArm. ---
+        // --- A/B arm interleaving (v0.84). STATIC — see ApplyArm for why it cannot be per-aircraft. ---
         private static ConfigEntry<bool> _armEntry;      // the toggle being alternated; null = no schedule
         private static bool              _armSaved;      // its value before the suite, restored by Finish
         private static int               _armIdx = -1;   // arm the CURRENT card is flying (-1 = no schedule)
+        // WHICH suite owns the schedule. There is one knob, so there is one owner: without this, a
+        // second aircraft's ApplyArm would write the knob from ITS queue index, and its Finish would
+        // "restore" a value it never saved — both silently, mid-run, in the other aircraft's capture.
+        private static ScenarioPlayer    _armOwner;
+
+        // =========================================================================================
+        // THE REGISTRY (v0.86) — one player per aircraft, keyed by Aircraft.GetInstanceID(), the same
+        // key ChaseController, ManeuverRecorder and TestDrone use.
+        // =========================================================================================
+        private static readonly Dictionary<int, ScenarioPlayer> _byAc = new Dictionary<int, ScenarioPlayer>();
+        private Aircraft         _ac;    // this player's aircraft — read by the eviction sweep
+        private ManeuverRecorder _rec;   // its recorder, resolved once here so no later call has to
+
+        internal static ScenarioPlayer For(Aircraft ac)
+        {
+            int id = ac.GetInstanceID();
+            if (_byAc.TryGetValue(id, out var s)) return s;
+            Sweep();   // eviction on the MISS path only, exactly as ChaseController.For does it
+            s = new ScenarioPlayer { _ac = ac, _acId = id, _rec = ManeuverRecorder.For(ac) };
+            _byAc[id] = s;
+            return s;
+        }
+
+        // THE HOTKEYS' AND THE HUD'S PLAYER: the LOCAL one, never a drone's — the run/record/abort keys
+        // and the on-screen card indicator all mean "the aircraft I am sitting in". Derived from the
+        // game's own GetLocalAircraft, which an uncrewed drone can never satisfy.
+        internal static ScenarioPlayer Player =>
+            GameManager.GetLocalAircraft(out var ac) && ac != null && _byAc.TryGetValue(ac.GetInstanceID(), out var s)
+                ? s : null;
+
+        // Is the LOCAL player's card running? The bare bool two hot paths want (AimRig's marker
+        // ownership and the Update-time throttle seam), both of which are about the human's aircraft.
+        internal static bool PlayerPlaying { get { var s = Player; return s != null && s.Playing; } }
+
+        // Drop an aircraft's playback state, ABORTING a card first — which is what closes its recorder
+        // with a reason instead of leaving a capture that reads as a clean completion. Idempotent.
+        internal static void Forget(Aircraft ac) { if (ac != null) Forget(ac.GetInstanceID()); }
+
+        internal static void Forget(int aircraftId)
+        {
+            if (!_byAc.TryGetValue(aircraftId, out var s)) return;
+            s.Abort("aircraft gone");
+            _byAc.Remove(aircraftId);
+        }
+
+        // ponytail: linear scan on a path that runs once per new aircraft — see ChaseController.Sweep.
+        private static void Sweep()
+        {
+            List<int> dead = null;
+            foreach (var kv in _byAc)
+                if (kv.Value._ac == null) (dead ?? (dead = new List<int>())).Add(kv.Key);
+            if (dead == null) return;
+            foreach (int k in dead) Forget(k);
+        }
+
+        // THE DEMAND THIS AIRCRAFT'S CARD IS ASKING FOR (world-space unit direction), or zero when no
+        // card is running. The local player's card ALSO writes AimRig — that marker is the human's, one
+        // per process, and it is what ChaseController.Apply reads — so for him this is a mirror and the
+        // behaviour is v0.85's exactly.
+        // ponytail: a DRONE's demand currently has no consumer. Apply reads AimRig.AimForward, and
+        // nothing routes a drone through Apply yet — Drone.Fly is still the built-in level-hold.
+        // Phase 2 attaches the law there; the wiring in Apply is one line for a non-local aircraft:
+        //     if (sp.Playing) aimDir = sp.AimDemand;      // sp = ScenarioPlayer.For(aircraft)
+        // gated on Playing on purpose — after a card ends (or the altitude floor aborts it) this holds
+        // the LAST demand written, which is what the player's marker does too, but a drone with no
+        // card should fall through to whatever phase 2 decides its idle demand is rather than chase a
+        // dead card's final direction. Deliberately not done here: dead code until that lands, and it
+        // would put a speculative branch in the single hottest function in the mod.
+        public Vector3 AimDemand { get; private set; }
+
+        private void SetDemand(Vector3 dir)
+        {
+            if (dir.sqrMagnitude < 1e-6f) return;
+            AimDemand = dir.normalized;
+            if (ReferenceEquals(this, Player)) AimRig.SetAimForward(dir);
+        }
 
         // The arm, folded into Cfg.SnapshotString() and therefore into every capture's `# config`
         // header. `arm=` is a bare number so scorecard.py's existing cfg_params() regex picks it up
@@ -114,16 +208,16 @@ namespace NuclearOptionMouseAim
         public static string ArmTag =>
             _armEntry == null ? "" : $"arm={_armIdx} armKnob={_armEntry.Definition.Key} ";
 
-        // --- card-recording state ---
-        private static bool       _recording;
-        private static Quaternion _recFrame;
-        private static float      _recStep;
-        private static readonly List<float> _recAz = new List<float>();
-        private static readonly List<float> _recEl = new List<float>();
-        private static string     _recCls = "", _recAirframe = "";
-        private static float      _recSpeed, _recAlt;
+        // --- card-recording state (per aircraft: it samples THIS aircraft's aim demand) ---
+        private bool       _recording;
+        private Quaternion _recFrame;
+        private float      _recStep;
+        private readonly List<float> _recAz = new List<float>();
+        private readonly List<float> _recEl = new List<float>();
+        private string     _recCls = "", _recAirframe = "";
+        private float      _recSpeed, _recAlt;
 
-        public static bool Active => _card != null || _recording;
+        public bool Active => _card != null || _recording;
 
         // THE CARD OWNS THE AIRCRAFT while this is true. A variable the harness merely ASKS the pilot
         // not to touch is not controlled — one slipped mouse nudge silently rewrites the stimulus and
@@ -135,7 +229,7 @@ namespace NuclearOptionMouseAim
         //   - throttle/brake  : PostTick below, from the seam postfix
         // NOT `Active`: recording a card is the one mode where the mouse MUST drive the marker.
         // Stopping a run is a deliberate act: the abort key or the run key, never an accidental twitch.
-        public static bool Playing => _card != null;
+        public bool Playing => _card != null;
 
         // ON-SCREEN NOTICE. Every reason a card declines to start used to go to LogOutput.log only,
         // so pressing the run key out of condition looked identical to pressing a dead key — the
@@ -155,7 +249,7 @@ namespace NuclearOptionMouseAim
         }
 
         // One line for the plugin's OnGUI overlay: what is running, which segment, how long is left.
-        public static string HudLine
+        public string HudLine
         {
             get
             {
@@ -387,7 +481,41 @@ namespace NuclearOptionMouseAim
         // ceiling is a single boolean knob swept over one batch. If a real 2-factor experiment is
         // ever needed the upgrade is a list of (knob, value) pairs and a Latin square here — but
         // that is a different tool, and this one has to stay something you can read in ten seconds.
+        //
+        // v0.86 — WHAT SURVIVES N AIRCRAFT, AND THE INVARIANT IT PRESERVES.
+        //
+        // THE INVARIANT ABBA EXISTS FOR: both arms must have the same MEAN POSITION IN THE BATCH, so
+        // that a drift which is monotonic in run order contributes equally to both and cancels instead
+        // of masquerading as an effect. (Not equal counts — ABBAAB has equal counts and still leans A
+        // early. The balance check in ToggleSuite is on sum(index) for exactly that reason.)
+        //
+        // The arm index still keys on THIS SUITE'S QUEUE INDEX (_qi), unchanged, and that is still the
+        // run's position in the batch — because the schedule is only ever honoured while ONE aircraft
+        // is flying a card. That is not a simplification, it is forced: `_armEntry` is a `Cfg`
+        // ConfigEntry<bool>, i.e. process-global, and the control law reads it globally. Two aircraft
+        // physically CANNOT fly different arms in the same instant, and staggered card boundaries mean
+        // any global "advance the arm now" flips it mid-card for whoever else is airborne — which
+        // silently mislabels part of their capture, the precise failure v0.84 was built to stop.
+        //
+        // So concurrency STANDS THE SCHEDULE DOWN, loudly (see ApplyArm), rather than degrading it:
+        // no interleaving, one log line, the knob restored. Both alternatives are worse — flipping
+        // mid-card corrupts, and "don't advance while anyone else is flying" degenerates to arm A
+        // forever under a stagger (drone 1 is always mid-card when drone 2 starts, and vice versa).
+        //
+        // ponytail: the real fix for concurrent A/B is to make the swept knob per-aircraft state read
+        // through the controller instead of through Cfg — then each drone can carry its own arm and
+        // ABBA over the drone index. That is a change to how the law reads its config, not to this
+        // scheduler, so it does not belong here.
         private static int ArmOf(int queueIndex) => ((queueIndex + 1) >> 1) & 1;
+
+        // Is some OTHER aircraft mid-card right now? One scan of a single-digit dictionary, on a path
+        // that runs once per card start.
+        private bool OthersPlaying()
+        {
+            foreach (var kv in _byAc)
+                if (!ReferenceEquals(kv.Value, this) && kv.Value._card != null) return true;
+            return false;
+        }
 
         // The Cfg toggle named by ScenarioArmToggle, or null (no schedule). "Key" or "Section/Key";
         // bare keys default to Control, which is where every control-law A/B lever lives.
@@ -410,9 +538,28 @@ namespace NuclearOptionMouseAim
         // Put the current card's arm into the config, once per card, BEFORE the recorder opens — so
         // the value lands in that capture's own `# config` header and the capture self-identifies.
         // Idempotent: ConfigEntry only fires SettingChanged on a real change.
-        private static void ApplyArm()
+        private void ApplyArm()
         {
+            // Not my schedule: the live arm stands, and it is globally true for this aircraft too (the
+            // knob is process-wide), so ArmTag still labels my capture honestly.
+            if (!ReferenceEquals(_armOwner, this)) return;
             if (_armEntry == null) { _armIdx = -1; return; }
+            if (OthersPlaying())
+            {
+                // Stand down rather than flip a process-global knob under an aircraft that is already
+                // mid-card. Loud, and it hands the knob back, so the batch is one honest un-armed
+                // batch instead of a set of captures each claiming an arm it only partly flew.
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] A/B arms STOOD DOWN: another aircraft is already flying a card, and "
+                    + $"'{_armEntry.Definition.Key}' is a process-global setting — N aircraft cannot fly "
+                    + "different arms at once. This batch flies ONE arm; run the A/B one aircraft at a time.");
+                Notify("ARMS OFF — concurrent cards share one global knob");
+                _armEntry.Value = _armSaved;
+                _armEntry = null;
+                _armOwner = null;
+                _armIdx = -1;
+                return;
+            }
             _armIdx = ArmOf(_qi);
             _armEntry.Value = _armIdx == 1;
         }
@@ -420,16 +567,26 @@ namespace NuclearOptionMouseAim
         // Standalone entry-condition key. Puts the aircraft exactly where a run would start it WITHOUT
         // starting the run — so you can get on condition, look around and press the run key when ready,
         // and so the teleport can be exercised on its own when it misbehaves (it has, twice).
+        //
+        // THE THREE HOTKEY DOORS (this, ToggleSuite, ToggleRecord) plus AbortLocal are static and
+        // resolve the LOCAL aircraft themselves: a key press means "the aircraft I am sitting in".
+        // Their bodies are instance methods, so a phase-2 drone runner drives the same code with a
+        // different aircraft and no second copy of the logic can drift out of agreement with this one.
         public static void ForceEntryNow()
         {
-            if (_card != null) { Notify("CARD RUNNING — abort it first"); return; }
-            if (_recording)   { Notify("RECORDING — stop it first");     return; }
             if (!AimRig.TryGetContext(out var ac, out _) || ac == null || ac.disabled)
             {
                 WTMouseAimPlugin.Log.LogWarning("[card] no local aircraft — nothing to place.");
                 Notify("ENTRY: no aircraft");
                 return;
             }
+            For(ac).ForceEntry(ac);
+        }
+
+        private void ForceEntry(Aircraft ac)
+        {
+            if (_card != null) { Notify("CARD RUNNING — abort it first"); return; }
+            if (_recording)   { Notify("RECORDING — stop it first");     return; }
             Card c = null;
             foreach (var x in SelectCards(ac)) if (x.startSpeed > 0f) { c = x; break; }
             if (c == null)
@@ -448,15 +605,21 @@ namespace NuclearOptionMouseAim
 
         public static void ToggleSuite()
         {
-            if (_card != null) { Abort("run key pressed again"); return; }
-            if (_recording)   { StopRecord("run key pressed"); }
-
             if (!AimRig.TryGetContext(out var ac, out _) || ac == null || ac.disabled)
             {
                 WTMouseAimPlugin.Log.LogWarning("[card] no local aircraft — nothing to fly.");
                 Notify("CARD: no aircraft");
                 return;
             }
+            For(ac).StartSuite(ac);
+        }
+
+        // Start (or stop) a suite on ONE aircraft. Public-by-instance so phase 2 can run a card on a
+        // drone through exactly this path.
+        internal void StartSuite(Aircraft ac)
+        {
+            if (_card != null) { Abort("run key pressed again"); return; }
+            if (_recording)   { StopRecord("run key pressed"); }
 
             var sel = SelectCards(ac);
             if (sel.Count == 0)
@@ -493,51 +656,78 @@ namespace NuclearOptionMouseAim
             _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
-            ManeuverRecorder.EntryNote = "";   // an UNGATED card must not inherit the last one's note
+            _rec.EntryNote = "";     // an UNGATED card must not inherit the last one's note
 
-            // Arm schedule. Resolved and PRINTED IN FULL before a single run flies — the schedule and
-            // its A/B tally are the whole check on this feature, and reading them after the batch is
-            // three minutes per run too late.
+            SetUpArmSchedule(sel.Count);
+        }
+
+        // Arm schedule. Resolved and PRINTED IN FULL before a single run flies — the schedule and its
+        // A/B tally are the whole check on this feature, and reading them after the batch is three
+        // minutes per run too late.
+        //
+        // ONE OWNER (v0.86). The knob is a process-global ConfigEntry, so a second suite must not
+        // resolve its own: it would overwrite `_armSaved` with the value the FIRST suite had already
+        // written, and then "restore" that on finish. A suite that arrives second flies whatever arm
+        // is live and says so on its own '# config' line (ArmTag is global, and truthfully so).
+        private void SetUpArmSchedule(int runs)
+        {
+            if (_armOwner != null && !ReferenceEquals(_armOwner, this))
+            {
+                WTMouseAimPlugin.Log.LogWarning(
+                    "[card] another aircraft already owns the A/B arm schedule (the knob is process-global) — "
+                    + "this suite is NOT interleaving; it flies whichever arm is live and records it.");
+                Notify("ARMS: owned by another aircraft — this run is unarmed");
+                return;
+            }
             _armEntry = ResolveArm();
             _armSaved = _armEntry != null && _armEntry.Value;
-            if (_armEntry != null)
+            _armOwner = _armEntry != null ? this : null;
+            if (_armEntry == null) return;
+
+            // The balance check is on the SUM OF RUN INDICES per arm, not on the counts. Equal counts
+            // are not the point — ABBA works by giving both arms the same average position in the
+            // batch, so that a trend linear in run order cancels. A,B (n=2) has equal counts and is
+            // still a fully confounded blocked design; ABBAAB (n=6) has equal counts and still leans A
+            // early. Both are caught by comparing sum(i), and neither is by comparing n. Balanced
+            // exactly when the run count is a multiple of 4.
+            var sb = new System.Text.StringBuilder(runs);
+            int nA = 0, sumA = 0, sumB = 0;
+            for (int i = 0; i < runs; i++)
             {
-                // The balance check is on the SUM OF RUN INDICES per arm, not on the counts. Equal
-                // counts are not the point — ABBA works by giving both arms the same average position
-                // in the batch, so that a trend linear in run order cancels. A,B (n=2) has equal
-                // counts and is still a fully confounded blocked design; ABBAAB (n=6) has equal counts
-                // and still leans A early. Both are caught by comparing sum(i), and neither is by
-                // comparing n. Balanced exactly when the run count is a multiple of 4.
-                var sb = new System.Text.StringBuilder(sel.Count);
-                int nA = 0, sumA = 0, sumB = 0;
-                for (int i = 0; i < sel.Count; i++)
-                {
-                    bool b = ArmOf(i) == 1;
-                    sb.Append(b ? 'B' : 'A');
-                    if (b) sumB += i; else { nA++; sumA += i; }
-                }
-                int nB = sel.Count - nA;
-                string key = _armEntry.Definition.Key;
-                WTMouseAimPlugin.Log.LogInfo(
-                    $"[card] A/B arms on '{key}' (A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
-                    + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
-                    + $"'{key}' is restored to {_armSaved} when the suite ends.");
-                if (nA != nB || sumA != sumB)
-                    WTMouseAimPlugin.Log.LogWarning(
-                        $"[card] arm schedule is UNBALANCED over {sel.Count} run(s): {nA}/{nB} runs, mean run index "
-                        + $"{(nA > 0 ? (float)sumA / nA : 0f):0.0} vs {(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm "
-                        + "sits earlier in the batch than the other, so a one-way session drift will still lean on it "
-                        + "— use a run count that is a MULTIPLE OF 4 (cards x ScenarioRepeat).");
-                Notify($"ARMS {sb} on {key}");
+                bool b = ArmOf(i) == 1;
+                sb.Append(b ? 'B' : 'A');
+                if (b) sumB += i; else { nA++; sumA += i; }
             }
+            int nB = runs - nA;
+            string key = _armEntry.Definition.Key;
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[card] A/B arms on '{key}' (A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
+                + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
+                + $"'{key}' is restored to {_armSaved} when the suite ends.");
+            if (nA != nB || sumA != sumB)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] arm schedule is UNBALANCED over {runs} run(s): {nA}/{nB} runs, mean run index "
+                    + $"{(nA > 0 ? (float)sumA / nA : 0f):0.0} vs {(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm "
+                    + "sits earlier in the batch than the other, so a one-way session drift will still lean on it "
+                    + "— use a run count that is a MULTIPLE OF 4 (cards x ScenarioRepeat).");
+            Notify($"ARMS {sb} on {key}");
         }
 
         public static void ToggleRecord()
         {
-            if (_recording) { StopRecord("record key"); return; }
-            if (_card != null) { Abort("record key pressed"); }
             if (!AimRig.TryGetContext(out var ac, out _) || ac == null || ac.disabled)
             { WTMouseAimPlugin.Log.LogWarning("[card] no local aircraft — cannot record a card."); return; }
+            For(ac).StartRecord(ac);
+        }
+
+        // Stop whatever the local player has running. Static because it is a hotkey door; a no-op
+        // before he has an aircraft, which is the same as v0.85 (nothing could be running either).
+        public static void AbortLocal(string reason) => Player?.Abort(reason);
+
+        private void StartRecord(Aircraft ac)
+        {
+            if (_recording) { StopRecord("record key"); return; }
+            if (_card != null) { Abort("record key pressed"); }
 
             _recFrame = HeadingFrame(ac);
             _recStep  = Mathf.Max(1e-4f, Time.fixedDeltaTime);
@@ -574,7 +764,7 @@ namespace NuclearOptionMouseAim
         // archetype, not a blanket write.
         // Returns true when the card took the throttle — the Update-time seam uses that to decide
         // whether to skip native (see PilotThrottlePatch).
-        public static bool OwnInputs(Aircraft ac)
+        public bool OwnInputs(Aircraft ac)
         {
             if (_card == null || ac == null) return false;
             try
@@ -714,7 +904,7 @@ namespace NuclearOptionMouseAim
         // simply ceasing to exist, which leaves nothing in the log to read afterwards. One line here
         // turns "it exploded" into a number. Flight time is the scarce resource on this project; a run
         // that fails without saying why costs another one.
-        private static void AuditEntry()
+        private void AuditEntry()
         {
             if (_auditFrame < 0 || Time.frameCount < _auditFrame) return;
             var ac = _auditAc; _auditAc = null; _auditFrame = -1;
@@ -732,7 +922,7 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[card] entry audit: {v:0} m/s, clean (commanded {_auditSpeed:0}).");
         }
 
-        public static void Abort(string reason)
+        public void Abort(string reason)
         {
             if (_recording) { StopRecord(reason); return; }
             if (_card == null) return;
@@ -741,26 +931,33 @@ namespace NuclearOptionMouseAim
             Finish("abort: " + reason);
         }
 
-        private static void Finish(string reason)
+        private void Finish(string reason)
         {
-            ManeuverRecorder.Stop(reason);
-            ManeuverRecorder.SegmentTag = "";
-            ManeuverRecorder.CardTag    = "";
-            ManeuverRecorder.EntryNote  = "";
-            // Hand the arm knob back. A suite is a scoped experiment; leaving the mod flying whichever
-            // arm happened to be last is a footgun you only notice days later, in a capture you then
-            // can't explain. The value is logged either way (SettingChanged -> [config]).
-            if (_armEntry != null) { _armEntry.Value = _armSaved; _armEntry = null; }
-            _armIdx = -1;
+            _rec.Stop(reason);
+            _rec.SegmentTag = "";
+            _rec.CardTag    = "";
+            _rec.EntryNote  = "";
+            // Hand the arm knob back — but ONLY if this suite is the one that took it (v0.86). A
+            // second aircraft finishing its own run must not restore a value it never saved, nor
+            // silently disarm the schedule the first one is still flying.
+            if (ReferenceEquals(_armOwner, this))
+            {
+                if (_armEntry != null) { _armEntry.Value = _armSaved; _armEntry = null; }
+                _armOwner = null;
+                _armIdx = -1;
+            }
             _anchorSet = false;
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
         }
 
         // =========================================================================================
-        // THE TICK. Called from PilotPlayerStatePatch.Prefix, BEFORE ChaseController.BeginFrame and
-        // therefore before the postfix's Apply() reads AimRig.AimForward — same fixed step, no lag.
+        // THE TICK. For the PLAYER: from PilotPlayerStatePatch.Prefix, before ChaseController.BeginFrame
+        // and therefore before the postfix's Apply() reads AimRig.AimForward — same fixed step, no lag.
+        // For a DRONE (v0.86): from TestDrone.OnPilotStep, immediately before Drone.Fly reads it —
+        // the same zero-tick property at that aircraft's own seam. Both are inside the game's own
+        // per-pilot fixed step, so the two are directly comparable.
         // =========================================================================================
-        public static void Tick(Aircraft ac)
+        public void Tick(Aircraft ac)
         {
             AuditEntry();                                      // owed from an earlier placement
             if (_card == null && !_recording) return;           // idle: nothing but the int compare above
@@ -791,7 +988,7 @@ namespace NuclearOptionMouseAim
             // started from the runway — which is exactly where you press the key.
             if (_frameSet && ac.GlobalPosition().y < FloorAltM)
             {
-                AimRig.SetAimForward(HeadingFrame(ac) * (Quaternion.Euler(-RecoverElDeg, 0f, 0f) * Vector3.forward));
+                SetDemand(HeadingFrame(ac) * (Quaternion.Euler(-RecoverElDeg, 0f, 0f) * Vector3.forward));
                 Abort($"altitude floor ({FloorAltM:0} m MSL)");
                 return;
             }
@@ -825,8 +1022,8 @@ namespace NuclearOptionMouseAim
                 _lastLogSeg = _si;
                 WTMouseAimPlugin.Log.LogInfo($"[card] {_card.name} seg {_si + 1}/{segs.Length} '{s.tag}' ({s.dur:0.#}s)");
             }
-            ManeuverRecorder.SegmentTag = s.tag;   // rows self-label; the recorder derives tSeg from the change
-            AimRig.SetAimForward(Demand(s, _tSeg));
+            _rec.SegmentTag = s.tag;   // rows self-label; the recorder derives tSeg from the change
+            SetDemand(SegDemand(s, _tSeg));
         }
 
         // Sustained-turn stimulus, derived from the airframe instead of hardcoded. The INSTANTANEOUS
@@ -930,7 +1127,7 @@ namespace NuclearOptionMouseAim
         //     silently stopped performing shows up as a drifting `snapBackM` and a failing audit.
         //   - WALL-CLOCK / SESSION AGE. Unresettable by definition; already a column (`tWall`), which
         //     is what lets a batch covary it out instead of arguing about it.
-        private static bool PlaceOnCondition(Aircraft ac, Card c)
+        private bool PlaceOnCondition(Aircraft ac, Card c)
         {
             try
             {
@@ -985,7 +1182,7 @@ namespace NuclearOptionMouseAim
                 // demand one tick from now. (A card whose `arm` is off-axis gets that step a tick
                 // later than it would have; bounded by the card's own arm azimuth, and no card ships
                 // one — not worth resolving the frame twice to remove.)
-                AimRig.SetAimForward(fwd);
+                SetDemand(fwd);
 
                 // DROP THE CONTROLLER. Per-aircraft state (v0.82) — integrators, the heading and
                 // marker-rate filters, _pitchEff, the slewed output — otherwise crosses from one
@@ -997,7 +1194,7 @@ namespace NuclearOptionMouseAim
                 string fuelMsg = fuel0 >= 0f ? $", fuel {fuel0:0.00} -> {fuelTgt:0.00}" : "";
                 // Into the CAPTURE, not just the log: this is the per-replicate record of everything the
                 // reset had to undo, which is what lets an analysis covary out whatever it could not.
-                ManeuverRecorder.EntryNote =
+                _rec.EntryNote =
                     $"v={v0:0.0}->{c.startSpeed:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
                     + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
@@ -1036,7 +1233,7 @@ namespace NuclearOptionMouseAim
             return null;
         }
 
-        private static void StartCard(Aircraft ac)
+        private void StartCard(Aircraft ac)
         {
             // ORDER IS LOAD-BEARING: put the aircraft on condition FIRST, because SustainableTurnRate
             // reads live airspeed. Deriving the sweep rate before the force would key the card's
@@ -1050,20 +1247,20 @@ namespace NuclearOptionMouseAim
             // Bracket the card with the recorder. Start() is private; Toggle() is the safe door (it
             // can't double-open a writer). The card name goes into the CSV filename so two builds'
             // runs of the same card sort together and diff.
-            if (ManeuverRecorder.IsRecording) ManeuverRecorder.Stop("card boundary");
-            ManeuverRecorder.CardTag    = _card.name;
-            ManeuverRecorder.SegmentTag = "";
-            ManeuverRecorder.Toggle();
+            if (_rec.IsRecording) _rec.Stop("card boundary");
+            _rec.CardTag    = _card.name;
+            _rec.SegmentTag = "";
+            _rec.Toggle();
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] '{_card.name}' start ({_card.segments.Length} segments, {_card.Duration:0}s) — "
                 + $"heading frame locked, demand is world-fixed from here. "
                 + $"Derived sweep rate {_derivedRate:0.0} deg/s, throttle {EntryThrottle():0.00}.");
         }
 
-        private static void NextCard()
+        private void NextCard()
         {
-            ManeuverRecorder.Stop($"card '{_card.name}' complete");
-            ManeuverRecorder.SegmentTag = "";
+            _rec.Stop($"card '{_card.name}' complete");
+            _rec.SegmentTag = "";
             _qi++;
             if (_queue == null || _qi >= _queue.Count)
             {
@@ -1077,7 +1274,7 @@ namespace NuclearOptionMouseAim
             // A card that declares no entry condition (startSpeed 0 — the hover card) never reaches
             // PlaceOnCondition, so without this its capture would inherit the PREVIOUS card's reset
             // provenance and claim a placement that never happened.
-            ManeuverRecorder.EntryNote = "";
+            _rec.EntryNote = "";
         }
 
         // World-fixed heading frame: the aircraft's heading projected onto the horizontal plane, so a
@@ -1096,7 +1293,7 @@ namespace NuclearOptionMouseAim
 
         // (az, el) in the card frame -> a world direction. az + = right of the captured heading,
         // el + = above the horizon (Unity's +X euler pitches DOWN, hence -el).
-        private static Vector3 Demand(Seg s, float t)
+        private Vector3 SegDemand(Seg s, float t)
         {
             float az = s.az, el = s.el;
             if (s.trackAz != null && s.trackAz.Length > 0)
@@ -1118,7 +1315,7 @@ namespace NuclearOptionMouseAim
         // clock, stored in the card-start heading frame. That is why replay works at all: recorder
         // CSVs can never be played back as input (they log outputs), but the demand track can.
         // =========================================================================================
-        private static void TickRecord()
+        private void TickRecord()
         {
             Vector3 local = Quaternion.Inverse(_recFrame) * AimRig.AimForward;
             if (local.sqrMagnitude < 1e-6f) return;
@@ -1128,7 +1325,7 @@ namespace NuclearOptionMouseAim
             if (_recAz.Count >= MaxSamples) StopRecord("sample cap reached");
         }
 
-        private static void StopRecord(string reason)
+        private void StopRecord(string reason)
         {
             _recording = false;
             int n = _recAz.Count;

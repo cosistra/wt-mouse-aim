@@ -19,7 +19,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.85.0";
+        public const string PluginVersion = "0.86.0";
 
         internal static ManualLogSource Log;
 
@@ -126,7 +126,7 @@ namespace NuclearOptionMouseAim
             // it only writes rows while the chase is actually flying (Sample is called from Apply).
             if (Input.GetKeyDown(Cfg.RecordKey.Value))
             {
-                bool on = ManeuverRecorder.Toggle();
+                bool on = ManeuverRecorder.ToggleLocal();   // v0.86: the LOCAL player's recorder
                 _toastUntil = Time.time + 2f;
                 _toastOn = on; // reuse the toast: cyan "REC" on, amber off (label switched in OnGUI)
                 _toastRec = true;
@@ -139,7 +139,7 @@ namespace NuclearOptionMouseAim
             // stopped, and idle unless one of these is pressed.
             if (Input.GetKeyDown(Cfg.ScenarioRunKey.Value))    ScenarioPlayer.ToggleSuite();
             if (Input.GetKeyDown(Cfg.ScenarioRecordKey.Value)) ScenarioPlayer.ToggleRecord();
-            if (Input.GetKeyDown(Cfg.ScenarioAbortKey.Value))  ScenarioPlayer.Abort("abort key");
+            if (Input.GetKeyDown(Cfg.ScenarioAbortKey.Value))  ScenarioPlayer.AbortLocal("abort key");
             if (Input.GetKeyDown(Cfg.ScenarioEntryKey.Value))  ScenarioPlayer.ForceEntryNow();
 
             // Uncrewed test drones (v0.81, phase 1). Gated on DroneEnabled so the keys are DEAD, not
@@ -166,6 +166,12 @@ namespace NuclearOptionMouseAim
 
         private void OnGUI()
         {
+            // v0.86: the recorder and the card player are per-aircraft now, so the HUD reads the LOCAL
+            // player's — never a drone's, exactly as it already did for ChaseController.Player. Both are
+            // null until he has an aircraft, so every read below is null-guarded.
+            var rec  = ManeuverRecorder.Player;
+            var card = ScenarioPlayer.Player;
+
             // Master-toggle toast — drawn BEFORE the overlay/enabled guard so it confirms an OFF flip too.
             if (Time.time < _toastUntil)
             {
@@ -173,8 +179,9 @@ namespace NuclearOptionMouseAim
                 // REC/master toasts are cyan-on / amber-off.
                 GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
                 const float tw = 300f;
-                string msg = _toastRec ? (_toastOn ? $"MouseAim  REC START  {ManeuverRecorder.Tag}"
-                                                   : $"MouseAim  REC STOP  {ManeuverRecorder.Tag}")
+                string tag = rec != null ? rec.Tag : "";
+                string msg = _toastRec ? (_toastOn ? $"MouseAim  REC START  {tag}"
+                                                   : $"MouseAim  REC STOP  {tag}")
                                        : (_toastOn ? "WT MouseAim  ON"      : "WT MouseAim  OFF");
                 GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f), msg);
                 GUI.color = tc;
@@ -182,13 +189,13 @@ namespace NuclearOptionMouseAim
 
             // Persistent recording indicator — drawn BEFORE every gate (even on the clean HUD / mod-off)
             // so a running capture is always visible. Top-centre, red, with elapsed time + sample count.
-            if (ManeuverRecorder.IsRecording)
+            if (rec != null && rec.IsRecording)
             {
                 var rc = GUI.color;
                 GUI.color = new Color(1f, 0.25f, 0.2f, 0.95f);
                 const float rw = 300f;
                 GUI.Label(new Rect((Screen.width - rw) * 0.5f, Screen.height * 0.08f, rw, 24f),
-                    $"● REC  {ManeuverRecorder.Tag}  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
+                    $"● REC  {rec.Tag}  {rec.Elapsed:0.0}s  ({rec.Samples})");
                 GUI.color = rc;
             }
 
@@ -208,12 +215,12 @@ namespace NuclearOptionMouseAim
 
             // Scenario/test-card indicator — like the REC indicator, drawn BEFORE every gate so a
             // running card is visible even on the clean HUD: which card, which segment, time left.
-            if (ScenarioPlayer.Active)
+            if (card != null && card.Active)
             {
                 var cc = GUI.color;
                 GUI.color = new Color(0.5f, 1f, 0.5f, 0.95f);
                 const float cw = 520f;
-                GUI.Label(new Rect((Screen.width - cw) * 0.5f, Screen.height * 0.05f, cw, 24f), ScenarioPlayer.HudLine);
+                GUI.Label(new Rect((Screen.width - cw) * 0.5f, Screen.height * 0.05f, cw, 24f), card.HudLine);
                 GUI.color = cc;
             }
 

@@ -3,6 +3,55 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.86.0
+
+**`ScenarioPlayer` and `ManeuverRecorder` are per-aircraft instances.** They were the last two
+process-wide singletons in the harness: one card, one CSV, no matter how many aircraft were flying.
+With N drones that is not a worse measurement, it is N aircraft flying whichever card started last
+and their rows interleaved into one file under one header. Both now follow the registry `chase` got
+in v0.82 — `For(aircraft)` keyed on `Aircraft.GetInstanceID()`, `Forget`, `Sweep`, and a `Player`
+accessor for the HUD and hotkeys so a drone's numbers can never reach the screen. N drones now fly N
+cards and write N CSVs.
+
+- **What stayed static, and why** (the test is: *does this value reach a CSV row or a per-flight
+  decision?*). `AnomalyLog` — one log stream per process. `WTMouseAimPlugin.RunIndex` — one run per
+  process. The **card library** (`_cards`/`_enable`/`_cf`) — shared read-only config. The **on-screen
+  notice** — one screen. The recorder's **take counter** — it numbers *files opened*, not aircraft
+  state, which is what keeps takes unique across concurrent writers *and* `rec=` monotonic in time
+  (`compare-runs.py` orders its A/B balance check by it). The **A/B arm schedule** — see below.
+- **The ABBA invariant under N aircraft.** The swept knob is a `Cfg` entry the control law reads
+  *globally*, so N aircraft physically cannot fly different arms at the same instant. The invariant
+  ABBA exists for — both arms hold the same mean position in the batch, so a monotonic drift cancels
+  — is preserved by keeping the queue index **and** honouring the schedule only while one aircraft is
+  flying a card. It now has one owner: a second suite neither resolves its own (it would save the
+  first suite's already-written value as the "original") nor restores one on finish, and `ApplyArm`
+  **stands the schedule down loudly** if another aircraft is mid-card instead of flipping a global
+  knob under it. Flipping mid-card mislabels part of the other capture; "don't advance while anyone
+  else flies" degenerates to arm A forever under a launch stagger. Real concurrent A/B needs the knob
+  to become per-aircraft state read through the controller — a change to how the law reads config.
+- **`Forget` closes an open capture.** A drone despawned mid-card used to be able to leave a
+  `StreamWriter` open with no `# stop` line — a truncated file that reads as a clean completion. Both
+  of `TestDrone`'s removal paths now call one `ForgetState(id)` covering all three registries.
+- **New column `frameMs`** (64 total), the rendered-frame time that fixed step saw. The launch
+  stagger exists *because* a frame hitch lands on whatever segment is running, so N replicates flying
+  the same segment at that instant stop being independent samples — an assumption backed only by a
+  `[drone] frame hitch` warning in a log nobody diffs. Now per-row evidence.
+- **Per-drone airframe.** `Cfg.DroneAirframe` accepts a **comma list**, indexed by lane and wrapping,
+  so a batch can be heterogeneous; a single value behaves exactly as before. A bad `jsonKey` in a
+  list costs its own lane and nothing else. Each capture self-identifies (sidecar `jsonKey`, the
+  `# aircraft` header, and the drone filename), so `compare-runs.py`'s refusal to pool across
+  airframes keeps working. **Loadout is still `null`** — the game's parameter is a `Loadout` object,
+  not a name.
+- **Header/row lockstep is now checked.** `check-architecture.py` counts the recorder's header
+  columns and its `Sample()` row and fails on a mismatch, plus on CLAUDE.md's documented count
+  drifting from the code. Two hand-maintained lists with no compile-time link had none.
+- Drone captures now describe **their own** airframe: the header block read `GetLocalAircraft`, so a
+  drone's CSV would have named the *player's* aircraft — silently defeating the pooling guard.
+
+Not wired yet: a drone's card demand (`ScenarioPlayer.AimDemand`) has no consumer, because nothing
+routes a drone through `ChaseController.Apply` — that is phase 2, and it is now unblocked on both
+sides.
+
 ## 0.85.0
 
 **The below-nose roll-to-align loop was positive feedback, and its own suppressor was being switched

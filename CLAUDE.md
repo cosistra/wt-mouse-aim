@@ -105,7 +105,19 @@ Machine-specific paths are written as placeholders:
     Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
-    v0.69/0.70 added the instructor-loop instrumentation (63 CSV columns as of v0.85): alt/airDensity/pos/vel/
+    **`ManeuverRecorder` is an instance class, ONE PER AIRCRAFT (v0.86)** — same registry as
+    `ChaseController`: `For(aircraft)`, `Forget(aircraft)`/`Forget(int id)` (which **closes an open
+    capture** so a despawned drone doesn't leave a writer open with no `# stop` line), `Sweep()`, and
+    `ManeuverRecorder.Player` (derived from `GameManager.GetLocalAircraft`) for the HUD and the
+    RecordKey hotkey (`ToggleLocal`). N drones = N concurrent CSVs. Only `_recSeq` stays `static` and
+    says why in place: it counts FILES OPENED this run (one artifact-stream numbering per process),
+    which both keeps every take number unique across concurrent writers and keeps `rec=` monotonic in
+    time — the key `compare-runs.py` orders its A/B balance check by. Filenames carry `d<drone>-` and
+    the airframe `jsonKey` for a drone; a crewed capture's name is byte-identical to v0.85. The header
+    now describes **this recorder's** aircraft, not `GetLocalAircraft`'s (a drone capture used to name
+    the player's airframe). `NoteConfigChange` broadcasts to every open recorder — every `Cfg` knob is
+    process-global, so a live edit lands on every aircraft flying.
+    v0.69/0.70 added the instructor-loop instrumentation (64 CSV columns as of v0.86): alt/airDensity/pos/vel/
     segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
     snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
     `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
@@ -126,8 +138,28 @@ Machine-specific paths are written as placeholders:
     its placement) carrying the per-replicate reset provenance — `snapBackM`, the pre-placement
     speed/altitude, the fuel write, `ctrlReset` — i.e. the record of what the reset had to undo, so a
     batch can covary out what it *couldn't* undo (damage, session age) instead of being poisoned by it.
-  - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). Scripted **test cards**: plays a
-    card by writing `AimRig.SetAimForward` from the *seam prefix* (so `Apply` reads the demand the
+    v0.86 added `frameMs` (the rendered-frame time that fixed step saw, from `TestDrone.FrameDt`). The
+    drone launch stagger exists *because* a frame hitch lands on whatever segment is running when it
+    happens, so N replicates flying the same segment at that instant stop being independent samples —
+    until now that was an assumption backed only by a `[drone] frame hitch` warning in a log nobody
+    diffs. As a column it is per-row evidence, so a batch can drop or covary out the rows that were
+    actually stalled. **The header/row lockstep is now checked**: `check-architecture.py` counts both
+    and fails on a mismatch (and on CLAUDE.md's documented count drifting from the code).
+  - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). **An instance class, ONE PER
+    AIRCRAFT (v0.86)** — `For(aircraft)` / `Forget` / `Sweep` / `Player`, same registry as
+    `ChaseController`. All *playback* state is per-instance (queue, segment index, segment clock,
+    heading frame, anchor, placement audit, card-recording buffers); three things stay `static` and
+    each says why in place: the **card library** (`_cards`/`_enable`/`_cf` — shared read-only config),
+    the **on-screen notice** (one screen per process), and the **A/B arm schedule** (see below). The
+    hotkey doors (`ToggleSuite`/`ToggleRecord`/`ForceEntryNow`/`AbortLocal`) stay static and resolve
+    the LOCAL aircraft, then call the instance body — so a phase-2 drone runner drives the same code
+    (`For(droneAc).StartSuite(droneAc)`) with no second copy to drift. `Tick` is called from the seam
+    prefix for the player and from **`TestDrone.OnPilotStep`, immediately before `Drone.Fly`**, for a
+    drone — the same zero-tick property at that aircraft's own seam. Each instance publishes its
+    demand as `AimDemand`; the local one *also* writes `AimRig.SetAimForward` (unchanged v0.85
+    behaviour). **A drone's `AimDemand` has no consumer yet** — `Apply` reads `AimRig.AimForward` and
+    nothing routes a drone through `Apply`; phase 2 wires it (see the `ponytail:` note on the field).
+    Plays a card by writing the aim demand from the *seam prefix* (so `Apply` reads it the
     same tick — zero-tick lag is structural, don't move it), tags each segment via
     `ManeuverRecorder.SegmentTag`, and brackets the run with the recorder. Also **records** a card
     from a human flight (samples the aim demand on the fixed step) and binds one config checkbox per
@@ -161,6 +193,19 @@ Machine-specific paths are written as placeholders:
     (`((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns drift into a fake effect —
     restoring it at suite end, and each capture self-identifies via `arm=`/`armKnob=` on its
     `# config` line (`arm=` parses out of `scorecard.py`'s existing `cfg_params()` regex unchanged).
+    **v0.86 — the arm schedule stays `static`, and that is forced, not lazy.** The knob is a `Cfg`
+    `ConfigEntry<bool>` that the control law reads **globally**, so N aircraft physically cannot fly
+    different arms in the same instant. The invariant ABBA exists for is *both arms have the same mean
+    position in the batch*, so a monotonic drift cancels — and the queue index is still exactly that,
+    **because the schedule is only honoured while one aircraft is flying a card**. It has ONE owner
+    (`_armOwner`, the suite that resolved it): a second suite neither resolves its own (it would save
+    the first suite's already-written value as the "original") nor restores one on finish, and
+    `ApplyArm` **stands the schedule down loudly** if another aircraft is mid-card rather than flipping
+    a global knob under it. Both alternatives are worse: flipping mid-card silently mislabels part of
+    the other capture, and "don't advance while anyone else flies" degenerates to arm A forever under
+    a launch stagger. Concurrent A/B needs the swept knob to become per-aircraft state read through
+    the controller instead of through `Cfg` — a change to how the law reads config, not to this
+    scheduler.
   - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81, **phase 1** of the uncrewed
     harness). Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger. `TestDrone` is the manager (live list + a dictionary keyed by
@@ -182,10 +227,30 @@ Machine-specific paths are written as placeholders:
     altitude/wings hold and is **not** the mod's control law — never tune it or compare against it.
     Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
     clock that exists before any drone does. **Both** removal paths (`Despawn` and `PruneDead`) call
-    `ChaseController.Forget(d.AircraftId)` so the control state dies with the aircraft — keyed by the
-    CACHED id for the same reason the dictionary is (the aircraft may already be destroyed).
+    one `ForgetState(aircraftId)` that drops **every** per-aircraft registry — `ScenarioPlayer`,
+    `ManeuverRecorder` (closing an open capture), `ChaseController` — keyed by the CACHED id for the
+    same reason the dictionary is (the aircraft may already be destroyed). One function, so the next
+    per-aircraft registry cannot be forgotten on one of the two paths.
+    **v0.86 — `Cfg.DroneAirframe` is a COMMA LIST**, indexed by lane and wrapping, so a batch can be
+    heterogeneous (`"Multirole1, Attacker1"` with `DroneCount` 4 = two of each) and a single value
+    behaves exactly as it did. An unknown `jsonKey` still refuses with a log line naming it: with one
+    key that cancels the launch (the next lane fails identically), with a list only that lane is
+    skipped. Each capture self-identifies — the `.airframe.json` sidecar's `jsonKey` is what
+    `compare-runs.py` groups on and refuses to pool across, and the CSV filename carries it too.
+    **Loadout is still `null`** at the `Spawn` call: the game's parameter is a `Loadout` object, not a
+    name. The lane index is the hook when that API is known; the sidecar already records the resulting
+    stations/masses/drag per capture, so nothing on the analysis side changes.
+    Also ticks each drone's `ScenarioPlayer` inside `OnPilotStep`, immediately before `Drone.Fly`.
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
+- **`cards/`** — the shipped test-card **grid** (JSON, no C#): the oblique small-step set, the
+  AoA-ceiling pair, the sustained-sweep family at several rates/loadings, and the STOL-trainer and
+  rotorcraft cards — i.e. the airframe/regime coverage the three built-ins leave open. Read
+  [`cards/README.md`](cards/README.md) before adding one: it holds the grid table (card → what it
+  isolates → pass/fail signal), the install command, the mirrored-pair rule, and the two rules that
+  are easy to break — **one card = one test** (the reset is per CARD, not per segment) and **tags
+  must be unique per card** (`compare-runs.py` keys segments by tag alone). Cards are copied into
+  `<game>` by hand; the build never touches them.
 
 ## Paths (all under `<game>`)
 - Build reference DLLs: `<game>\NuclearOption_Data\Managed\` and `<game>\BepInEx\core\` — the latter
@@ -196,7 +261,9 @@ Machine-specific paths are written as placeholders:
 - Live config: `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
 - Test cards (M1): `<game>\BepInEx\config\wtmouseaim-cards\<name>.json` — recorded cards land here and
   are picked up at startup (one F1 checkbox each; the **file basename is the card id**). Built-in
-  cards live in `ScenarioPlayer.cs`, not on disk.
+  cards live in `ScenarioPlayer.cs`, not on disk. The repo's own grid lives in `cards/` and is
+  **copied in by hand** (the build never touches `<game>`), then the game is restarted:
+  `Copy-Item cards\*.json "<game>\BepInEx\config\wtmouseaim-cards" -Force`.
 
 ## Build / deploy / test loop
 **Deploying IS part of testing.** A change is not "tested" — or even testable — until the DLL is
@@ -230,10 +297,12 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   Run this on user-reported recordings before theorizing.
 - **Scoring a test-card run.** `python debugtests/scorecard.py <rec.csv>` segments by `segTag` and
   emits per-segment metrics (`--json`, `--selftest`). **An unrecognised tag prints a WARNING** —
-  never ignore it: the tag vocabulary lives in `ScenarioPlayer.cs` and the tag→metric table lives in
-  `scorecard.py`, with no compile-time link between them and no coverage from `check-architecture.py`.
-  That pair silently drifted once already (v0.71: 19 of 21 segments scored as "unknown" with no
-  output at all). **Adding or renaming a card segment means updating both, in the same change.**
+  never ignore it: the tag vocabulary lives in `ScenarioPlayer.cs` **and in `cards/*.json`**, while the
+  tag→metric table lives in `scorecard.py`, with no compile-time link between them and no coverage
+  from `check-architecture.py`. That pair silently drifted once already (v0.71: 19 of 21 segments
+  scored as "unknown" with no output at all). **Adding or renaming a card segment means updating
+  both, in the same change.** `scorecard.py --selftest` now parses every file in `cards/` and asserts
+  each tag resolves — so for a *disk* card the drift check is automatic; a built-in still isn't.
 - **Comparing runs.** `python debugtests/compare-runs.py <rec1.csv> <rec2.csv> ...` reports
   per-segment spread across N runs — the noise floor, and the A/B of a law change. It **groups by
   airframe and refuses to pool**, and excludes truncated segments rather than blending them; heed

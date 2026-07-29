@@ -84,6 +84,27 @@ def plugin_version(src: str):
     return m.group(1) if m else None
 
 
+def _literal_commas(block: str) -> int:
+    """Commas in the LITERAL text of a C# string-concatenation block, ignoring $"{...}" holes.
+
+    Both the recorder's Header const and its Sample() row are `$"a,b," + $"c,d"` chains, so the
+    field count of each is (commas in the literal text) + 1. Interpolation holes are dropped first
+    because a hole can contain commas-free expressions but never a field separator.
+    """
+    block = re.sub(r"//[^\n]*", "", block)              # trailing comments carry commas of their own
+    block = re.sub(r"\{[^{}]*\}", "", block)            # $"{x:0.000}" -> ""
+    return sum(s.count(",") for s in re.findall(r'"((?:\\.|[^"\\])*)"', block))
+
+
+def recorder_columns(src: str):
+    """(header_count, row_count) for ManeuverRecorder, or (None, None) if either can't be parsed."""
+    h = re.search(r"private const string Header\s*=(.*?);\s*\n", src, flags=re.S)
+    r = re.search(r"_w\.WriteLine\(\s*\n(.*?)\);\s*\n", src, flags=re.S)
+    if not h or not r:
+        return None, None
+    return _literal_commas(h.group(1)) + 1, _literal_commas(r.group(1)) + 1
+
+
 def arch_version(src: str):
     m = re.search(r"<!--\s*ARCH-VERSION:\s*([^\s>]+)\s*-->", src)
     return m.group(1) if m else None
@@ -142,6 +163,33 @@ def check(fix_version: bool) -> int:
                 f"'Game types we patch or read' table"
             )
 
+    # --- recorder CSV contract ----------------------------------------------------------
+    # The header string and the Sample() row are two hand-maintained lists that MUST stay in
+    # lockstep; nothing in C# links them, and a mismatch does not fail to compile — it produces
+    # a capture whose columns are silently shifted from the names above them, which every offline
+    # tool then reads as real data. Cheap to check mechanically, so check it.
+    rec_cs = REPO / "Recording.cs"
+    ncols = None
+    if rec_cs.exists():
+        nh, nr = recorder_columns(rec_cs.read_text(encoding="utf-8"))
+        if nh is None:
+            problems.append("could not parse ManeuverRecorder's Header / Sample row (did the shape change?)")
+        elif nh != nr:
+            problems.append(
+                f"Recording.cs: the CSV header has {nh} columns but the Sample() row writes {nr} "
+                f"— they must stay in lockstep, and new columns append at the END"
+            )
+        else:
+            ncols = nh
+            # CLAUDE.md documents the count; keep that honest too, it is what an agent reads first.
+            claude = REPO / "CLAUDE.md"
+            if claude.exists():
+                m = re.search(r"\((\d+) CSV columns", claude.read_text(encoding="utf-8"))
+                if m and int(m.group(1)) != ncols:
+                    problems.append(
+                        f"CLAUDE.md says '{m.group(1)} CSV columns' but Recording.cs writes {ncols}"
+                    )
+
     # --- stale node-index rows ----------------------------------------------------------
     # Types the index claims exist. Parsed from the type(s) COLUMN only — scraping the whole
     # table also catches prose like `PluginVersion` in the role column, which is not a type.
@@ -167,7 +215,8 @@ def check(fix_version: bool) -> int:
 
     print(
         f"ok  ARCHITECTURE.md matches the code "
-        f"({len(cs_files)} files, {len(all_types)} types, {len(patch_targets)} Harmony patches, v{ver})"
+        f"({len(cs_files)} files, {len(all_types)} types, {len(patch_targets)} Harmony patches, v{ver}"
+        + (f", {ncols} CSV columns)" if ncols else ")")
     )
     return 0
 
@@ -240,6 +289,36 @@ def selftest() -> int:
     assert harmony_targets(src) == [("Foo", "Bar")]
     assert plugin_version('public const string PluginVersion = "0.58.0";') == "0.58.0"
     assert arch_version("<!-- ARCH-VERSION: 0.58.0 -->") == "0.58.0"
+
+    # Recorder header/row lockstep. The fake below mirrors the real shape: a concatenated header
+    # with an interleaved comment, and a row whose interpolation holes contain format specifiers,
+    # a ternary and a subtraction — none of which may be miscounted as a field separator.
+    rec = '''
+        private const string Header =
+            "t,off,azErr," +
+            // a comment, with a comma in it
+            "phase,flyLevel," +
+            "frameMs";
+
+        public void Sample(float t, bool flyLevel, float segStart)
+        {
+            _w.WriteLine(
+                $"{t:0.000},{off:0.00},{azErr:0.00}," +
+                $"{phase},{(flyLevel ? 1 : 0)}," +
+                $"{(now - segStart) * 1000f:0.0}");
+        }
+    '''
+    assert recorder_columns(rec) == (6, 6), recorder_columns(rec)
+    # ...and it must FAIL when they drift, which is the only thing this check is for.
+    assert recorder_columns(rec.replace('"frameMs"', '"frameMs,extra"')) == (7, 6)
+    assert recorder_columns("no recorder here") == (None, None)
+
+    # The real file, if we are running inside the repo: header and row must agree today.
+    real = REPO / "Recording.cs"
+    if real.exists():
+        nh, nr = recorder_columns(real.read_text(encoding="utf-8"))
+        assert nh is not None, "Recording.cs no longer parses — fix recorder_columns()"
+        assert nh == nr, f"Recording.cs header {nh} != row {nr}"
     print("ok  selftest passed")
     return 0
 

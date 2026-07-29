@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace NuclearOptionMouseAim
@@ -8,27 +9,96 @@ namespace NuclearOptionMouseAim
     // recorded cleanly across several aircraft and the reactive assist calibrated against real numbers,
     // without the always-on [anomaly] log or the verbose [chase] trace. Start/stop with RecordKey.
     // All file IO is guarded: a failure aborts the recording and never throws into the game loop.
-    internal static class ManeuverRecorder
+    //
+    // ONE INSTANCE PER AIRCRAFT (v0.86), same registry pattern as ChaseController (v0.82) and for the
+    // same reason: the drone harness flies N aircraft at once, and N flights sharing one StreamWriter
+    // is not a slightly worse capture — it is one file with N aircraft's rows interleaved under one
+    // header, i.e. N runs destroyed. Get one with For(aircraft), release it with Forget, and never
+    // `new` one. The audit that decides static-vs-instance is: DOES THIS VALUE REACH A CSV ROW OR A
+    // PER-FLIGHT DECISION? If yes it is per-aircraft, because sharing it writes one aircraft's state
+    // into another aircraft's file (that is exactly the trap `ChaseController.LastPhase` was in
+    // before v0.82). Only _recSeq stays static and says why at its declaration.
+    internal sealed class ManeuverRecorder
     {
-        private static System.IO.StreamWriter _w;   // open while recording, null otherwise
-        private static float _startTime;            // Time.time at start (elapsed + summary)
-        private static float _lastSample;           // throttle stamp (Time.time of last written row)
-        private static int   _samples;              // rows written this recording
-        private static int   _sinceFlush;           // rows since the last disk flush (see Start)
-        private const  int   FlushRows = 50;        // ~1 s at the fixed step: crash-loss bound, not per-row I/O
-        private static string _path;                // current file path (for the summary line)
-        private static int   _recIndex;             // v0.63: 1-based index of this recording WITHIN the run
+        private System.IO.StreamWriter _w;   // open while recording, null otherwise
+        private float _startTime;            // Time.time at start (elapsed + summary)
+        private float _lastSample;           // throttle stamp (Time.time of last written row)
+        private int   _samples;              // rows written this recording
+        private int   _sinceFlush;           // rows since the last disk flush (see Start)
+        private const int FlushRows = 50;    // ~1 s at the fixed step: crash-loss bound, not per-row I/O
+        private string _path;                // current file path (for the summary line)
+        private int   _recIndex;             // v0.63: the take number THIS recording drew from _recSeq
 
-        public static bool IsRecording => _w != null;
-        public static int  Samples     => _samples;
-        public static float Elapsed    => IsRecording ? Time.time - _startTime : 0f;
+        // TAKE COUNTER — deliberately STATIC, and it is not the LastPhase trap. It carries no aircraft
+        // state: it counts FILES OPENED this run, one artifact stream numbering per process, the same
+        // argument as AnomalyLog's session file. Two consequences, both wanted: every capture's take
+        // number is unique even when N recorders are open at once (so two drones can never land on the
+        // same filename), and `rec=` stays MONOTONIC IN TIME across the whole batch — which is what
+        // compare-runs.py's _run_order sorts the A/B balance check by. A per-aircraft counter would
+        // hand it N runs all claiming rec=1.
+        private static int _recSeq;
+
+        public bool IsRecording => _w != null;
+        public int  Samples     => _samples;
+        public float Elapsed    => IsRecording ? Time.time - _startTime : 0f;
         // Bare filename of the active recording (for the anomaly file's rec= tag); "" when not recording.
-        public static string CurrentFile => _w != null ? System.IO.Path.GetFileName(_path) : "";
+        public string CurrentFile => _w != null ? System.IO.Path.GetFileName(_path) : "";
         // "R<run>-<take>" identity of the current/just-finished take (the R2-05 part of the CSV name) —
         // surfaced on the HUD indicator + stop toast so the maintainer can note which take they're on.
-        // _recIndex survives Stop() (per-session counter, only reset on a fresh session), so it's valid
-        // in the stop feedback too.
-        public static string Tag => $"R{WTMouseAimPlugin.RunIndex}-{_recIndex:00}";
+        // _recIndex survives Stop(), so it's valid in the stop feedback too.
+        public string Tag => $"R{WTMouseAimPlugin.RunIndex}-{_recIndex:00}";
+
+        // =========================================================================================
+        // THE REGISTRY (v0.86) — one recorder per aircraft, keyed by Aircraft.GetInstanceID(), the
+        // same key ChaseController and TestDrone use.
+        // =========================================================================================
+        private static readonly Dictionary<int, ManeuverRecorder> _byAc = new Dictionary<int, ManeuverRecorder>();
+        private Aircraft _ac;     // this recorder's aircraft — read by Start's header/sidecar and the sweep
+        private int      _acId;   // cached id: Forget must work after the aircraft is destroyed
+
+        // The recorder for this aircraft, created on first use. One dictionary probe per aircraft per
+        // fixed step on the Apply path — the whole registry holds single digits (DroneCount caps at 16).
+        internal static ManeuverRecorder For(Aircraft ac)
+        {
+            int id = ac.GetInstanceID();
+            if (_byAc.TryGetValue(id, out var r)) return r;
+            Sweep();   // eviction on the MISS path only — a miss is once per aircraft, not once per tick
+            r = new ManeuverRecorder { _ac = ac, _acId = id };
+            _byAc[id] = r;
+            return r;
+        }
+
+        // THE HUD'S / HOTKEY'S RECORDER: the LOCAL PLAYER's, never a drone's. Derived rather than
+        // published, because unlike ChaseController nothing here runs on the fixed step to publish it
+        // — and GetLocalAircraft is the game's own definition of "local", which an uncrewed drone can
+        // never satisfy. Null before the player has an aircraft, so every call site is null-checked.
+        internal static ManeuverRecorder Player =>
+            GameManager.GetLocalAircraft(out var ac) && ac != null && _byAc.TryGetValue(ac.GetInstanceID(), out var r)
+                ? r : null;
+
+        // Drop an aircraft's recorder, CLOSING an open capture first — a drone that despawns mid-card
+        // would otherwise leave a StreamWriter open with no writer and no '# stop' line, i.e. a capture
+        // that reads as a clean completion. Idempotent.
+        internal static void Forget(Aircraft ac) { if (ac != null) Forget(ac.GetInstanceID()); }
+
+        internal static void Forget(int aircraftId)
+        {
+            if (!_byAc.TryGetValue(aircraftId, out var r)) return;
+            r.Stop("aircraft gone");
+            _byAc.Remove(aircraftId);
+        }
+
+        // ponytail: linear scan on a path that runs once per new aircraft. Unity reports a destroyed
+        // object as null WITHOUT throwing, so a dead entry never announces itself — it just keeps a
+        // corpse (and its open file handle) mapped forever.
+        private static void Sweep()
+        {
+            List<int> dead = null;
+            foreach (var kv in _byAc)
+                if (kv.Value._ac == null) (dead ?? (dead = new List<int>())).Add(kv.Key);
+            if (dead == null) return;
+            foreach (int k in dead) Forget(k);
+        }
 
         // CSV header — keep in lockstep with the Sample() row below. v0.55 adds assist (the game's
         // flight-assist toggle, 0/1 — closes the "was assist on?" ambiguity in every report) and the
@@ -105,14 +175,23 @@ namespace NuclearOptionMouseAim
             //             positive feedback path is still open. Recomputing it offline needs bSup anyway.
             //   phiLead = degrees of bearing lead added to phi before the eAlign map (0 when the lever is
             //             off, and 0 inside the dead-astern wrap region where the lead stands down).
-            "bSup,bWt,phiLead";
+            "bSup,bWt,phiLead," +
+            // v0.86. The RENDERED frame time (ms) that fixed step saw — TestDrone.FrameDt, which is
+            // sampled every fixed step whether or not the harness is on. The drone launch stagger
+            // exists BECAUSE a frame hitch lands on whatever segment is running when it happens: N
+            // replicates flying the same segment at that instant are corrupted identically and stop
+            // being independent samples. That was an assumption backed only by a '[drone] frame hitch'
+            // warning in a log nobody diffs; as a column it is per-row evidence, so a batch can drop
+            // (or covary out) the rows that were actually stalled instead of arguing about them. Also
+            // the honest reading of tWall: dt/dtWall says timeScale slipped, this says WHY.
+            "frameMs";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
         // scored segments. Sanitised on assignment: a comma/quote/newline would corrupt the CSV.
-        private static string _segTag = "";
-        private static float  _segStart;            // Time.time when the current tag began (drives tSeg)
-        public static string SegmentTag
+        private string _segTag = "";
+        private float  _segStart;                   // Time.time when the current tag began (drives tSeg)
+        public string SegmentTag
         {
             get => _segTag;
             set
@@ -130,18 +209,21 @@ namespace NuclearOptionMouseAim
         // "mouseaim-rec-v0.70.0-R8-03-fixedwing-v1-<stamp>.csv" and a hand-flown one keeps the old
         // name — which is what makes two builds' runs of the same card sort together and diff.
         // Sanitised on assignment: it lands in a filename.
-        private static string _cardTag = "";
-        public static string CardTag
+        private string _cardTag = "";
+        public string CardTag
         {
             get => _cardTag;
-            set
-            {
-                if (string.IsNullOrEmpty(value)) { _cardTag = ""; return; }
-                var sb = new System.Text.StringBuilder(value.Length);
-                foreach (char ch in value)
-                    sb.Append(char.IsLetterOrDigit(ch) || ch == '-' || ch == '_' || ch == '.' ? ch : '-');
-                _cardTag = sb.ToString();
-            }
+            set => _cardTag = FileSafe(value);
+        }
+
+        // Everything that lands in a filename goes through this.
+        private static string FileSafe(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char ch in s)
+                sb.Append(char.IsLetterOrDigit(ch) || ch == '-' || ch == '_' || ch == '.' ? ch : '-');
+            return sb.ToString();
         }
 
         // v0.84. One '#' header line the ScenarioPlayer fills in at its entry placement, emitted into
@@ -152,22 +234,37 @@ namespace NuclearOptionMouseAim
         // (airframe damage, session age) instead of being silently poisoned by it. Empty for a
         // hand-flown capture, in which case no line is written and the header is byte-identical to
         // before. Sanitised on assignment: a newline here would corrupt the header block.
-        private static string _entryNote = "";
-        public static string EntryNote
+        private string _entryNote = "";
+        public string EntryNote
         {
             get => _entryNote;
             set => _entryNote = string.IsNullOrEmpty(value) ? ""
                               : value.Replace('\r', ' ').Replace('\n', ' ');
         }
 
-        // Toggle on the hotkey. Returns the new state (true = now recording) for the on-screen toast.
-        public static bool Toggle()
+        // Toggle THIS aircraft's capture. Returns the new state (true = now recording).
+        public bool Toggle()
         {
             if (IsRecording) { Stop("toggled off"); return false; }
             return Start();
         }
 
-        private static bool Start()
+        // The RecordKey hotkey door: the LOCAL player's recorder, never a drone's. Stopping works even
+        // if the aircraft went away mid-capture (the instance outlives it until Forget/Sweep); starting
+        // needs an aircraft, because the header, the FBW line and the sidecar are all read off it.
+        public static bool ToggleLocal()
+        {
+            var r = Player;
+            if (r != null && r.IsRecording) { r.Stop("toggled off"); return false; }
+            if (!GameManager.GetLocalAircraft(out var ac) || ac == null)
+            {
+                WTMouseAimPlugin.Log.LogWarning("[rec] no local aircraft — nothing to record.");
+                return false;
+            }
+            return For(ac).Start();
+        }
+
+        private bool Start()
         {
             try
             {
@@ -180,8 +277,23 @@ namespace NuclearOptionMouseAim
                 // M1 adds the card name when a test card is driving the run (empty otherwise), so a
                 // scripted capture says WHICH card it is without opening it — that is what makes two
                 // builds' runs of the same card sort next to each other and diff.
-                _recIndex++;
-                string name = $"mouseaim-rec-{WTMouseAimPlugin.RunTag}-{_recIndex:00}-"
+                // v0.86 THE DRONE DISCRIMINATOR. N recorders are open at once now, so the name has to
+                // say WHICH aircraft flew it — the take number alone is unique (see _recSeq) but
+                // anonymous, and a folder of eight concurrent captures is unreadable without it. The
+                // airframe rides along too, because a batch can now be HETEROGENEOUS (DroneAirframe
+                // is a per-lane list), so "which drone" no longer implies "which aircraft"; the
+                // sidecar's jsonKey stays the authoritative grouping key for compare-runs.py, this is
+                // just so the folder is readable without opening anything. Both are empty for the
+                // player, so a crewed capture's filename is byte-identical to v0.85.
+                int drone = TestDrone.DroneIdOf(_acId);
+                string frame = "";
+                try { if (drone > 0 && _ac != null && _ac.definition != null) frame = _ac.definition.jsonKey; }
+                catch { /* naming is a bonus; the header and sidecar carry the real identity */ }
+                _recIndex = ++_recSeq;
+                string name = $"mouseaim-rec-{WTMouseAimPlugin.RunTag}-"
+                            + (drone > 0 ? $"d{drone}-" : "")
+                            + (string.IsNullOrEmpty(frame) ? "" : FileSafe(frame) + "-")
+                            + $"{_recIndex:00}-"
                             + (string.IsNullOrEmpty(_cardTag) ? "" : _cardTag + "-")
                             + System.DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv";
                 _path = System.IO.Path.Combine(dir, name);
@@ -195,15 +307,16 @@ namespace NuclearOptionMouseAim
                 // Self-describing header block (v0.44): '#' comment lines (ignored as non-data by CSV
                 // tooling and parsers) so the recording alone explains "what we were dealing with" — the
                 // full gain set, active law, aircraft and the session id that ties it to the anomaly file.
+                // v0.86: THIS recorder's aircraft, not GameManager's local one — a drone's capture must
+                // describe the drone, and the drone is never the local aircraft by construction.
                 string acName = "<unknown>", fbwLine = "<unavailable>";
-                Aircraft acRef = null;
+                Aircraft acRef = _ac;
                 try
                 {
-                    if (GameManager.GetLocalAircraft(out var ac) && ac != null)
+                    if (acRef != null)
                     {
-                        acRef = ac;
-                        if (ac.definition != null) acName = ac.definition.name;
-                        fbwLine = ChaseController.For(ac).FbwHeader(ac); // v0.55: per-airframe FBW params (fail-soft)
+                        if (acRef.definition != null) acName = acRef.definition.name;
+                        fbwLine = ChaseController.For(acRef).FbwHeader(acRef); // v0.55: per-airframe FBW params (fail-soft)
                     }
                 }
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }
@@ -211,6 +324,9 @@ namespace NuclearOptionMouseAim
                            + $"  rec={_recIndex}  session={WTMouseAimPlugin.SessionId}");
                 _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
                 _w.WriteLine($"# aircraft '{acName}'");
+                // Own line, not appended to '# aircraft': scorecard.py matches that one with a greedy
+                // `'(.*)'` and a header line is a contract. Absent entirely for a crewed capture.
+                if (drone > 0) _w.WriteLine($"# drone {drone}");
                 if (!string.IsNullOrEmpty(_cardTag)) _w.WriteLine($"# card {_cardTag}"); // M1: scripted run
                 if (!string.IsNullOrEmpty(_entryNote)) _w.WriteLine($"# entry {_entryNote}"); // v0.84: reset provenance
                 _w.WriteLine($"# config {Cfg.SnapshotString()}");
@@ -233,7 +349,7 @@ namespace NuclearOptionMouseAim
         }
 
         // Stop and close, emitting a one-line summary. Safe to call when not recording (no-op).
-        public static void Stop(string reason)
+        public void Stop(string reason)
         {
             if (_w == null) return;
             float dur = Time.time - _startTime;
@@ -249,15 +365,22 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogInfo($"[rec] done ({reason}) dur={dur:0.0}s samples={n} -> {path}");
         }
 
-        private static void CloseQuietly()
+        private void CloseQuietly()
         {
             try { _w?.Flush(); _w?.Dispose(); } catch { /* ignore */ }
             _w = null;
         }
 
-        // Write a live config-change marker into the recording so a mid-run tuning edit is inline with the
-        // data (no-op when not recording). Called from Cfg's SettingChanged hook. Guarded like every write.
+        // Write a live config-change marker into EVERY open recording so a mid-run tuning edit is inline
+        // with the data. Called from Cfg's SettingChanged hook. Broadcast on purpose: every knob in Cfg
+        // is process-global, so a live edit lands on every aircraft flying — a capture that did not
+        // record it would be describing gains it was not flown with.
         public static void NoteConfigChange(string section, string key, object value)
+        {
+            foreach (var kv in _byAc) kv.Value.NoteConfigChangeInst(section, key, value);
+        }
+
+        private void NoteConfigChangeInst(string section, string key, object value)
         {
             if (_w == null) return;
             try { _w.WriteLine($"# cfg t={Time.time:0.000} {section}/{key} = {value}"); }
@@ -271,7 +394,7 @@ namespace NuclearOptionMouseAim
         // Write one row if recording and the per-second throttle (RecordRateHz) allows it. Called from
         // ChaseController.Apply with the already-computed control state — no recompute. A write failure
         // stops the recording cleanly rather than throwing.
-        public static void Sample(
+        public void Sample(
             float off, float azErr, float elevErr, float phi, float bigTurn, float bank, float targetBank,
             float outP, float outR, float outY, float pitchRate, float yawRate, float rollRate,
             float yawEff, float yawWeak, float spd, float aoa, float g, string phase, bool flyLevel,
@@ -322,7 +445,8 @@ namespace NuclearOptionMouseAim
                     $"{tgtPRaw:0.000},{aoaGU:0.000},{aoaGD:0.000},{aoaRec:0.000},{qSched:0.000},{pEff:0.000},{(settleOn ? 1 : 0)}," +
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
-                    $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}");
+                    $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}," +
+                    $"{TestDrone.FrameDt * 1000f:0.0}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }
@@ -370,7 +494,7 @@ namespace NuclearOptionMouseAim
             return plus >= 0 ? v.Substring(plus + 1) : null;
         }
 
-        private static void WriteAirframeSidecar(string csvPath, Aircraft ac)
+        private void WriteAirframeSidecar(string csvPath, Aircraft ac)
         {
             if (ac == null || string.IsNullOrEmpty(csvPath)) return;
             string path = null;

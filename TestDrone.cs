@@ -75,6 +75,13 @@ namespace NuclearOptionMouseAim
         // column. Unscaled on purpose — the scaled one would hide a hitch as a timeScale change.
         public static float FrameDt { get; private set; }
 
+        // "Which drone is this aircraft, if any?" — 1..N for a drone, 0 for anything else (the player
+        // first of all). One dictionary probe. Exists so ManeuverRecorder can put the drone number in
+        // its filename without this file having to know the recorder exists: N concurrent captures in
+        // one folder are unreadable if the only thing telling them apart is a take number.
+        public static int DroneIdOf(int aircraftId) =>
+            _byAircraftId.TryGetValue(aircraftId, out var d) ? d.Id : 0;
+
         // =========================================================================================
         // LAUNCH
         // =========================================================================================
@@ -111,7 +118,7 @@ namespace NuclearOptionMouseAim
             _slot      = 0;
             _nextAt    = Time.time;                           // first one goes on the next fixed step
             WTMouseAimPlugin.Log.LogInfo(
-                $"[drone] launching {_pending} x '{Cfg.DroneAirframe.Value}' at {Cfg.DroneSpawnAlt.Value:0} m / "
+                $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {Cfg.DroneSpawnAlt.Value:0} m / "
                 + $"{Cfg.DroneSpawnSpeed.Value:0} m/s, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
         }
 
@@ -150,6 +157,7 @@ namespace NuclearOptionMouseAim
             _nextAt = Time.time + Mathf.Max(0f, Cfg.DroneStaggerSec.Value);
             _pending--;
 
+            string key = AirframeForLane(_slot);
             Vector3 pos = _laneBase + _laneRight * (AbeamM + LaneM * _slot);
             // DroneSpawnAlt is MSL in the DATUM frame — the same frame `Aircraft.GlobalPosition().y`
             // and every card's startAlt are expressed in. Round-tripping a global y through
@@ -158,15 +166,53 @@ namespace NuclearOptionMouseAim
             pos.y = new GlobalPosition(0f, Cfg.DroneSpawnAlt.Value, 0f).ToLocalPosition().y;
             _slot++;
 
-            var d = Spawn(Cfg.DroneAirframe.Value, pos, _laneRot, _laneRot * Vector3.forward * Cfg.DroneSpawnSpeed.Value);
+            var d = Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * Cfg.DroneSpawnSpeed.Value);
             if (d == null)
             {
-                // One failure means the next will fail the same way (no server, bad jsonKey, no
-                // Spawner) — so drop the rest of the request instead of printing the same warning
-                // once per drone for the next half minute.
+                // With ONE airframe the next lane fails identically (no server, bad jsonKey, no
+                // Spawner), so drop the rest instead of printing the same warning once per drone.
+                // With a LIST the batch is heterogeneous and that inference is wrong — a single bad
+                // jsonKey must cost its own lane and nothing else — so skip and carry on. Either way
+                // the refusal is a log line, never a silent no-op.
+                if (AirframeList().Length > 1)
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[drone] lane {_slot - 1} ('{key}') was refused — skipping it; {_pending} lane(s) still to launch.");
+                    return;
+                }
                 _pending = 0;
                 WTMouseAimPlugin.Log.LogWarning("[drone] launch aborted — the remaining drones in this request were cancelled.");
             }
+        }
+
+        // PER-DRONE AIRFRAME (v0.86). `Cfg.DroneAirframe` is a COMMA LIST of Encyclopedia jsonKeys,
+        // indexed by lane and wrapped — so a single value (every config file that exists today) still
+        // puts that one airframe in every lane, byte-identical to v0.85, and "FS12, KR67" flies one of
+        // each. Deliberately no new config key and no matrix scheme: `Spawn` already takes the airframe
+        // per call, so this is the whole change.
+        // ponytail: airframe only. LOADOUT is still `null` at the Spawn call — the game's loadout
+        // parameter is a `Loadout` object, not a name, and nobody should write that against a guessed
+        // shape. When the API is known, the lane index is the hook: give Drone a per-lane loadout the
+        // same way, and the .airframe.json sidecar already records the resulting stations/masses/drag
+        // per capture, so the analysis side needs no change.
+        private static string[] AirframeList()
+        {
+            var parts = (Cfg.DroneAirframe.Value ?? "").Split(',');
+            int n = 0;
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string s = parts[i].Trim();
+                if (s.Length > 0) parts[n++] = s;
+            }
+            if (n == 0) return new[] { "" };   // Spawn refuses an empty key with its own log line
+            System.Array.Resize(ref parts, n);
+            return parts;
+        }
+
+        private static string AirframeForLane(int slot)
+        {
+            var list = AirframeList();
+            return list[slot % list.Length];
         }
 
         // An aircraft can leave without us: it can be shot down, fly into the sea, or be cleaned up
@@ -182,8 +228,22 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
                 _live.RemoveAt(i);
                 _byAircraftId.Remove(d.AircraftId);
-                ChaseController.Forget(d.AircraftId);   // v0.82: drop its control state with it
+                ForgetState(d.AircraftId);
             }
+        }
+
+        // EVERY per-aircraft subsystem the mod keeps, dropped in one place. Called from BOTH removal
+        // paths (deliberate despawn and the prune of a drone the game took from us) and keyed by the
+        // CACHED id for the same reason the dictionary is: the aircraft may already be destroyed.
+        // One function, not three call sites duplicated twice — the next per-aircraft registry gets
+        // added here and cannot be forgotten on one of the two paths (which is how a StreamWriter
+        // survives its aircraft and a capture ends with no '# stop' line, reading as a clean run).
+        // The card goes first: aborting it is what closes the recorder cleanly with a reason.
+        private static void ForgetState(int aircraftId)
+        {
+            ScenarioPlayer.Forget(aircraftId);      // v0.86: card playback state
+            ManeuverRecorder.Forget(aircraftId);    // v0.86: closes an open capture
+            ChaseController.Forget(aircraftId);     // v0.82: integrators / filters / probes
         }
 
         // =========================================================================================
@@ -327,9 +387,7 @@ namespace NuclearOptionMouseAim
             if (d == null) return;
             _live.Remove(d);
             _byAircraftId.Remove(d.AircraftId);
-            // v0.82: a ChaseController is per-aircraft state, so it dies with the aircraft. Keyed by
-            // the CACHED id for the same reason the dictionary is — the aircraft may already be gone.
-            ChaseController.Forget(d.AircraftId);
+            ForgetState(d.AircraftId);
             var ac = d.Aircraft;
             if (ac == null) return;
             try
@@ -368,6 +426,15 @@ namespace NuclearOptionMouseAim
 
             try
             {
+                // TEST-CARD DEMAND (v0.86) — THIS drone's card, ticked HERE so it gets the same
+                // zero-tick property the player's card gets from the seam prefix: the demand for this
+                // fixed step is written immediately before Fly reads it, inside the same
+                // Pilot_OnAeroInputsApplied invocation. A card ticked from FixedUpdate instead would
+                // sit on an unspecified side of JobManager.FixedUpdateEarly's ScheduleJobs, i.e. a
+                // frame-rate-dependent zero-order hold between the stimulus and the response — which
+                // is exactly the coupling the harness exists to remove. No-op (a dict probe and a
+                // null check) when this drone is not flying a card.
+                ScenarioPlayer.For(ac).Tick(ac);
                 var fly = d.Fly;
                 if (fly == null || !fly(d)) return;     // the controller declined to command this tick
 

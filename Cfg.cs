@@ -135,7 +135,7 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<bool>    DroneEnabled;     // master on/off for the whole harness
         public static ConfigEntry<KeyCode> DroneSpawnKey;    // launch DroneCount drones, DroneStaggerSec apart
         public static ConfigEntry<KeyCode> DroneDespawnKey;  // remove every live drone + cancel a pending launch
-        public static ConfigEntry<string>  DroneAirframe;    // Encyclopedia jsonKey of the airframe to spawn
+        public static ConfigEntry<string>  DroneAirframe;    // Encyclopedia jsonKey(s), comma list = one per lane
         public static ConfigEntry<float>   DroneSpawnAlt;    // m MSL (datum frame — same as a card's startAlt)
         public static ConfigEntry<float>   DroneSpawnSpeed;  // m/s at spawn
         public static ConfigEntry<int>     DroneCount;       // how many one key press launches
@@ -390,7 +390,7 @@ namespace NuclearOptionMouseAim
             DroneDespawnKey     = cf.Bind("Drone", "DroneDespawnKey", KeyCode.F9,
                 "Key that removes EVERY live test drone and cancels any launch still staggering in. Safe to press when there are none. Only read while DroneEnabled is on. Note that removing a unit posts a kill message to the HUD — that is the game's own removal path, not a bug. Default F9.");
             DroneAirframe       = cf.Bind("Drone", "DroneAirframe", "Multirole1",
-                "Which airframe the drones spawn as, by its Encyclopedia jsonKey — the SAME key a mission file uses in its 'aircraft[].type' field (see harness/WTM-Range/WTM-Range.json). 'Multirole1' is the key the test range already flies. An unknown key refuses the launch with a log line naming the key, so a typo costs a line in LogOutput.log rather than a mystery.");
+                "Which airframe the drones spawn as, by its Encyclopedia jsonKey — the SAME key a mission file uses in its 'aircraft[].type' field (see harness/WTM-Range/WTM-Range.json). 'Multirole1' is the key the test range already flies. A COMMA LIST spawns a MIXED batch, one key per lane, wrapping if the list is shorter than DroneCount ('Multirole1, Attacker1' with DroneCount 4 gives two of each). An unknown key refuses that lane with a log line naming it: with a single key that cancels the launch (the next lane would fail identically), with a list only that lane is skipped and the rest fly. Each capture records the airframe it ACTUALLY flew, in its .airframe.json sidecar and its filename — compare-runs.py groups on that and refuses to pool across airframes.");
             DroneSpawnAlt       = cf.Bind("Drone", "DroneSpawnAlt", 4000f, new ConfigDescription(
                 "Altitude (m MSL) the drones are placed at. Expressed in the same frame as a card's startAlt and the recorder's alt column, so a drone card and a hand-flown card can be compared directly. Keep it well clear of the ground: the drones spawn AIRBORNE on purpose — the game's parked pilot state cuts the throttle and sets the wheel brake below 1 m radar altitude, and a drone that lands in that state never takes off again.",
                 new AcceptableValueRange<float>(500f, 12000f)));

@@ -1551,7 +1551,9 @@ namespace NuclearOptionMouseAim
                 // MANEUVER RECORDER (v0.35): when the user has armed a capture (RecordKey), write the live
                 // control state to the CSV at RecordRateHz. Reuses everything already computed this frame —
                 // no recompute. Throttling/IO live inside Sample(); it's a no-op when not recording.
-                if (ManeuverRecorder.IsRecording)
+                // v0.86: THIS aircraft's recorder (one dictionary probe) — N drones write N CSVs.
+                var rec = ManeuverRecorder.For(aircraft);
+                if (rec.IsRecording)
                 {
                     float elevErr = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f))
                                    - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
@@ -1563,7 +1565,7 @@ namespace NuclearOptionMouseAim
                     if (fbwResolved && _fbwFbw != null)
                         try { fbwTgtPR = _fbwFbw.GetTargetPitchAngVel(); fbwPR = _fbwFbw.GetPitchAngVel(); }
                         catch { /* leave 0 */ }
-                    ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
+                    rec.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
                         spdR, aoaNow, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
@@ -2119,7 +2121,7 @@ namespace NuclearOptionMouseAim
             _anomalyIndex++;
             LastAnomalyIndex = _anomalyIndex; LastAnomalyType = type; LastAnomalyTime = now;
             float spd = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
-            string rec = ManeuverRecorder.CurrentFile;
+            string rec = ManeuverRecorder.For(ac).CurrentFile;   // v0.86: THIS aircraft's capture
             string line =
                 $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
                 $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
@@ -2261,7 +2263,7 @@ namespace NuclearOptionMouseAim
             // AimRig.AimForward — same PlayerAxisControls invocation, so zero-tick lag by
             // construction rather than by Harmony patch ordering or Unity's Update/FixedUpdate order
             // (plan §5.1 M-1). No-op (two field reads) when no card is running.
-            ScenarioPlayer.Tick(aircraft);
+            ScenarioPlayer.For(aircraft).Tick(aircraft);
 
             bool active = ChaseController.For(aircraft).BeginFrame(aircraft, fixedWing, pilotStrength);
 
@@ -2283,7 +2285,7 @@ namespace NuclearOptionMouseAim
                 // that is guaranteed to be in place when Aircraft.FilterInputs consumes the inputs
                 // immediately after this postfix. PilotThrottlePatch below owns the Update-time half.
                 // No-op when no card is running.
-                ScenarioPlayer.OwnInputs(aircraft);
+                ScenarioPlayer.For(aircraft).OwnInputs(aircraft);
             }
         }
 
@@ -2326,9 +2328,9 @@ namespace NuclearOptionMouseAim
         // Return false => skip native (the card owns the throttle this frame).
         private static bool Prefix(PilotPlayerState __instance)
         {
-            if (!ScenarioPlayer.Playing) return true;                       // idle: two field reads
+            if (!ScenarioPlayer.PlayerPlaying) return true;                 // idle: two field reads
             if (!PilotPlayerStatePatch.TryResolve(__instance, out var aircraft, out _, out _)) return true;
-            return !ScenarioPlayer.OwnInputs(aircraft);
+            return !ScenarioPlayer.For(aircraft).OwnInputs(aircraft);
         }
     }
 }
