@@ -51,6 +51,37 @@ the honest cost: several findings were "fixed by Unified" and now revert to the 
   `lateralHold` — live geometry only. Softens the "no-bunt" tenet to a *bounded* negative-g for moderate
   below-targets only (maintainer-blessed); large below-reorientations still roll-and-pull.
 
+**Status (2026-07-28, v0.85): new finding 13 — "live geometry" is not automatically loop-independent
+geometry, and this one bit.** The v0.67 down-hemisphere suppressor above was audited as clean because
+every term in it is live geometry. It was live geometry *measured through the aircraft's own
+response*: `alignFrac` is body-frame, so the aircraft's bank changes the answer (at 90° of bank a
+straight-down target reads exactly abeam), and `lateralHold` is azimuth error, which roll-to-align is
+itself the source of. So the suppressor was keyed on two signals its own output moves — a feedback
+path, not a measurement. Measured on `elDn` over 11 captures: `corr(|azErr|, blendWeight) = +0.918`,
+51% of the intended suppression removed on 88% of ticks, 6.92° of standing error at ±43° of bank,
+where the *larger* mirror step in the upper hemisphere converges to 0.03°.
+
+**FIXED in v0.85** (`Cfg.BelowAlignSuppress`, default ON): keyed on `alignFracH`, the same belowness
+in a horizon-referenced frame around the nose — axes built from `t.forward` alone, so roll cannot
+move it — and the `(1 − lateralHold)` factor is deleted outright. Both changes are still live
+geometry and still per-plane-constant-free; the difference is that neither input is now downstream of
+the command it gates.
+
+**The reusable audit question this adds:** for any gate or schedule, do not stop at "is this term
+live/probed rather than a constant". Also ask **"can the command this term gates move this term?"** A
+live signal inside its own feedback path is a loop gain wearing a measurement's clothes, and it passes
+the existing generality test unchanged. Worth a re-read of `_yawWeak` (gated on the closing rate the
+assist itself produces) and `_pitchEff` (measured from the command it scales) with that question in
+hand — both have anti-windup/asymmetry structure that probably covers it, but neither has been checked
+against *this* question rather than the constants question.
+
+- **Align-channel rate lead** (v0.85, `Cfg.AlignRateLead`, default ON) — partial, orthogonal relief for
+  finding 5 (`eAlign` is fixed-gain because EL has no roll-effectiveness estimator). The `phi/90` map
+  was pure proportional; `phi` is now led by its measured rate with `Cfg.RollDamping` as the lead time.
+  This does **not** retire finding 5: the lead angle self-scales with the airframe (live measured rate ×
+  a shared time), but the channel's *gain* is still un-normalized. The probed/measured roll-authority
+  route in finding 5 remains the principled fix.
+
 ## What the law already does right (the pattern to copy)
 
 - **Fail-soft probes** supply the airframe truth: FBW pitch-rate params + gLimit/alphaLimiter

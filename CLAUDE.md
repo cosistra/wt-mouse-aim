@@ -87,10 +87,25 @@ Machine-specific paths are written as placeholders:
     closing the error, held through a slow-attack (4 s) / fast-release (0.2 s) filter — the persistence
     filter **is** the anti-windup, and `yawCapped` suppresses the new path only. New recorder columns
     `iGate`/`leadDeg`.
+    **v0.85** fixes the below-nose roll-to-align **positive feedback loop** (`elDn`: 6.92° standing
+    error at ±43° bank, `blendWeight` correlating +0.918 with the `azErr` it is itself generating,
+    against 0.03° for the *larger* mirror step `elUp` — see `debugtests/GATE-CHATTER-FINDINGS.md` §5a).
+    Two independent checkboxes, both default ON: (a) `Cfg.BelowAlignSuppress` — the v0.67
+    `belowSuppress` keyed on **body-frame** belowness, so the aircraft's own roll erased it (at 90° of
+    bank a straight-down target reads abeam), and its `(1 − lateralHold)` factor gated it on the very
+    azimuth error roll-to-align creates (51% of the suppression removed, on 88% of ticks). It now keys
+    on the new **roll-invariant** `alignFracH` (horizon-referenced belowness, derived in `Apply` beside
+    `alignFrac`, falling back to it near the vertical) and the `lateralHold` factor is **deleted**.
+    (b) `Cfg.AlignRateLead` — the `eAlign` channel was a pure `phi/90` P map; `phi` is now led by the
+    new measured `_phiRateFilt` (same `HdgRateTau`, zeroed **and invalidated** under `EAlignLatGate`)
+    times `Cfg.RollDamping` as the lead time, stood down inside `phiWrapGate` where the two-rate
+    anti-relay slew owns the dynamics. Separate levers on purpose: (a)'s risk is an upper-hemisphere
+    regression, which is unattributable if both move under one `ScenarioArmToggle` knob. New recorder
+    columns `bSup`/`bWt`/`phiLead`.
     Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
-    v0.69/0.70 added the instructor-loop instrumentation (60 CSV columns as of v0.83): alt/airDensity/pos/vel/
+    v0.69/0.70 added the instructor-loop instrumentation (63 CSV columns as of v0.85): alt/airDensity/pos/vel/
     segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
     snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
     `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
@@ -101,7 +116,11 @@ Machine-specific paths are written as placeholders:
     feed-forward never fired" (both read as a smaller azimuth lag). v0.83 added `iGate` (the wind gate
     the fine integrator actually used — with `IntegralStallGate` off it equals the old `fineBlend`
     exactly) and `leadDeg` (the anticipatory lead actually subtracted from `azErr`), under the same
-    rule and on both sides of both v0.83 toggles. **New columns are appended at the END** — the Python
+    rule and on both sides of both v0.83 toggles. v0.85 added `bSup`/`bWt`/`phiLead` (the below-nose
+    suppression actually applied, the roll blend weight **after** it — the loop gain the +0.918
+    correlation was measured on — and the bearing lead), same rule again; unlike `leadDeg` these are
+    **not** recoverable by arithmetic, since neither `alignFrac` nor `alignFracH` is a column.
+    **New columns are appended at the END** — the Python
     tools index by header name but the contract in `Recording.cs` is positional-safe; keep it. v0.84
     added no column: it added the `# entry` **header line** (`EntryNote`, set by `ScenarioPlayer` at
     its placement) carrying the per-replicate reset provenance — `snapBackM`, the pre-placement

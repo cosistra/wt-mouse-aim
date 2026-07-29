@@ -19,7 +19,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.84.0";
+        public const string PluginVersion = "0.85.0";
 
         internal static ManualLogSource Log;
 

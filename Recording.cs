@@ -93,7 +93,19 @@ namespace NuclearOptionMouseAim
             //             (headingRateFilt - aimRate)*TurnLeadTime — and since all three of azErr,
             //             headingRateFilt and aimRate are already columns, which branch ran is checkable
             //             by arithmetic, and predFloor binding is recoverable as azErrPred vs azErr-leadDeg.
-            "iGate,leadDeg";
+            "iGate,leadDeg," +
+            // v0.85. The roll-to-align loop, for the same reason as aimRate and iGate/leadDeg — the v0.85
+            // changes and the v0.85 changes NEVER FIRING both read as a smaller roll oscillation.
+            //   bSup    = the below-nose suppression ACTUALLY applied [0,1]. With BelowAlignSuppress OFF it
+            //             is the old clamp01(-alignFrac)*(1-lateralHold)*taper; ON it is the roll-invariant
+            //             belowness * taper. alignFrac is not a column and the roll-invariant one never was,
+            //             so unlike leadDeg this is NOT recoverable by arithmetic from the other columns.
+            //   bWt     = the roll blend weight after suppression — the loop gain the +0.918 correlation with
+            //             |azErr| was measured on, and therefore the single number that says whether the
+            //             positive feedback path is still open. Recomputing it offline needs bSup anyway.
+            //   phiLead = degrees of bearing lead added to phi before the eAlign map (0 when the lever is
+            //             off, and 0 inside the dead-astern wrap region where the lead stands down).
+            "bSup,bWt,phiLead";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -269,6 +281,7 @@ namespace NuclearOptionMouseAim
             bool assist, float fbwTgtPR, float fbwPR,
             float tgtPRaw, float aoaGU, float aoaGD, float aoaRec, float qSched, float pEff, bool settleOn,
             float aimRate, float iGate, float leadDeg,
+            float bSup, float bWt, float phiLead,
             Aircraft ac)
         {
             if (_w == null) return;
@@ -309,7 +322,7 @@ namespace NuclearOptionMouseAim
                     $"{tgtPRaw:0.000},{aoaGU:0.000},{aoaGD:0.000},{aoaRec:0.000},{qSched:0.000},{pEff:0.000},{(settleOn ? 1 : 0)}," +
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
-                    $"{iGate:0.000},{leadDeg:0.00}");
+                    $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }

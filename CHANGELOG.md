@@ -3,6 +3,69 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.85.0
+
+**The below-nose roll-to-align loop was positive feedback, and its own suppressor was being switched
+off by the oscillation it exists to suppress.** Measured over 11 captures of the `elDn` card segment
+(a 20° *down* elevation step), late 60% of the block, against its mirror `elUp` (a **larger** step,
+upper hemisphere, same law) — `debugtests/GATE-CHATTER-FINDINGS.md` §5a:
+
+| | `elDn` | `elUp` |
+|---|---:|---:|
+| mean `off` | **6.92° ± 2.40** | 0.03° |
+| bank half-amplitude | **43.3°** | 0.11° |
+| `outR` sign flips | **0.58/s** | 0.00 |
+| corr(\|`azErr`\|, `blendWeight`) | **+0.918** | — |
+
+`elDn` is the corpus's worst cross-fighting case (24% `REGRESSING`, jerk RMS 1.61 — ~3× any other
+segment) with the plant *unloaded* and full authority available, while the larger step in the other
+hemisphere converges to 0.03° and never touches the roll stick again. The loop: roll-to-align banks
+the aircraft → bank plus pull swings the nose in azimuth → `azErr` rises → `lateralHold` rises →
+`blendWeight` rises → more roll-to-align. Note what it is **not**: `blendWeight` sits 81% in the mid
+band, so nothing rails and hysteresis would have done nothing (that hypothesis was tested against
+sham-gate controls and killed — same document, §2).
+
+- **`belowSuppress` is keyed to ROLL-INVARIANT belowness** (`BelowAlignSuppress`, default ON). The
+  v0.67 suppressor asked "is the target below the nose" using `alignFrac`, which is measured in the
+  **aircraft's own frame** — so the aircraft's bank changed the answer, and at 90° of bank a target
+  straight down reads as exactly abeam. Rolling deleted the reason not to roll. That is the false
+  ~85° bank equilibrium v0.67's own comment describes, restated as a feedback path. The same question
+  is now asked in a **horizon-referenced frame around the nose** — axes built from `t.forward` alone,
+  so no amount of roll can move the answer, and identical to the old value with the wings level.
+- **The `(1 − lateralHold)` factor is deleted.** It gated the suppressor on azimuth error, i.e. on the
+  symptom: `lateralHold > 0` on **88%** of ticks in that window and it removed **51%** of the intended
+  suppression. Its stated job (a genuine down-*lateral* keeps its roll-and-pull) is already done twice
+  over — `Clamp01(-alignFracH)` is itself a continuous belowness, so a target that is below *and*
+  abeam is barely suppressed, and the existing `bigTurn` taper hands full roll-and-pull back for any
+  large below-reorientation. This was the only term that let the loop's own output re-open its gate.
+- **The `eAlign` channel gets a rate lead** (`AlignRateLead`, default ON). `phi` is that channel's
+  entire error signal and the map was pure `phi/90` — a P-only loop against a plant with real roll
+  inertia. `phi` is now led by its own **measured** rate before the map, exactly as `azErrPred` leads
+  `azErr` for the turn command. It is *not* a second copy of the servo's `-rollRateF*RollDamping`: the
+  bearing's total rate also carries the pitch/yaw closure (in a below-nose pushover the bearing sweeps
+  while roll rate is ~0, and the align channel should stand down for precisely that) and the marker's
+  own motion, so a marker sweeping around the boresight is **tracked, not braked** — the v0.83
+  relative-rate lesson applied to this channel. Stands down inside the dead-astern wrap region, where
+  `phi` is discontinuous and the existing two-rate anti-relay slew owns the dynamics.
+  **No new constant:** the lead *time* reuses `Cfg.RollDamping`, the roll channel's already-tuned
+  derivative time against the same physical loop, and the lead *angle* is that time × a live measured
+  rate — so a sluggish airframe generates a small lead and a fast-rolling one a large lead, with no
+  per-plane number anywhere. Same argument as the v0.78 feed-forward: the tuning-free part is the
+  kinematics.
+
+- **Recorder: 60 → 63 columns**, `bSup`, `bWt`, `phiLead`, for the same reason `aimRate` and
+  `iGate`/`leadDeg` exist — "the fix fired and helped" and "the fix never fired" both read as a
+  smaller roll oscillation. `bWt` in particular is the loop gain the +0.918 correlation was measured
+  on, so it is the number that says whether the feedback path is still open. Recorded on **both**
+  sides of **both** toggles, and unlike `leadDeg` these are *not* recoverable by arithmetic from the
+  existing columns (neither `alignFrac` nor its roll-invariant twin was ever a column).
+
+Both levers are checkboxes rather than a rebuild so the change is A/B-able inside one session with
+`ScenarioArmToggle` — and they are **separate** levers on purpose: the main risk of the belowness
+change is a regression in the upper hemisphere, which is unattributable if both mechanisms move under
+one knob. Everything above is live geometry and measured rates only; a target at or above the nose is
+untouched by construction, which is where the already-perfect hemisphere lives.
+
 ## 0.84.0
 
 **The harness was manufacturing false positives; this is the gate on every A/B downstream of it.**

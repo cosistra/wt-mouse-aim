@@ -144,6 +144,28 @@ namespace NuclearOptionMouseAim
         private float _eAlignSlew;      // v0.57: slew-limited big-turn roll-alignment error — breaks the ~1 Hz tail-on
                                                // roll relay (phi sign-flips in one tick when the target crosses dead-astern;
                                                // eAlign followed it rail-to-rail, bypassing every bank-target slew/deadzone)
+        // v0.85 ALIGN-CHANNEL RATE LEAD. phi is the roll-to-align channel's ENTIRE error signal and the
+        // channel was pure-P on it; this is its derivative, low-passed with the same HdgRateTau as the two
+        // world-azimuth rates so all three rate signals share one phase. Measured, not modelled: it is the
+        // TOTAL bearing rate (aircraft roll + pitch/yaw + the marker's own motion), which is what makes the
+        // lead track a sweeping marker instead of braking it — the v0.83 relative-rate lesson applied to
+        // this channel. DeltaAngle so the ±180 wrap is a no-op; invalidated (not held) whenever |lateral|
+        // falls under the conditioning floor, because phi is meaningless there and a stale rate would be
+        // injected the moment it becomes meaningful again.
+        private float _phiRateFilt;
+        private float _prevPhi;
+        private bool  _prevPhiValid;
+        // atan2 conditioning floor on |lateral| (~sin FineAngle 6°): below it BOTH local.x and local.y are
+        // ~0 and phi is junk. Class-level since v0.85 because the rate above and the eAlign target in the
+        // law must gate on the SAME number — a rate that survives a gate the target does not would feed
+        // near-boresight noise straight into the align channel. Regime constant (geometry), not per-plane.
+        private const float EAlignLatGate = 0.10f;
+        // Roll-loop decision variables surfaced for the recorder (columns bSup / bWt / phiLead) — the
+        // v0.78/v0.83 rule: an A/B whose fix and whose no-op both read as "less oscillation" is not
+        // measurable unless the capture says which one happened. Written every frame the law runs.
+        private float _belowSup;        // below-nose roll-to-align suppression actually applied [0,1]
+        private float _blendW;          // roll blend weight AFTER suppression — the loop gain itself
+        private float _phiLead;         // deg of bearing lead actually added to phi (0 when the lever is off)
         private float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
         private float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
         private float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
@@ -626,6 +648,7 @@ namespace NuclearOptionMouseAim
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
                 _headingRateFilt = 0f; _tBankSlewed = 0f; // fresh heading-rate lead (v0.51) + bank-target slew (v0.54)
                 _eAlignSlew = 0f; // v0.61: clear cross-engagement carry (was a persistent static → stale seed on re-engage)
+                _phiRateFilt = 0f; _prevPhiValid = false; // v0.85: no bearing-rate lead across the engage gap
                 _alphaSchedFilt = 1f; // fresh AoA-utilization demand schedule (v0.59)
                 _pitchEff = 1f; // fresh measured pitch-effectiveness estimate (v0.60)
                 _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
@@ -773,6 +796,44 @@ namespace NuclearOptionMouseAim
                 float phi       = Mathf.Atan2(local.x, local.y) * Mathf.Rad2Deg;
                 float lateral   = Mathf.Sqrt(local.x * local.x + local.y * local.y);
                 float alignFrac = lateral > 1e-4f ? local.y / lateral : 1f;
+
+                // ROLL-INVARIANT BELOW-NESS (v0.85) — alignFrac above is measured in the AIRCRAFT's frame,
+                // so the aircraft's own bank changes it: a target straight down reads alignFrac = -1 wings
+                // level and exactly 0 at 90° of bank. The v0.67 below-hemisphere suppressor keys off it, so
+                // rolling deleted the very reason not to roll (that is the false ~85° bank equilibrium its
+                // own comment describes, expressed as a feedback path). Ask the same question in a
+                // HORIZON-referenced frame around the nose instead — same nose, same target, axes that
+                // depend only on t.forward, so no amount of roll can move the answer. Level flight makes
+                // upH == world up, so this equals alignFrac exactly with the wings level.
+                // Degenerate near the vertical (the horizon frame is undefined when the nose IS the up axis):
+                // fall back to the body-frame value, same guard style as hdgConf below.
+                Vector3 rightHW = new Vector3(t.forward.z, 0f, -t.forward.x); // = cross(worldUp, nose); |.| = cos(pitch)
+                float rhMag = rightHW.magnitude;
+                float alignFracH = alignFrac;
+                if (rhMag > 0.1f)
+                {
+                    rightHW /= rhMag;
+                    Vector3 upHW = Vector3.Cross(t.forward, rightHW);         // unit, ⊥ nose, in the vertical plane
+                    float yH = Vector3.Dot(aimDir, upHW), xH = Vector3.Dot(aimDir, rightHW);
+                    float latH = Mathf.Sqrt(xH * xH + yH * yH);
+                    alignFracH = latH > 1e-4f ? yH / latH : 1f;
+                }
+
+                // BEARING RATE (v0.85) — d(phi)/dt for the align channel's rate lead. DeltaAngle takes the
+                // short way round, so a sweep through ±180 reads as the small change it physically is
+                // instead of a 360/dt spike. Gated on the SAME conditioning floor the eAlign target uses:
+                // under it phi is junk, so the sample is dropped AND the previous one invalidated, which is
+                // what stops a near-boresight hold frame from seeding a bogus rate into the next maneuver.
+                if (lateral > EAlignLatGate)
+                {
+                    if (_prevPhiValid && dt > 1e-5f)
+                    {
+                        float rawPR = Mathf.DeltaAngle(_prevPhi, phi) / dt;
+                        _phiRateFilt += (dt / (HdgRateTau + dt)) * (rawPR - _phiRateFilt);
+                    }
+                    _prevPhi = phi; _prevPhiValid = true;
+                }
+                else { _phiRateFilt = 0f; _prevPhiValid = false; }
 
                 // REGIME BLEND — a continuous ramp from the fine direct-nudge law (small errors) to the
                 // roll-to-align law (big turns). 0 inside FineAngle, 1 at/above AlignAngle.
@@ -1315,7 +1376,7 @@ namespace NuclearOptionMouseAim
                 // per-axis shaping differs here. pullGate/yawScale/coordPull are surfaced for the debug trace.
                 float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
                 _tBankFlown = targetBank; // the law overwrites this with its own slewed tBankE below
-                ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
+                ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, alignFracH, bigTurn, targetBank, azErr, azErrPred,
                     phi, lateral, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
                     out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
 
@@ -1508,7 +1569,7 @@ namespace NuclearOptionMouseAim
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
                         aircraft.flightAssist, fbwTgtPR, fbwPR,
                         tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn, _aimAzRateFilt,
-                        iGate, leadDeg,
+                        iGate, leadDeg, _belowSup, _blendW, _phiLead,
                         aircraft); // M0: the recorder reads alt/airDensity/pos/vel off it (fail-soft)
                 }
 
@@ -1571,7 +1632,7 @@ namespace NuclearOptionMouseAim
         // Everything else (pitch, yaw, fine integrator winding, roll-rate low-pass) is byte-for-byte
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
         private void ApplyEvolvedLegacy(
-            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
+            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float alignFracH, float bigTurn,
             float targetBank, float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
             out float tgtP, out float tgtR, out float tgtY,
@@ -1749,12 +1810,37 @@ namespace NuclearOptionMouseAim
             // 3/s slew there (the v0.57 dead-astern relay fix, the ONE place the slew is genuinely needed).
             // The lateral gate zeroes eAlign where phi is ill-conditioned (both local.x/local.y ~0), so a
             // near-boresight HOLD frame can't seed the next real maneuver with saturated junk.
-            // ponytail: phiWrapGate is the geometric atan2 wrap boundary and eAlignLatGate the atan2
-            // conditioning floor (~sin FineAngle) — regime constants, not per-plane; promote to Cfg only if
-            // flight tuning demands.
+            // ponytail: phiWrapGate is the geometric atan2 wrap boundary and EAlignLatGate (class-level since
+            // v0.85) the atan2 conditioning floor (~sin FineAngle) — regime constants, not per-plane; promote
+            // to Cfg only if flight tuning demands.
             const float phiWrapGate = 135f;    // deg; |phi|>135 is the only place phi is discontinuous (±180 wrap)
-            const float eAlignLatGate = 0.10f; // ~sin(FineAngle 6°); below this |lateral| phi is meaningless
-            float eAlignTgt = (lateral > eAlignLatGate) ? Mathf.Clamp(phi / 90f, -1.5f, 1.5f) : 0f;
+            // v0.85 ALIGN-RATE LEAD. phi IS this channel's error and the map below was pure proportional on
+            // it — a P-only loop against a plant with real roll inertia, which overshoots by construction and
+            // keeps commanding roll into a rotation already bought. Lead phi by its own measured rate before
+            // the map, exactly as azErrPred leads azErr for the turn command, so the align command rolls out
+            // early instead of at the crossing. Sign: with a stationary marker a right roll swings the target
+            // left in the body frame, so d(phi)/dt = -rollRate — phi + T*phiRate is therefore a genuine
+            // derivative brake on roll, and the ±1.5 clamp still bounds it.
+            //   NOT the same term as the servo's existing -rollRateF*RollDamping below, which brakes the roll
+            //   AXIS. _phiRateFilt is the bearing's TOTAL rate: it also sees the pitch/yaw closure (in a
+            //   below-nose pushover the bearing sweeps with the nose while roll rate is ~0, and the align
+            //   channel should stand down for exactly that) and the MARKER's own motion, so a marker sweeping
+            //   around the boresight is TRACKED, not braked — the v0.83 relative-rate lesson.
+            //   Stood down inside the wrap region: there phi is discontinuous and the two-rate slew below is
+            //   the mechanism that owns it, so a lead would be differentiating the very thing that slew exists
+            //   to reject. Wrapping is therefore unnecessary too — |phi| <= 135 plus a bounded lead cannot
+            //   cross ±180 into a sign inversion.
+            // ONE LAW: no new constant and no per-airframe number. The lead TIME reuses Cfg.RollDamping — the
+            // roll channel's already-tuned derivative time, in seconds, against the same physical loop — and
+            // the lead ANGLE is that time times a LIVE measured rate, so a sluggish airframe generates a small
+            // lead and a fast-rolling one a large one, automatically. Same argument as the v0.78 feed-forward:
+            // the tuning-free part is the kinematics.
+            // ponytail: RollDamping is the reused derivative time; split it out only when a capture shows the
+            // align channel wants a different lead than the wings-level channel (the probe-based replacement
+            // would be a measured stick->roll-rate lag, i.e. a roll twin of _pitchEff).
+            _phiLead = (Cfg.AlignRateLead.Value && Mathf.Abs(phi) <= phiWrapGate)
+                     ? _phiRateFilt * Cfg.RollDamping.Value : 0f;
+            float eAlignTgt = (lateral > EAlignLatGate) ? Mathf.Clamp((phi + _phiLead) / 90f, -1.5f, 1.5f) : 0f;
             // Two-rate slew (single MoveTowards, so it's continuous at the gate — no exit snap if phi sweeps
             // back below 135° before the slow slew converged): 3/s inside the wrap region (the anti-relay
             // clamp — the ONE place phi is discontinuous), 30/s elsewhere (fast catch-up ≈ pass-through;
@@ -1786,10 +1872,33 @@ namespace NuclearOptionMouseAim
             // the target. Keyed to LIVE geometry only: Clamp01(-alignFrac)=belowness; (1-lateralHold) limits
             // it to the azErr≈0 hang (a genuine down-LATERAL with large azErr keeps its roll-and-pull); the
             // bigTurn taper hands full roll-and-pull back for large below-reorientations. No per-plane constant.
+            // v0.85 — THE SUPPRESSOR WAS DISARMED BY THE SYMPTOM IT SUPPRESSES. Measured over 11 captures of
+            // the elDn segment (a 20° down step), late 60% of the block: mean off 6.92° ± 2.40, bank rocking
+            // ±43.3° at ~0.3 Hz, outR sign flips 0.58/s, 24% REGRESSING ticks and ~3x the jerk of any other
+            // segment — against its MIRROR elUp (a LARGER step, upper hemisphere, same law) at 0.03° with the
+            // roll stick never moving. corr(|azErr|, blendWeight) = +0.918: the blend weight was being raised
+            // by the azimuth error that roll-to-align was itself creating. Two paths did that, and both are
+            // fixed here rather than damped:
+            //   1. alignFrac is BODY-frame, so the aircraft's own bank changed the answer — at 90° of bank a
+            //      straight-down target reads as exactly abeam and belowness goes to 0. Rolling deleted the
+            //      reason not to roll; that IS the false ~85° equilibrium the v0.67 note describes, written as
+            //      a feedback path. Use the ROLL-INVARIANT alignFracH (see its derivation in Apply) instead —
+            //      identical wings-level, and no longer erasable by the transient it is supposed to prevent.
+            //   2. The (1 - lateralHold) factor gated the suppressor on azimuth error, which is the symptom:
+            //      lateralHold > 0 on 88% of ticks in that window and it removed 51% of the intended
+            //      suppression. DELETED. Its stated job — "a genuine down-LATERAL keeps its roll-and-pull" —
+            //      is already done twice over: Clamp01(-alignFracH) is itself a continuous belowness (a target
+            //      below AND abeam reads ~0 and is barely suppressed), and the bigTurn taper below hands full
+            //      roll-and-pull back for any large below-reorientation. Deleting it removes the ONLY term
+            //      here that let the loop's own output re-open the gate.
+            // Still live geometry only, still no per-plane constant, and still exactly zero for any target at
+            // or above the nose — the hemisphere that already converges to 0.03° is untouched by construction.
             const float downAlignTaper = 0.3f; // top fraction of the bigTurn ramp over which roll-to-align returns
-            float belowSuppress = Mathf.Clamp01(-alignFrac) * (1f - lateralHold)
-                                * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
+            float belowSuppress = Cfg.BelowAlignSuppress.Value
+                ? Mathf.Clamp01(-alignFracH) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper)
+                : Mathf.Clamp01(-alignFrac) * (1f - lateralHold) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
             blendWeight *= (1f - belowSuppress);
+            _belowSup = belowSuppress; _blendW = blendWeight; // recorder: which path ran, and the loop gain itself
             float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
 
             // ROLL-RATE LOW-PASS — identical to Legacy (anti high-speed roll PIO).
