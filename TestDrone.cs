@@ -5,16 +5,18 @@ using UnityEngine;
 namespace NuclearOptionMouseAim
 {
     // ---------------------------------------------------------------------------------------------
-    // TEST DRONE (v0.81, phase 1 of the uncrewed harness).
+    // TEST DRONE (v0.81 harness, v0.87 phase 2 — the mod's own control law flies it).
     //
     // Every measurement this project has ever taken cost a human sitting in a cockpit for the length
     // of the card. A four-replicate suite of `fixedwing-v2` is ~12 minutes of someone watching a
     // marker sweep. This file removes the pilot from that loop: the mod spawns its own aircraft, owns
     // its ControlInputs, and destroys it again — so a sweep can run N airframes at once, unattended.
     //
-    // PHASE 1 IS THE HARNESS ONLY. Nothing here is wired to ChaseController or ScenarioPlayer; the
-    // built-in level-hold below exists purely to prove that written inputs reach the physics. Phase 2
-    // attaches the real law through `Drone.Fly` (see that field).
+    // PHASE 2 (v0.87) CLOSED THE LOOP. A drone starts a test card on its own first pilot step, and
+    // `Drone.Fly` chases that card's demand through `ChaseController.Apply` — the same law, the same
+    // per-aircraft controller and the same per-aircraft recorder the human flies, so a drone capture
+    // and a crewed capture measure the same thing. The built-in level-hold below survives for the one
+    // case with nothing to chase (no card running) and is still NOT the mod's control law.
     //
     // WHY N DRONES AND NOT ONE. The unit of measurement is a REPLICATE SET, not a run — a single
     // capture has no spread, so a change cannot be called real from it (that is the whole argument
@@ -426,6 +428,28 @@ namespace NuclearOptionMouseAim
 
             try
             {
+                var sp = ScenarioPlayer.For(ac);
+
+                // START THE CARD ON THIS DRONE'S FIRST PILOT STEP (v0.87), not at Spawn. By the time
+                // the game gives an aircraft its own fixed step it is fully constructed, and the card's
+                // first act is a PLACEMENT that rigid-moves every part rigidbody
+                // (ScenarioPlayer.PlaceOnCondition) — not a thing to do to a half-built assembly.
+                // Per drone, at ITS OWN spawn instant, which is what preserves the launch stagger: one
+                // key that started N cards together would put every replicate on the same segment
+                // boundary, precisely what the stagger exists to prevent.
+                // StartSuite is the same body the player's run key calls (no second copy to drift), and
+                // it refuses with its own [card] log line when no card is enabled for this airframe
+                // class — the drone then just level-holds, which is the phase-1 behaviour.
+                // ponytail: fire-and-forget, one attempt. A drone whose suite finishes keeps flying the
+                // level-hold until the despawn key; auto-despawn-on-finish is the obvious next step and
+                // deliberately not here, because "the sky empties itself" is a thing to watch once
+                // before it runs unattended.
+                if (!d.CardStarted)
+                {
+                    d.CardStarted = true;
+                    sp.StartSuite(ac);
+                }
+
                 // TEST-CARD DEMAND (v0.86) — THIS drone's card, ticked HERE so it gets the same
                 // zero-tick property the player's card gets from the seam prefix: the demand for this
                 // fixed step is written immediately before Fly reads it, inside the same
@@ -434,9 +458,16 @@ namespace NuclearOptionMouseAim
                 // frame-rate-dependent zero-order hold between the stimulus and the response — which
                 // is exactly the coupling the harness exists to remove. No-op (a dict probe and a
                 // null check) when this drone is not flying a card.
-                ScenarioPlayer.For(ac).Tick(ac);
+                sp.Tick(ac);
                 var fly = d.Fly;
                 if (fly == null || !fly(d)) return;     // the controller declined to command this tick
+
+                // THROTTLE/BRAKE, exactly as the player's seam postfix does it immediately after
+                // Apply (v0.87). A card owns the throttle; without this a drone would fly the whole
+                // card at whatever ControlInputs.throttle happened to hold — and 0 is the game's
+                // airbrake trigger (Airbrake.Update), which is how R18 read a bad throttle as a
+                // control-law energy failure. No-op when this drone is not flying a card.
+                sp.OwnInputs(ac);
 
                 // FBW IS NOT AUTOMATIC. `Aircraft.FilterInputs()` — which runs the
                 // RelaxedStabilityController and then ControlsFilter/FlyByWire — is called ONLY from
@@ -465,9 +496,10 @@ namespace NuclearOptionMouseAim
         // altitude instead of falling out of the sky.
         //
         // ponytail: pure P on both axes, no rate damping of our own, no speed hold. The game's FBW
-        // already provides rate damping (that is why FilterInputs is called above), and phase 2
-        // replaces this whole function with the real law, so tuning it would be tuning something
-        // that is scheduled for deletion.
+        // already provides rate damping (that is why FilterInputs is called above). v0.87 keeps it
+        // for the ONE job it still has — an idle drone with no card has no demand to chase, and an
+        // aircraft nobody is flying falls into the sea. Never tune it, and never compare a level-hold
+        // capture against a card capture: they are not the same controller.
         // =========================================================================================
         private const float HoldThrottle = 0.6f;   // fixed position, not a speed hold — one loop, not two
         private const float VsPerAltErr  = 0.05f;  // m/s of commanded climb per metre of altitude error
@@ -497,6 +529,52 @@ namespace NuclearOptionMouseAim
             ci.brake    = 0f;
             return true;
         }
+
+        // =========================================================================================
+        // THE MOD'S CONTROL LAW, ON A DRONE (v0.87 — phase 2, and the whole point of the harness).
+        //
+        // A drone flying a card chases ITS OWN demand through ChaseController.Apply: the same law,
+        // the same pipeline, the same one-controller-per-aircraft instance the human flies. That is
+        // what makes a drone capture comparable to a crewed one — the alternative (a second
+        // controller for uncrewed aircraft) would be measuring something nobody flies.
+        //
+        // NO CARD, NO CHASE. A drone with no card running has nothing to chase, so it keeps the
+        // level-hold above and stays airborne. Deliberately not "hold the last demand": a finished
+        // card's final direction is a stale stimulus, and chasing it would fill the log with
+        // anomalies about a manoeuvre nobody asked for.
+        // =========================================================================================
+        internal static bool ChaseCard(Drone d)
+        {
+            var ac = d.Aircraft;
+            if (ac == null) return false;
+            var sp = ScenarioPlayer.For(ac);
+            if (!sp.Playing) return LevelHold(d);
+
+            // A CARD WITH NO DEMAND. Every path that starts a card writes one before Fly reads it
+            // (the placement writes the level forward, an unforced card writes its first segment), so
+            // this should be unreachable — which is exactly why it is checked rather than assumed:
+            // Vector3.zero does not throw, it reads as "off = 0, already on target" and would fly a
+            // whole unattended run as a plausible-looking null result. Abort is self-limiting (the
+            // card is gone, so this fires once) and puts the reason in the CSV's own '# stop' line.
+            if (sp.AimDemand.sqrMagnitude < 1e-6f)
+            {
+                sp.Abort("no aim demand written — nothing to chase");
+                WTMouseAimPlugin.Log.LogWarning($"[drone] #{d.Id} card is running but wrote no aim demand — aborted.");
+                return LevelHold(d);
+            }
+
+            if (ChaseController.For(ac).FlyUncrewed(ac, sp.AimDemand)) return true;
+
+            // The instructor declined this tick (Enabled / WriteControl off, a rotorcraft without
+            // ControlRotorcraft, a detached cockpit). Every one of those is persistent, so falling
+            // back to the level-hold and carrying on would fly the REST of the card with a different
+            // controller and still write a capture that reads as a clean run. End it instead, with
+            // the reason in the CSV's own '# stop' line, and say so once under [drone].
+            sp.Abort("the instructor is not flying this aircraft (Enabled / WriteControl / ControlRotorcraft?)");
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[drone] #{d.Id} the control law declined to engage — card aborted; level-hold from here.");
+            return LevelHold(d);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -510,15 +588,19 @@ namespace NuclearOptionMouseAim
         public readonly int      AircraftId;    // cached GetInstanceID(): the dictionary key must survive the aircraft being destroyed
         public readonly float    HoldAlt;       // MSL at spawn — what the built-in level-hold flies
 
-        // THE PHASE-2 HOOK. Return true if inputs were written (the caller then runs the game's FBW
-        // over them), false to leave this tick alone. It lives HERE, per drone, rather than as one
+        // Has this drone been offered a test card? One attempt, on its first pilot step (see
+        // OnPilotStep), so a suite that finishes — or was refused — is not restarted every tick.
+        public bool CardStarted;
+
+        // WHAT FLIES THIS DRONE. Return true if inputs were written (the caller then runs the game's
+        // FBW over them), false to leave this tick alone. It lives HERE, per drone, rather than as one
         // static on TestDrone, because N drones need N independent controllers — a single shared
         // delegate would force every drone through one instance's state, which is the same
         // whole-file-of-statics problem the control law is being unwound from right now.
         //
-        // Phase 2 attaches ChaseController here. Until then it is the trivial level-hold, which is
-        // NOT the mod's control law — see the comment on TestDrone.LevelHold.
-        public System.Func<Drone, bool> Fly = TestDrone.LevelHold;
+        // v0.87 (phase 2): ChaseCard — the mod's real control law when this drone is flying a card,
+        // and the trivial built-in level-hold when it is not.
+        public System.Func<Drone, bool> Fly = TestDrone.ChaseCard;
 
         public Drone(int id, Aircraft ac)
         {

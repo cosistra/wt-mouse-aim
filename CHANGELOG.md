@@ -3,6 +3,51 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.87.0
+
+**Uncrewed harness, phase 2: a drone flies the mod's real control law.** Everything under the
+consumer was already per-aircraft (`ChaseController` v0.82, `ScenarioPlayer` + `ManeuverRecorder`
+v0.86) — a drone's card demand was written and read by nothing, and `Drone.Fly` was still the
+built-in level-hold. Now a drone starts a test card on its own first pilot step and chases that
+card's demand through `ChaseController.Apply`: same law, same pipeline, same per-aircraft controller
+and recorder the human flies, so a drone capture and a crewed capture measure the same thing.
+**No gain, gate or schedule in the law changed.**
+
+- **The aim demand is a parameter, not a global.** `Apply(ac)` is now a one-line wrapper over
+  `Apply(ac, aimTarget)`; the player's wrapper passes `AimRig.AimForward` (one marker per process,
+  and it is the human's), a drone passes its own `ScenarioPlayer.AimDemand`. That is the single
+  reason `Apply` could not be shared before.
+- **What `Apply` reads that a drone does not have** was exactly three things, all one-per-process and
+  all the player's: the AimRig marker (passed in), the Rewired player-0 stick (the whole manual-override
+  block is now gated on `!_uncrewed`, so a drone never reads it — and can never drag the human's marker
+  onto its own nose via `ManualReorients`), and the native virtual-joystick crosshair in `FlightHud`
+  (same gate). Nothing else in the pipeline is player-scoped.
+- **`ChaseController._uncrewed`** is a per-instance bool with exactly one writer, `FlyUncrewed`, which
+  is reachable only from `TestDronePatch` → a dictionary an aircraft can only enter through
+  `TestDrone.Spawn`, which asserts `ac.Player == null`. So the crewed path cannot reach the new
+  branches; `check-architecture.py` now enforces both halves of that (one writer, one calling file)
+  rather than leaving it as an argument.
+- **`FlyUncrewed(ac, aimDir)`** is `BeginFrame` + `Apply` in one call, because a drone has one seam
+  where the player has two (prefix/postfix). The order is identical, and `TestDrone.OnPilotStep`
+  still runs `Aircraft.FilterInputs()` afterwards — the FBW pass no pilot state is there to run.
+- **The card owns the drone's throttle too.** `OnPilotStep` now calls `ScenarioPlayer.OwnInputs`
+  between the stick write and `FilterInputs`, mirroring the player's seam postfix. Without it a drone
+  would fly a whole card at whatever `ControlInputs.throttle` held, and `0` is the game's airbrake
+  trigger — the R18 failure, where a bad throttle read as a control-law energy failure.
+- **Cards start per drone, at its own spawn instant** (first pilot step, not at `Spawn`: a card's
+  first act is a placement that rigid-moves every part rigidbody, which is not a thing to do to a
+  half-built assembly). Per drone on purpose — one key starting N cards together would put every
+  replicate on the same segment boundary, which is exactly what the launch stagger exists to prevent.
+  `StartSuite` is the same body the player's run key calls; it refuses with its own `[card]` line when
+  no card is enabled for that airframe class, and the drone then level-holds.
+- **Refusals are loud.** If the instructor declines to engage mid-card (Enabled / WriteControl off, a
+  rotorcraft without `ControlRotorcraft`, a detached cockpit) the card is **aborted** with the reason
+  in the CSV's `# stop` line plus a `[drone]` warning — rather than quietly finishing the run on the
+  level-hold and writing a capture that reads as clean. The engage line itself is tagged `[drone]`.
+- The built-in level-hold survives for the one case with nothing to chase (no card running). It is
+  still not the mod's control law: never tune it, and never compare a level-hold capture against a
+  card capture.
+
 ## 0.86.0
 
 **`ScenarioPlayer` and `ManeuverRecorder` are per-aircraft instances.** They were the last two

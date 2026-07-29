@@ -110,6 +110,48 @@ def arch_version(src: str):
     return m.group(1) if m else None
 
 
+# The drone harness (v0.87) routes uncrewed aircraft through the SAME ChaseController.Apply the
+# human flies. What keeps the human's flight path out of it is one per-instance flag, `_uncrewed`,
+# which gates the three things in Apply that are one-per-process and all his: the AimRig marker, the
+# Rewired player-0 stick, and the FlightHud crosshair. That guarantee is only as good as its reach:
+#   * ONE writer of the flag — FlyUncrewed. A second assignment anywhere (a "reset", a convenience
+#     setter on the player's path) turns a compile-time-provable property into a runtime argument.
+#   * ONE file calling FlyUncrewed — TestDrone.cs, whose dictionary an aircraft can only enter
+#     through Spawn, which asserts `ac.Player == null`.
+# Neither is visible to the type system and neither fails to compile, so check it here.
+UNCREWED_FLAG = "_uncrewed"
+UNCREWED_ENTRY = "FlyUncrewed"
+UNCREWED_CALLERS = {"TestDrone.cs"}   # files allowed to call the uncrewed entry point
+
+
+def uncrewed_isolation(sources: dict) -> list:
+    """Problems with the crewed/uncrewed separation. `sources` maps filename -> C# source."""
+    problems, writers, callers = [], 0, set()
+    for name, src in sources.items():
+        clean = strip_comments_and_strings(src)
+        # assignments only: `_uncrewed = ...`, never `!_uncrewed` / `_uncrewed ?` reads
+        writers += len(re.findall(rf"\b{UNCREWED_FLAG}\s*=[^=]", clean))
+        # a call, not the declaration — the declaring file has a return type in front of the name
+        if re.search(rf"\b{UNCREWED_ENTRY}\s*\(", clean) and not re.search(
+                rf"\b\w+\s+{UNCREWED_ENTRY}\s*\(", clean):
+            callers.add(name)
+    if writers != 1:
+        problems.append(
+            f"`{UNCREWED_FLAG}` is assigned {writers} time(s); it must be exactly 1 (in "
+            f"{UNCREWED_ENTRY}). More than one writer means the crewed path can reach the uncrewed "
+            f"branches of ChaseController.Apply — the human's stick would fly a drone, or a drone "
+            f"would drag the human's aim marker."
+        )
+    stray = callers - UNCREWED_CALLERS
+    if stray:
+        problems.append(
+            f"{UNCREWED_ENTRY} is called from {sorted(stray)}; only {sorted(UNCREWED_CALLERS)} may "
+            f"call it (an aircraft reaches it only via TestDrone's dictionary, which Spawn gates on "
+            f"ac.Player == null)."
+        )
+    return problems
+
+
 def check(fix_version: bool) -> int:
     if not ARCH.exists():
         print(f"FAIL  {ARCH.name} is missing — the architecture diagram is not optional.")
@@ -142,9 +184,10 @@ def check(fix_version: bool) -> int:
             )
 
     # --- files + types in the node index ------------------------------------------------
-    all_types, patch_targets = set(), []
+    all_types, patch_targets, sources = set(), [], {}
     for p in cs_files:
         src = p.read_text(encoding="utf-8")
+        sources[p.name] = src
         if f"`{p.name}`" not in arch:
             problems.append(f"{p.name} is not named in ARCHITECTURE.md (add a node-index row)")
         for t in top_level_types(src):
@@ -162,6 +205,9 @@ def check(fix_version: bool) -> int:
                 f"Harmony patch {typ}.{member} is not listed in the "
                 f"'Game types we patch or read' table"
             )
+
+    # --- crewed / uncrewed separation (v0.87) -------------------------------------------
+    problems += uncrewed_isolation(sources)
 
     # --- recorder CSV contract ----------------------------------------------------------
     # The header string and the Sample() row are two hand-maintained lists that MUST stay in
@@ -312,6 +358,26 @@ def selftest() -> int:
     # ...and it must FAIL when they drift, which is the only thing this check is for.
     assert recorder_columns(rec.replace('"frameMs"', '"frameMs,extra"')) == (7, 6)
     assert recorder_columns("no recorder here") == (None, None)
+
+    # Crewed/uncrewed separation. The good shape passes; each way of breaking it is caught.
+    ok = {
+        "ChaseController.cs": """
+            private bool _uncrewed;
+            internal bool FlyUncrewed(Aircraft ac, Vector3 aimDir) { _uncrewed = true; return true; }
+            void Apply() { if (Cfg.ManualOverride.Value && !_uncrewed) { } }
+        """,
+        "TestDrone.cs": "bool ChaseCard(Drone d) { return ChaseController.For(ac).FlyUncrewed(ac, v); }",
+    }
+    assert uncrewed_isolation(ok) == [], uncrewed_isolation(ok)
+    # a second writer (the flag stops being provable from the call graph)
+    bad = dict(ok, **{"ChaseController.cs": ok["ChaseController.cs"] + "\nvoid R() { _uncrewed = false; }"})
+    assert len(uncrewed_isolation(bad)) == 1
+    # the player's seam calling the uncrewed entry point
+    bad = dict(ok, **{"ScenarioPlayer.cs": "void T() { ChaseController.For(ac).FlyUncrewed(ac, v); }"})
+    assert len(uncrewed_isolation(bad)) == 1
+    # a comment mentioning either is not a call and not a write
+    ok2 = dict(ok, **{"Cfg.cs": "// FlyUncrewed sets _uncrewed = true; see ChaseController"})
+    assert uncrewed_isolation(ok2) == [], uncrewed_isolation(ok2)
 
     # The real file, if we are running inside the repo: header and row must agree today.
     real = REPO / "Recording.cs"

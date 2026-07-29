@@ -182,15 +182,12 @@ namespace NuclearOptionMouseAim
         // card is running. The local player's card ALSO writes AimRig — that marker is the human's, one
         // per process, and it is what ChaseController.Apply reads — so for him this is a mirror and the
         // behaviour is v0.85's exactly.
-        // ponytail: a DRONE's demand currently has no consumer. Apply reads AimRig.AimForward, and
-        // nothing routes a drone through Apply yet — Drone.Fly is still the built-in level-hold.
-        // Phase 2 attaches the law there; the wiring in Apply is one line for a non-local aircraft:
-        //     if (sp.Playing) aimDir = sp.AimDemand;      // sp = ScenarioPlayer.For(aircraft)
-        // gated on Playing on purpose — after a card ends (or the altitude floor aborts it) this holds
-        // the LAST demand written, which is what the player's marker does too, but a drone with no
-        // card should fall through to whatever phase 2 decides its idle demand is rather than chase a
-        // dead card's final direction. Deliberately not done here: dead code until that lands, and it
-        // would put a speculative branch in the single hottest function in the mod.
+        // v0.87 (phase 2) gave this its consumer: TestDrone.ChaseCard passes it straight into
+        // ChaseController.FlyUncrewed, so a drone chases its own card through the same Apply the human
+        // flies. That call is gated on `Playing`, deliberately — after a card ends (or the altitude
+        // floor aborts it) this field holds the LAST demand written, exactly as the player's marker
+        // does, and a drone must not go on chasing a dead card's final direction; with no card it
+        // falls back to the harness's level-hold instead.
         public Vector3 AimDemand { get; private set; }
 
         private void SetDemand(Vector3 dir)

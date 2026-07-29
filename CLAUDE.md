@@ -102,6 +102,19 @@ Machine-specific paths are written as placeholders:
     anti-relay slew owns the dynamics. Separate levers on purpose: (a)'s risk is an upper-hemisphere
     regression, which is unattributable if both move under one `ScenarioArmToggle` knob. New recorder
     columns `bSup`/`bWt`/`phiLead`.
+    **v0.87 — the same law now flies UNCREWED aircraft** (harness phase 2), with no change to any
+    gain, gate or schedule. `Apply` reached for exactly three things that are one-per-*process* and
+    all of them the human's: the `AimRig` marker, the Rewired player-0 stick and the `FlightHud`
+    virtual-joystick crosshair. The marker became a **parameter** — `Apply(ac)` is a one-line wrapper
+    over `Apply(ac, aimTarget)` that passes `AimRig.AimForward`, and a drone passes its own
+    `ScenarioPlayer.For(ac).AimDemand` — and the other two are gated on `_uncrewed`, a per-instance
+    bool whose **only writer** is `FlyUncrewed(ac, aimDir)` (= `BeginFrame` + `Apply` in one call,
+    because a drone has ONE seam where the player has two). Without that gate a drone would be flown
+    by whatever the human's stick was doing and `ManualReorients` would drag *his* marker onto the
+    *drone's* nose. The crewed path cannot reach any of it by construction: `FlyUncrewed` is called
+    only from `TestDrone`, whose dictionary an aircraft can only enter through `Spawn`, which asserts
+    `ac.Player == null` — and `check-architecture.py` enforces the one-writer / one-calling-file pair,
+    since neither fails to compile.
     Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
@@ -157,8 +170,11 @@ Machine-specific paths are written as placeholders:
     prefix for the player and from **`TestDrone.OnPilotStep`, immediately before `Drone.Fly`**, for a
     drone — the same zero-tick property at that aircraft's own seam. Each instance publishes its
     demand as `AimDemand`; the local one *also* writes `AimRig.SetAimForward` (unchanged v0.85
-    behaviour). **A drone's `AimDemand` has no consumer yet** — `Apply` reads `AimRig.AimForward` and
-    nothing routes a drone through `Apply`; phase 2 wires it (see the `ponytail:` note on the field).
+    behaviour). **v0.87 gave `AimDemand` its consumer**: `TestDrone.ChaseCard` hands it to
+    `ChaseController.FlyUncrewed`, so a drone chases its own card through the same `Apply`. The other
+    two entry points a drone's seam drives are `StartSuite` (once, on the drone's first pilot step)
+    and `OwnInputs` (throttle, between the stick write and `FilterInputs`) — the same three the
+    player's seam uses, no second copy.
     Plays a card by writing the aim demand from the *seam prefix* (so `Apply` reads it the
     same tick — zero-tick lag is structural, don't move it), tags each segment via
     `ManeuverRecorder.SegmentTag`, and brackets the run with the recorder. Also **records** a card
@@ -206,8 +222,8 @@ Machine-specific paths are written as placeholders:
     a launch stagger. Concurrent A/B needs the swept knob to become per-aircraft state read through
     the controller instead of through `Cfg` — a change to how the law reads config, not to this
     scheduler.
-  - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81, **phase 1** of the uncrewed
-    harness). Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
+  - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81 harness, **v0.87 phase 2**).
+    Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger. `TestDrone` is the manager (live list + a dictionary keyed by
     `Aircraft.GetInstanceID()`, the launch countdown, and the fixed-step `FrameDt` sample);
     `Drone` is one aircraft and carries its **own** `Fly` delegate, because N drones need N
@@ -221,10 +237,19 @@ Machine-specific paths are written as placeholders:
     `Pilot.SetStartingAiState` bail straight to `parkedState`, so the AI states are never built.
     Needs an **active server** — single player is a host, so SP and hosting work; as an MP client the
     spawn is refused with a log line. `Cfg.DroneEnabled` is off by default and the subsystem is inert
-    while it is (the hotkeys are not even read; the postfix is one int compare). Phase 2 attaches
-    `ChaseController` to `Drone.Fly` — unblocked in v0.82, when the controller became one instance
-    per aircraft; the built-in level-hold there is a deliberately trivial
-    altitude/wings hold and is **not** the mod's control law — never tune it or compare against it.
+    while it is (the hotkeys are not even read; the postfix is one int compare).
+    **v0.87 — PHASE 2: the mod's real control law flies a drone.** `Drone.Fly` defaults to
+    `TestDrone.ChaseCard`: card running ⇒ `ChaseController.For(ac).FlyUncrewed(ac, sp.AimDemand)`; no
+    card ⇒ the built-in level-hold, which is a deliberately trivial altitude/wings hold and is **not**
+    the mod's control law (never tune it, never compare a level-hold capture against a card capture);
+    the instructor *declining* mid-card ⇒ **abort the card** with the reason in the CSV's `# stop`
+    line, because finishing the run on a different controller writes a capture that reads as clean.
+    `OnPilotStep` starts each drone's card on **its own first pilot step** — not at `Spawn` (a card's
+    first act rigid-moves every part rigidbody, which must not hit a half-built assembly) and not from
+    one shared key (that would align every replicate's segment boundaries, which is what the launch
+    stagger exists to prevent) — and calls `ScenarioPlayer.OwnInputs` for the throttle between the
+    stick write and `FilterInputs`, mirroring the player's seam postfix (a card at `throttle == 0` is
+    the game's airbrake trigger; that was R18's false "energy failure").
     Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
     clock that exists before any drone does. **Both** removal paths (`Despawn` and `PruneDead`) call
     one `ForgetState(aircraftId)` that drops **every** per-aircraft registry — `ScenarioPlayer`,
@@ -307,11 +332,14 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   per-segment spread across N runs — the noise floor, and the A/B of a law change. It **groups by
   airframe and refuses to pool**, and excludes truncated segments rather than blending them; heed
   both warnings rather than working around them.
-- **Uncrewed drones (v0.81).** Tick `Drone/DroneEnabled` in F1, then the spawn key launches
-  `DroneCount` drones `DroneStaggerSec` apart. Everything it does is one grep: `[drone]` in
+- **Uncrewed drones (v0.81; flying the real law since v0.87).** Tick `Drone/DroneEnabled` in F1, tick
+  the card(s) you want in `Scenario Cards`, then the spawn key launches `DroneCount` drones
+  `DroneStaggerSec` apart — **each starts that card itself and flies it with the mod's control law**,
+  writing its own CSV (`d<N>-<airframe>` in the filename). Everything it does is one grep: `[drone]` in
   `LogOutput.log` covers spawn/despawn, every refusal (no server, unknown `DroneAirframe`, no
-  `Spawner`), a drone the game removed under us, and `[drone] frame hitch` for any rendered frame over
-  50 ms. **A refusal is always a log line, never a silent no-op** — the harness runs unattended, so a
+  `Spawner`, the instructor declining to engage), a drone the game removed under us, and
+  `[drone] frame hitch` for any rendered frame over 50 ms. A drone's own engage line is tagged
+  `[drone]` too; `[card]` lines carry the card/segment progress for every aircraft flying one. **A refusal is always a log line, never a silent no-op** — the harness runs unattended, so a
   key that appears to do nothing has to be explainable after the fact. `TestDrone.FrameDt` (the
   fixed-step `Time.unscaledDeltaTime` sample) is the signal the stagger exists to defend against.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts

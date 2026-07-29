@@ -281,6 +281,20 @@ namespace NuclearOptionMouseAim
         private static readonly Dictionary<int, ChaseController> _byAc = new Dictionary<int, ChaseController>();
         private Aircraft _ac;   // the aircraft this controller belongs to — read ONLY by the eviction sweep
 
+        // UNCREWED (v0.87, harness phase 2). "Nobody is sitting in this aircraft", and therefore: do
+        // not read the human's Rewired stick, do not move the human's AimRig marker, do not touch the
+        // human's HUD. Those three are the ONLY things in this class that are one-per-process rather
+        // than one-per-aircraft, and every one of them is the player's.
+        //
+        // It is a plain instance bool, set by FlyUncrewed and never cleared, because an aircraft does
+        // not change crew state under its own controller (Forget drops both together). That is also
+        // what makes non-negotiable #1 checkable rather than argued: the crewed path CANNOT reach the
+        // uncrewed branches, because the only writer is FlyUncrewed, which is only reachable from
+        // TestDronePatch, which resolves against a dictionary an aircraft can only enter through
+        // TestDrone.Spawn — and Spawn asserts `ac.Player == null` before registering.
+        // check-architecture.py enforces both halves of that sentence.
+        private bool _uncrewed;
+
         // THE HUD'S CONTROLLER. OnGUI has no aircraft in hand and must show the LOCAL PLAYER's
         // numbers — never a drone's, which is the whole reason the controller stopped being static.
         // BeginFrame publishes itself here only when its aircraft is the one the game calls local, so
@@ -654,8 +668,12 @@ namespace NuclearOptionMouseAim
                 _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
                 _aimAzRateFilt = 0f; _aimAzAcId = -1;     // fresh marker-rate feed-forward (v0.78)
                 _prevOffTrk = -1f; _stallFilt = 0f;       // fresh closure-stall gate (v0.83) — never wind on an engage step
-                HideNativeVirtualJoystick();
-                WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
+                // The native virtual-joystick crosshair is the LOCAL PLAYER's HUD (SceneSingleton<FlightHud>),
+                // one per process. A drone engaging must not reach into it — it isn't competing for the
+                // human's mouse, and blanking his crosshair from a drone's engage would be the harness
+                // changing something the player can see.
+                if (!_uncrewed) HideNativeVirtualJoystick();
+                WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged{(_uncrewed ? " [drone]" : "")}.");
             }
             else if (!active && _wasActive)
             {
@@ -668,8 +686,39 @@ namespace NuclearOptionMouseAim
             return active;
         }
 
-        // Called from the postfix every frame (native may or may not have run).
-        public void Apply(Aircraft aircraft)
+        // THE UNCREWED ENTRY (v0.87, harness phase 2). One call, because a drone has ONE seam
+        // (TestDronePatch's postfix on Pilot_OnAeroInputsApplied) where the player has two — the
+        // prefix that runs BeginFrame and the postfix that runs Apply. The ORDER is the same either
+        // way, and that is the point: BeginFrame decides ownership and seeds the engage, Apply writes
+        // the stick, and the caller runs Aircraft.FilterInputs afterwards, exactly as the game does
+        // for a pilot state.
+        //
+        // aimDir is THIS aircraft's demand (its ScenarioPlayer's AimDemand). The player's marker is
+        // one per process and is his; passing the demand in is what lets N aircraft chase N different
+        // directions through one law with no global in the middle.
+        //
+        // Returns false when the instructor declined to fly (see BeginFrame's `active`), having
+        // written NOTHING — the caller then owns the tick. It deliberately does not fall through to
+        // the disengage ramp: that ramp exists to hand back to the game's native stick, and an
+        // uncrewed aircraft has no native stick to hand back to.
+        internal bool FlyUncrewed(Aircraft ac, Vector3 aimDir)
+        {
+            _uncrewed = true;
+            // Same classification the player's seam makes (PilotPlayerStatePatch.TryResolve), from the
+            // same field. pilotStrength is 1: G-LOC is a property of the human in the seat, and there
+            // isn't one — an uncrewed airframe is limited by its own structure, which the game's own
+            // damage model already enforces.
+            bool fixedWing = ac.GetAircraftParameters().takeoffDistance > 0f;
+            if (!BeginFrame(ac, fixedWing, 1f)) return false;
+            Apply(ac, aimDir);
+            return true;
+        }
+
+        // Called from the postfix every frame (native may or may not have run). The player's demand is
+        // the world-locked marker — one AimRig per process, and it is the human's.
+        public void Apply(Aircraft aircraft) => Apply(aircraft, AimRig.AimForward);
+
+        public void Apply(Aircraft aircraft, Vector3 aimTarget)
         {
             var ci = aircraft.GetInputs();
             if (ci == null) return;
@@ -704,7 +753,7 @@ namespace NuclearOptionMouseAim
                         ? (Quaternion.AngleAxis(-aoaDeg, hRight) * _levelHeading).normalized
                         : _levelHeading;
                 }
-                else aimDir = AimRig.AimForward;
+                else aimDir = aimTarget;   // the player's marker, or a drone's own card demand
 
                 // Marker direction in the body frame (unit): x = right, y = up, z = forward.
                 Vector3 local = t.InverseTransformDirection(aimDir);
@@ -1444,8 +1493,13 @@ namespace NuclearOptionMouseAim
                 // touching it, the instructor flies it. Pitch/yaw hand back to their proportional pull;
                 // roll hands back to the instructor's bank-to-turn (which levels the wings on-target). The
                 // chase keeps running underneath (_out*), so the handback is seamless on every axis.
+                // v0.87: `!_uncrewed` — the whole block is about the HUMAN. RewiredPlayer() is player 0,
+                // one input device per process, so without this gate a drone would be flown by whatever
+                // the pilot's stick happened to be doing, and (worse) AimRig.SetAimForward below would
+                // drag HIS marker onto the DRONE's nose. The gate is on the block, not inside it, so a
+                // drone never reads the stick at all.
                 float pOut = _outP, rOut = _outR, yOut = _outY;
-                if (Cfg.ManualOverride.Value)
+                if (Cfg.ManualOverride.Value && !_uncrewed)
                 {
                     var pl = RewiredPlayer();
                     if (pl != null)
