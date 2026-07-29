@@ -1,0 +1,832 @@
+#!/usr/bin/env python3
+"""Score a maneuver-recorder CSV into per-segment metrics (instructor-feedback-loop M0).
+
+Stdlib only (no pandas/numpy), reuses analyze-wobble.py's CSV/header parsing, episode
+(oscillation) detector and pitch-authority (relay) check rather than reimplementing them.
+
+    python scorecard.py <recording.csv> [more.csv ...]        # human-readable table to stdout
+    python scorecard.py --json score.json <recording.csv>     # write score.json (exactly 1 CSV)
+    python scorecard.py --selftest                             # in-memory asserts, no file needed
+
+SCOPE (v1 / M0, see plans/instructor-feedback-loop.md #4 and #8): RAW metrics only — no grading
+against an airframe's theoretical bound (that's M3). Every metric is still stored as
+{"value": X, "grade": null} so M3 can fill in "grade" later without reshaping this JSON.
+
+COLUMNS: the base 45-column recorder header (see Recording.cs) is always present. M0 adds nine
+more at the END — alt, airDensity, posX/Y/Z, velX/Y/Z, segTag — plus an optional sibling sidecar
+`<basename>.airframe.json`. Older captures (and anything in debugtests/ predating this change)
+won't have them. Every column is looked up BY HEADER NAME (csv.DictReader), never by position,
+and a metric whose input column is missing is simply skipped with a reason recorded in that
+segment's "skipped" dict — never a crash.
+
+SEGMENTATION: consecutive rows sharing the same `segTag` form one segment; a CSV with no segTag
+column at all becomes a single segment named "unsegmented". The segment TYPE is inferred from the
+tag via TAG_TYPE_RULES (az_step, el_step, fine_track, sustained_turn, reversal, astern_wrap,
+micro_step, hover_hold, translate, bobup, transition, arm); anything else — including "unsegmented"
+— gets the generic metric set (the AoA/G discipline block, the only metrics that need no
+segment-type logic). `arm` segments are reported (tag/type/count/duration) but carry no metrics —
+the plan marks the post-spawn arm window excluded from scoring. A tag that matches nothing in
+TAG_TYPE_RULES produces a WARNING (table output + the JSON's "warnings" list) rather than quietly
+falling back to the generic set — see TAG_TYPE_RULES's docstring for why that used to be silent.
+"""
+import csv, json, math, os, re, statistics, sys
+import importlib.util as _ilu
+
+# --- reuse analyze-wobble.py's parsing/detector helpers (hyphenated filename => can't `import`) --
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_spec = _ilu.spec_from_file_location("analyze_wobble", os.path.join(_HERE, "analyze-wobble.py"))
+aw = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(aw)
+
+G0 = 9.81  # m/s^2, for energy-height Eh = alt + V^2/2g (plan #4)
+
+# Same per-signal dead-bands analyze-wobble's analyze() scans for oscillation episodes — kept as a
+# local literal (that tuple isn't a module-level constant there) rather than editing that file.
+WOBBLE_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05), ("aoa", 2.0))
+
+# Demand-scaled settle band for angular steps (see step_response_metrics). 10% of the step,
+# floored at 0.05 deg (~0.9 mil — tighter than gun dispersion, so "settled" still means settled)
+# and capped at 0.5 deg so steps >= 5 deg keep the classic fixed band.
+BAND_FRAC, BAND_MIN_DEG, BAND_MAX_DEG = 0.10, 0.05, 0.5
+
+# terminalOffDeg averages the last this-many seconds of a segment. 1.0 s ~= 16 recorder samples at
+# the ~16 Hz sample rate (alternating 0.050/0.067 s steps), enough to average out the 0.01 deg
+# column quantization without smearing in the approach.
+TERMINAL_WINDOW_S = 1.0
+
+# Tag -> metric-type mapping. The real tags are ScenarioPlayer.cs's, not free-form: the fixed-wing
+# card emits arm/az10/az30/az90/az150/elUp/elDn/fine/turn360/reversal/astern/micro1..micro10; the
+# rotorcraft card adds hover/hoveryaw/bobup on top (see FixedWingSegs/BuiltIns). The OLD table here
+# was a list of prefixes ("az_step", "hover_hold", ...) that NO real tag ever starts with — so
+# infer_type() silently returned "unknown" for 19 of 21 segments in a real capture, and every
+# step-response/fine-tracking/sustained-turn metric went uncomputed with no warning at all (only
+# arm/reversal happened to literally equal their own "prefix"). ORDER MATTERS: patterns are tried in
+# order and the first match wins, so a more specific tag (hoveryaw) must precede a looser one it is
+# a prefix of (hover) or it would always resolve to the loose one first.
+TAG_TYPE_RULES = [
+    (re.compile(r"arm"),        "arm"),
+    (re.compile(r"reversal"),   "reversal"),
+    (re.compile(r"astern"),     "astern_wrap"),
+    (re.compile(r"az\d+"),      "az_step"),
+    (re.compile(r"elUp"),       "el_step"),
+    (re.compile(r"elDn"),       "el_step"),
+    (re.compile(r"fine"),       "fine_track"),
+    (re.compile(r"turn360"),    "sustained_turn"),
+    (re.compile(r"micro\d+"),   "micro_step"),        # micro1 .. micro10, digit count doesn't matter
+    (re.compile(r"hoveryaw"),   "hover_hold"),         # MUST precede "hover" below or it's swallowed
+    (re.compile(r"hover"),      "hover_hold"),
+    (re.compile(r"bobup"),      "bobup"),
+    (re.compile(r"translate"),  "translate"),          # planned (Appendix A) -- no card emits it yet
+    (re.compile(r"transition"), "transition"),         # planned (Appendix A) -- no card emits it yet
+]
+
+
+# --- CSV loading ---------------------------------------------------------------------------------
+
+def load_csv(path):
+    """(meta, rows, cols). meta has the same shape as analyze_wobble.load()'s (so fbw_params/
+    fbw_corner are directly reusable) — reimplemented locally (not a call to analyze_wobble.load())
+    because this meta also carries the `# card` line and this is the only place that returns `cols`,
+    the header's field-name set, for "does this column exist" checks (never by index). The
+    numeric-vs-string column split itself is NOT a second copy: it's aw.STRING_COLS. scorecard.py
+    already imports analyze-wobble.py (as `aw`) and that module has no reason to import this one
+    back, so keeping the one definition in the module that's already the import target is the
+    direction that can't go circular. Two separate copies is exactly how this broke before: aw.load()
+    had its own hardcoded ("phase","controlLaw") tuple missing segTag, and every row of a test-card
+    capture — which is to say every row with a real segTag — silently failed to parse there."""
+    meta = {"cfg": "", "headers": [], "cfg_marks": [], "session": "", "card": ""}
+    data = []
+    with open(path, newline="") as f:
+        for raw in f:
+            if raw.startswith("#"):
+                s = raw.rstrip("\n")
+                if s.startswith("# config"):
+                    meta["cfg"] = s[8:].strip()
+                elif s.startswith("# cfg t="):
+                    m = re.match(r"# cfg t=([\d.]+)\s+(.*)", s)
+                    if m:
+                        meta["cfg_marks"].append((float(m.group(1)), m.group(2)))
+                elif s.startswith("# card "):
+                    # v0.71 (M1): a scripted card run names itself here. The ledger groups runs by
+                    # card, so this is what makes "same card, two builds" comparable.
+                    meta["card"] = s[7:].strip()
+                else:
+                    meta["headers"].append(s)
+                    ms = re.search(r"session=(\S+)", s)
+                    if ms:
+                        meta["session"] = ms.group(1)
+                continue
+            data.append(raw)
+    rdr = csv.DictReader(data)
+    cols = set(rdr.fieldnames or [])
+    rows = []
+    dropped = 0
+    for r in rdr:
+        row, ok = {}, True
+        for k, v in r.items():
+            if v is None or v == "":
+                continue
+            if k in aw.STRING_COLS:
+                row[k] = v
+            else:
+                try:
+                    row[k] = float(v)
+                except ValueError:
+                    ok = False
+                    break
+        if ok:
+            rows.append(row)
+        else:
+            dropped += 1
+    if dropped:
+        # Same fix, same wording as analyze_wobble.load() (see that function's docstring for the
+        # v0.71 bug this class of silent drop caused) -- a couple of corrupt lines is plausible, but
+        # a large fraction almost always means a column is missing from aw.STRING_COLS, not bad data.
+        print(f"WARNING: {path}: dropped {dropped}/{dropped + len(rows)} row(s) that failed to parse "
+              f"(non-numeric value in a column outside STRING_COLS={sorted(aw.STRING_COLS)})",
+              file=sys.stderr)
+    return meta, rows, cols
+
+
+def sidecar_path(csv_path):
+    return os.path.splitext(csv_path)[0] + ".airframe.json"
+
+
+def provenance(path, meta):
+    prov = {"file": os.path.basename(path)}
+    if meta.get("session"):
+        prov["session"] = meta["session"]
+    if meta.get("card"):
+        prov["card"] = meta["card"]
+    for h in meta["headers"]:
+        m = re.match(r"# mouseaim recording\s+v(\S+)\s+run=(\S+)\s+rec=(\S+)", h)
+        if m:
+            prov["modVersion"], prov["run"], prov["rec"] = m.groups()
+        m2 = re.match(r"# aircraft '(.*)'", h)
+        if m2:
+            prov["aircraft"] = m2.group(1)
+        # v0.72 footer: why the run ended. A capture aborted at the altitude floor or by a stick
+        # touch is otherwise indistinguishable from a clean completion — it just has fewer rows —
+        # so without this a batch silently averages truncated runs in with whole ones.
+        m3 = re.match(r"# stop .*?reason=(.*)", h)
+        if m3:
+            prov["stop"] = m3.group(1).strip()
+            prov["aborted"] = prov["stop"].startswith("abort:")
+    if meta.get("cfg"):
+        prov["config"] = meta["cfg"]
+    fbw = aw.fbw_params(meta)  # reused as-is: same meta shape
+    if fbw:
+        prov["fbw"] = fbw
+    side = sidecar_path(path)
+    if os.path.isfile(side):
+        try:
+            with open(side, encoding="utf-8") as f:
+                prov["airframeInfo"] = json.load(f)
+        except (OSError, ValueError) as e:
+            prov["airframeInfoError"] = str(e)
+    return prov
+
+
+# --- segmentation ----------------------------------------------------------------------------
+
+def group_segments(rows, cols):
+    """[(tag, rows)] — consecutive rows sharing segTag form one segment (mirrors analyze_wobble's
+    own segment()-by-phase, reimplemented here because that one is hardcoded to the "phase" key)."""
+    if "segTag" not in cols:
+        return [("unsegmented", rows)]
+    segs = []
+    for r in rows:
+        tag = r.get("segTag") or "unsegmented"
+        if not segs or segs[-1][0] != tag:
+            segs.append((tag, [r]))
+        else:
+            segs[-1][1].append(r)
+    return segs
+
+
+def infer_type(tag):
+    for pattern, t in TAG_TYPE_RULES:
+        if pattern.match(tag):
+            return t
+    return "unknown"
+
+
+def _tag_warning(tag, seg_type):
+    """None, or a WARNING string, for one segment's tag -> type resolution. "unsegmented" is the
+    sentinel group_segments() uses when there is no segTag column at all (a legacy hand-flown
+    capture) — that is normal, not a defect, and must never warn. Anything else that resolves to
+    "unknown" is either a typo'd tag or a new card segment nobody taught TAG_TYPE_RULES about, and
+    both of those need to be loud: the actual defect here was never the mismatch itself, it was that
+    a mismatch produced confident-looking output ("unknown  n=240  dur=14.9s") with almost every
+    metric silently missing and nothing telling you to distrust it."""
+    if seg_type != "unknown" or tag == "unsegmented":
+        return None
+    return (f"segment tag '{tag}' does not match any known type in TAG_TYPE_RULES — only the "
+            f"generic AoA/G metrics were computed for it (no step-response/fine-tracking/etc). "
+            f"Add it to TAG_TYPE_RULES if this is a real card segment.")
+
+
+# --- generic metric building blocks -----------------------------------------------------------
+
+def rms(vals):
+    return math.sqrt(sum(v * v for v in vals) / len(vals)) if vals else None
+
+
+def signed_overshoot(vals):
+    """Real overshoot off a SIGNED error signal (azErr/elevErr): find the first sign change, then
+    return the worst |error| from there on — i.e. only error on the FAR side of the target counts.
+    None when the signal never crosses (never reached the target, so nothing was overshot); 0.0 only
+    if the post-crossing tail is empty/flat-zero. The reference sign is the first NON-ZERO sample,
+    not literally the first one, because the columns are quantized to 0.01 deg and a segment can
+    legitimately open at exactly 0.00.
+    # ponytail: sample-wise, no interpolation of the crossing instant or of the peak. Ceiling is the
+    # ~16 Hz sample rate + 0.01 deg quantization (~+-0.03 deg on a fast swing); parabolic-fit the
+    # peak only if a change ever has to be resolved below that."""
+    sgn = lambda v: (v > 0) - (v < 0)
+    s0 = next((sgn(v) for v in vals if v), None)
+    if s0 is None:
+        return None                                  # dead-flat signal: no crossing at all
+    i = next((k for k, v in enumerate(vals) if v and sgn(v) != s0), None)
+    if i is None:
+        return None                                  # never crossed to the far side
+    tail = vals[i:]
+    return max(abs(v) for v in tail) if tail else 0.0
+
+
+def pointing_metrics(t, rows, cols):
+    """Pointing-error metrics computed for EVERY segment type (not just fine_track). Same shape as
+    aoa_g_metrics: (metrics, skipped).
+      rmsPointingErrorDeg - RMS of `off` (unchanged definition; was fine_track-only, which hid a
+                            steady ~9.4 deg azimuth lag through the whole 30 s turn360)
+      minOffDeg           - best approach anywhere in the segment ("got there then drifted" vs "never got there")
+      terminalOffDeg      - mean `off` over the last TERMINAL_WINDOW_S ("how badly it missed when time ran out")
+      overshootAzDeg /
+      overshootElDeg      - signed_overshoot() of azErr / elevErr (None = never crossed)
+      entryAzSign         - sign of azErr in the FIRST sample. Exists for `astern`: that segment
+                            commands a 180 deg reversal with the tie deliberately unbroken, so the
+                            wrap direction is decided by a sub-0.35 deg residual carried in from the
+                            previous segment and it changes terminal error ~4x. Recording the branch
+                            turns one unusable population into two scorable ones."""
+    m, skipped = {}, {}
+    if "off" in cols:
+        offs = [r.get("off", 0.0) for r in rows]
+        m["rmsPointingErrorDeg"] = rms(offs)
+        m["minOffDeg"] = min(offs)
+        # 1e-9: same boundary epsilon as step_response_metrics -- a sample landing exactly on the
+        # window edge must not fall out of it on an IEEE754 rounding of the subtraction.
+        tail = [o for ti, o in zip(t, offs) if ti >= t[-1] - TERMINAL_WINDOW_S - 1e-9]
+        m["terminalOffDeg"] = statistics.fmean(tail) if tail else None
+    else:
+        skipped["rmsPointingErrorDeg"] = skipped["minOffDeg"] = skipped["terminalOffDeg"] = "missing column: off"
+    if "azErr" in cols:
+        az = [r.get("azErr", 0.0) for r in rows]
+        m["overshootAzDeg"] = signed_overshoot(az)
+        m["entryAzSign"] = (az[0] > 0) - (az[0] < 0)
+    else:
+        skipped["overshootAzDeg"] = skipped["entryAzSign"] = "missing column: azErr"
+    if "elevErr" in cols:
+        m["overshootElDeg"] = signed_overshoot([r.get("elevErr", 0.0) for r in rows])
+    else:
+        skipped["overshootElDeg"] = "missing column: elevErr"
+    return m, skipped
+
+
+def step_response_metrics(t, err, settle_band=0.5, settle_dur=1.0, rise_frac=0.9):
+    """Classic step-response timing off an unsigned ERROR/DEVIATION signal that starts near the
+    step size and decays toward 0 (works directly on `off`, or on the deviation to_deviation()
+    builds for a rising response). None if the segment is too short to say anything.
+      demand      - step size, taken as the peak within the first ~10% of samples (absorbs a
+                    1-2 sample capture lag right at the jump)
+      riseTime90  - first time `err` falls to <= (1-rise_frac)*demand, i.e. 90% of the way there
+      settleTime  - first time `err` enters the settle band and STAYS there continuously for
+                    settle_dur seconds (None if it never does)
+      overshoot   - worst re-excursion above the band AFTER the signal first touched it
+                    (0.0 if it never leaves again, None if it never gets there at all)
+      settleBand  - the band actually used (returned so a score is self-explaining)
+
+    settle_band=None derives the band from the demand: 10% of the step, clamped to
+    [BAND_MIN_DEG, BAND_MAX_DEG]. A FIXED band cannot serve both ends of the card — 0.5 deg is
+    right for a 90 deg slew but is WIDER THAN THE WHOLE DEMAND on a 0.2-1 deg micro-step, which
+    would report "settled at t=0" and silently make the micro-step segment (the high-q
+    small-correction regime) unmeasurable. Steps >= 5 deg still get exactly 0.5 deg, so
+    large-step scores are unchanged.
+    """
+    n = len(t)
+    if n < 2:
+        return None
+    t0 = t[0]
+    eps = 1e-9  # boundary epsilon: e.g. 1.0-0.9 != 0.1 exactly in IEEE754, so an exact-equality
+                # sample would otherwise land on the wrong side of the threshold by one sample.
+    demand = max(err[:max(1, n // 10)])
+    if settle_band is None:
+        settle_band = min(BAND_MAX_DEG, max(BAND_MIN_DEG, BAND_FRAC * demand))
+    if demand <= eps:
+        return {"demand": 0.0, "riseTime90": 0.0, "settleTime": 0.0, "overshoot": 0.0,
+                "settleBand": settle_band}
+    thresh = demand * (1.0 - rise_frac)
+    rise_t = next((ti - t0 for ti, e in zip(t, err) if e <= thresh + eps), None)
+
+    settle_t, first_in_band = None, None
+    i = 0
+    while i < n:
+        if err[i] > settle_band + eps:
+            i += 1
+            continue
+        if first_in_band is None:
+            first_in_band = i
+        j = i
+        while j < n and err[j] <= settle_band + eps:
+            j += 1
+        if t[j - 1] - t[i] >= settle_dur:
+            settle_t = t[i] - t0
+            break
+        i = j
+
+    # The COMBINED-UNSIGNED overshoot: `err` here is `off`, total angular offset, which cannot go
+    # negative — so on a large step max(tail) IS the band-entry sample and this evaluates to exactly
+    # 0.0 by construction (az10/az30/az90/elUp/reversal all read 0.0 across four R19 runs). Kept
+    # unchanged for continuity. The real per-axis overshoot is signed_overshoot() /
+    # overshootAzDeg / overshootElDeg in pointing_metrics().
+    overshoot = None
+    if first_in_band is not None:
+        tail = err[first_in_band + 1:]
+        overshoot = max(0.0, max(tail) - settle_band) if tail else 0.0
+    return {"demand": demand, "riseTime90": rise_t, "settleTime": settle_t, "overshoot": overshoot,
+            "settleBand": settle_band}
+
+
+def to_deviation(response, plateau_frac=0.2):
+    """Turn a RISING response (distance travelled toward a commanded translate/bob-up) into the
+    same decaying-error shape step_response_metrics expects: plateau = median of the tail
+    plateau_frac of samples (the settled value); deviation = |plateau - response(t)|."""
+    n = len(response)
+    tail = response[-max(1, int(n * plateau_frac)):]
+    plateau = statistics.median(tail)
+    return [abs(plateau - r) for r in response], plateau
+
+
+def hover_metrics(t, xs, ys, zs):
+    n = len(t)
+    if n < 2:
+        return {}
+    mx, my, mz = statistics.fmean(xs), statistics.fmean(ys), statistics.fmean(zs)
+    dists = [math.sqrt((xs[i] - mx) ** 2 + (ys[i] - my) ** 2 + (zs[i] - mz) ** 2) for i in range(n)]
+    dur = t[-1] - t[0]
+    dx, dy, dz = xs[-1] - xs[0], ys[-1] - ys[0], zs[-1] - zs[0]
+    drift = math.sqrt(dx * dx + dy * dy + dz * dz) / dur if dur > 0 else None
+    return {"positionRMSM": rms(dists), "driftRateMS": drift}
+
+
+def aoa_g_metrics(rows, cols):
+    """AoA peak / % time on limiter / G peak / sustained-G — applies to every non-excluded segment
+    regardless of type. aoaGU/aoaGD are the mod's own ceiling-gate signals (1 = fully open); "on
+    limiter" = either gate pulled below ~1."""
+    m, skipped = {}, {}
+    if "aoa" in cols:
+        m["aoaPeakDeg"] = max(abs(r.get("aoa", 0.0)) for r in rows)
+    else:
+        skipped["aoaPeakDeg"] = "missing column: aoa"
+    if {"aoaGU", "aoaGD"} <= cols:
+        n = len(rows)
+        on_lim = sum(1 for r in rows if r.get("aoaGU", 1.0) < 0.999 or r.get("aoaGD", 1.0) < 0.999)
+        m["aoaLimiterActivePct"] = 100.0 * on_lim / n if n else 0.0
+    else:
+        skipped["aoaLimiterActivePct"] = "missing column(s): aoaGU/aoaGD"
+    if "g" in cols:
+        gs = [r.get("g", 0.0) for r in rows]
+        m["gPeak"] = max(gs)
+        m["gSustained"] = statistics.median(gs)  # median: robust to brief peaks, unlike a mean
+    else:
+        skipped["gPeak"] = skipped["gSustained"] = "missing column: g"
+    return m, skipped
+
+
+def _cap(s):
+    return s[0].upper() + s[1:]
+
+
+def wobble_scan(t, rows, cols, dur):
+    """Oscillation-episode counts/frequencies via analyze_wobble.episodes() — the same detector,
+    same signals/dead-bands, that analyze-wobble.py's own analyze() scans. Also stick sign-flip
+    rate per axis via analyze_wobble.crossings()."""
+    m = {}
+    for axis, lbl in (("outP", "P"), ("outR", "R"), ("outY", "Y")):
+        if axis in cols:
+            cnt = len(aw.crossings(None, [r.get(axis, 0.0) for r in rows], 0.05))
+            m[f"stickFlipRate{lbl}"] = cnt / dur if dur > 0 else 0.0
+    for name, dead in WOBBLE_SIGNALS:
+        if name not in cols:
+            continue
+        eps = aw.episodes(t, [r.get(name, 0.0) for r in rows], dead)
+        m[f"wobbleEpisodes{_cap(name)}"] = len(eps)
+        if eps:
+            worst = max(eps, key=lambda e: e["dur"])
+            m[f"wobbleFreqHz{_cap(name)}"] = worst["freq"]
+    return m
+
+
+# --- per-segment dispatch -----------------------------------------------------------------------
+
+def compute_segment(tag, seg_type, rows, cols):
+    n = len(rows)
+    t = [r["t"] for r in rows]
+    dur = (t[-1] - t[0]) if n >= 2 else 0.0
+    excluded = seg_type == "arm"
+    metrics, skipped = {}, {}
+
+    if not excluded:
+        m, s = aoa_g_metrics(rows, cols)
+        metrics.update(m)
+        skipped.update(s)
+        m, s = pointing_metrics(t, rows, cols)   # every segment type, not just fine_track
+        metrics.update(m)
+        skipped.update(s)
+
+        if seg_type in ("az_step", "el_step", "micro_step"):
+            if "off" in cols:
+                sr = step_response_metrics(t, [r.get("off", 0.0) for r in rows], settle_band=None)
+                if sr:
+                    metrics["settleBandDeg"] = sr["settleBand"]
+                    metrics["demandDeg"] = sr["demand"]
+                    metrics["riseTime90"] = sr["riseTime90"]
+                    metrics["settleTime"] = sr["settleTime"]
+                    metrics["overshootDeg"] = sr["overshoot"]
+                else:
+                    skipped["riseTime90"] = "segment too short (<2 samples)"
+            else:
+                skipped["riseTime90"] = "missing column: off"
+
+        elif seg_type == "fine_track":
+            metrics.update(wobble_scan(t, rows, cols, dur))   # rmsPointingErrorDeg: pointing_metrics above
+
+        elif seg_type == "sustained_turn":
+            if "headingRateFilt" in cols:
+                metrics["meanTurnRateDegS"] = statistics.fmean(abs(r.get("headingRateFilt", 0.0)) for r in rows)
+            else:
+                skipped["meanTurnRateDegS"] = "missing column: headingRateFilt"
+            if "spd" in cols:
+                metrics["deltaTAS"] = rows[-1].get("spd", 0.0) - rows[0].get("spd", 0.0)
+            else:
+                skipped["deltaTAS"] = "missing column: spd"
+            if {"alt", "spd"} <= cols:
+                eh0 = rows[0]["alt"] + rows[0].get("spd", 0.0) ** 2 / (2 * G0)
+                eh1 = rows[-1]["alt"] + rows[-1].get("spd", 0.0) ** 2 / (2 * G0)
+                metrics["deltaEnergyHeightM"] = eh1 - eh0
+            else:
+                skipped["deltaEnergyHeightM"] = "missing column: alt"
+
+        elif seg_type in ("reversal", "astern_wrap"):
+            if "off" in cols:
+                sr = step_response_metrics(t, [r.get("off", 0.0) for r in rows], settle_band=None)
+                if sr:
+                    metrics["settleBandDeg"] = sr["settleBand"]
+                    metrics["settleTime"] = sr["settleTime"]
+                    metrics["overshootDeg"] = sr["overshoot"]
+                else:
+                    skipped["settleTime"] = "segment too short (<2 samples)"
+            else:
+                skipped["settleTime"] = "missing column: off"
+            pa = aw.pitch_authority(rows)  # the relay/reversal signature (fbwTgtPR/fbwPR — base cols)
+            if pa:
+                metrics["pitchAuthorityMedian"], metrics["pitchAuthorityAntiPhaseFrac"], _ = pa
+            metrics.update(wobble_scan(t, rows, cols, dur))
+
+        elif seg_type == "hover_hold":
+            if {"posX", "posY", "posZ"} <= cols:
+                metrics.update(hover_metrics(t, [r["posX"] for r in rows],
+                                              [r["posY"] for r in rows], [r["posZ"] for r in rows]))
+            else:
+                skipped["positionRMSM"] = skipped["driftRateMS"] = "missing column(s): posX/posY/posZ"
+
+        elif seg_type in ("translate", "bobup"):
+            if {"posX", "posY", "posZ"} <= cols:
+                xs = [r["posX"] for r in rows]
+                ys = [r["posY"] for r in rows]
+                zs = [r["posZ"] for r in rows]
+                if seg_type == "translate":
+                    resp = [math.hypot(xs[i] - xs[0], zs[i] - zs[0]) for i in range(n)]
+                elif "alt" in cols:
+                    alt = [r["alt"] for r in rows]
+                    resp = [abs(alt[i] - alt[0]) for i in range(n)]
+                else:
+                    resp = [abs(ys[i] - ys[0]) for i in range(n)]  # posY fallback, no alt column yet
+                dev, _plateau = to_deviation(resp)
+                sr = step_response_metrics(t, dev, settle_band=1.0, settle_dur=1.0)
+                if sr:
+                    metrics["demandM"] = sr["demand"]
+                    metrics["riseTime90"] = sr["riseTime90"]
+                    metrics["settleTime"] = sr["settleTime"]
+                    metrics["overshootM"] = sr["overshoot"]
+                else:
+                    skipped["riseTime90"] = "segment too short (<2 samples)"
+            else:
+                skipped["riseTime90"] = "missing column(s): posX/posY/posZ"
+
+        elif seg_type == "transition":
+            if "alt" in cols:
+                alt = [r["alt"] for r in rows]
+                metrics["altExcursionM"] = max(alt) - min(alt)
+            else:
+                skipped["altExcursionM"] = "missing column: alt"
+        # "unknown" (incl. "unsegmented"): AoA/G discipline above is the whole generic set.
+
+    return {
+        "tag": tag,
+        "type": seg_type,
+        "samples": n,
+        "durationS": dur,
+        "excluded": excluded,
+        "metrics": {k: {"value": v, "grade": None} for k, v in metrics.items()},
+        "skipped": skipped,
+    }
+
+
+def score_run(path):
+    meta, rows, cols = load_csv(path)
+    prov = provenance(path, meta)
+    if not rows:
+        return {"provenance": prov, "segments": [], "warnings": [], "note": "no data rows"}
+    segments, warnings = [], []
+    for tag, seg_rows in group_segments(rows, cols):
+        seg_type = infer_type(tag)
+        segments.append(compute_segment(tag, seg_type, seg_rows, cols))
+        w = _tag_warning(tag, seg_type)
+        if w:
+            warnings.append(w)
+    return {"provenance": prov, "segments": segments, "warnings": warnings}
+
+
+# --- output ---------------------------------------------------------------------------------
+
+def print_table(path, result):
+    print(f"\n=== {path}")
+    prov = result["provenance"]
+    bits = [f"{k}={prov[k]}" for k in ("aircraft", "card", "modVersion", "session") if prov.get(k)]
+    if bits:
+        print("  " + "  ".join(bits))
+    if prov.get("aborted"):                      # loud: this run did not finish its card
+        print(f"  ABORTED: {prov['stop']} -- segments after this point are missing, not zero.")
+    elif prov.get("stop"):
+        print(f"  stop: {prov['stop']}")
+    for w in result.get("warnings", []):
+        print(f"  WARNING: {w}")
+    if not result["segments"]:
+        print(f"  {result.get('note', 'no segments')}")
+        return
+    for seg in result["segments"]:
+        flag = "  [EXCLUDED]" if seg["excluded"] else ""
+        print(f"  {seg['tag']:<22s} {seg['type']:<14s} n={seg['samples']:<5d} dur={seg['durationS']:6.1f}s{flag}")
+        if seg["metrics"]:
+            parts = []
+            for name, mv in seg["metrics"].items():
+                v = mv["value"]
+                parts.append(f"{name}=n/a" if v is None else
+                             f"{name}={v:.3g}" if isinstance(v, float) else f"{name}={v}")
+            print("      " + "  ".join(parts))
+        if seg["skipped"]:
+            print("      skipped: " + "; ".join(f"{k} ({v})" for k, v in seg["skipped"].items()))
+
+
+# --- selftest ---------------------------------------------------------------------------------
+
+def selftest():
+    # step_response_metrics — monotonic decay, no overshoot: 10->0 over 1.0s then flat.
+    t = [i * 0.1 for i in range(26)]
+    off = [10 - i for i in range(11)] + [0.0] * 15
+    sr = step_response_metrics(t, off)
+    assert abs(sr["demand"] - 10.0) < 1e-9, sr
+    assert abs(sr["riseTime90"] - 0.9) < 1e-6, sr   # off<=1.0 (10% of 10) first at i=9, t=0.9
+    assert abs(sr["settleTime"] - 1.0) < 1e-6, sr   # off<=0.5 from i=10 (t=1.0) onward, sustained
+    assert abs(sr["overshoot"] - 0.0) < 1e-9, sr
+
+    # step_response_metrics — decays to 0, bounces to 3, then settles: known overshoot + late settle.
+    off2 = [10 - i for i in range(11)] + [1, 2, 3, 2, 1, 0] + [0.0] * 24
+    t2 = [i * 0.1 for i in range(len(off2))]
+    sr2 = step_response_metrics(t2, off2)
+    assert abs(sr2["riseTime90"] - 0.9) < 1e-6, sr2      # unaffected by the later bounce
+    assert abs(sr2["settleTime"] - 1.6) < 1e-6, sr2      # first brief touch at t=1.0 doesn't hold;
+                                                          # settles for good once back down at t=1.6
+    assert abs(sr2["overshoot"] - 2.5) < 1e-6, sr2       # peak 3.0 after first touching the band, -0.5 band
+
+    # Demand-scaled settle band (settle_band=None). A fixed 0.5 deg band would swallow a whole
+    # micro-step and report settleTime==0; these assert the band tracks the demand instead.
+    assert abs(step_response_metrics(t, off, settle_band=None)["settleBand"] - 0.5) < 1e-9   # 10deg -> capped 0.5
+    micro_t = [i * 0.1 for i in range(40)]
+    micro = [0.30] * 2 + [0.30 - 0.03 * i for i in range(1, 10)] + [0.03] * 29  # 0.3deg step -> 0.03 residual
+    srm = step_response_metrics(micro_t, micro, settle_band=None)
+    assert abs(srm["demand"] - 0.30) < 1e-9, srm
+    assert abs(srm["settleBand"] - 0.05) < 1e-9, srm     # 10% of 0.3 = 0.03 -> floored at 0.05
+    assert srm["settleTime"] is not None and srm["settleTime"] > 0.5, srm  # NOT the t=0 a fixed band gives
+    # ...and the residual sitting just OUTSIDE its band must never register as settled.
+    never = step_response_metrics(micro_t, [0.30] * 2 + [0.08] * 38, settle_band=None)
+    assert never["settleTime"] is None, never
+
+    # signed_overshoot: crosses to the far side and swings 2.0 past -> 2.0; never crosses -> None.
+    assert abs(signed_overshoot([10, 5, 1, -0.5, -2.0, -1.0, 0.2]) - 2.0) < 1e-9
+    assert signed_overshoot([10, 5, 1, 0.4, 0.2, 0.1]) is None          # decays, never goes past
+    assert signed_overshoot([-10, -5, 1.5, 0.5]) == 1.5                 # mirror sign
+    assert signed_overshoot([0.0] * 5) is None                          # dead flat
+    assert signed_overshoot([0.0, 0.0, 3.0, 1.0, -0.7]) == 0.7          # leading 0.00s don't set the sign
+
+    # pointing_metrics wiring on a synthetic az step: azimuth overshoots (crosses, swings to -1.6),
+    # elevation never crosses (None), and `off` decays to 0.3 then drifts back out to 1.6 -- so
+    # minOffDeg must be strictly below terminalOffDeg (the "got there then drifted off" case that
+    # settleTime=NULL alone throws away).
+    az = [10.0, 6.0, 2.0, 0.2, -1.6, -1.2, -0.8, -1.0, -1.2, -1.4, -1.6, -1.6]
+    el = [0.5, 0.4, 0.35, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+    prow = [{"t": i * 0.1, "off": math.hypot(az[i], el[i]), "azErr": az[i], "elevErr": el[i]}
+            for i in range(len(az))]
+    pcols = {"t", "off", "azErr", "elevErr"}
+    pm, pskip = pointing_metrics([r["t"] for r in prow], prow, pcols)
+    assert pskip == {}, pskip
+    assert pm["overshootAzDeg"] > 1.5, pm                    # positive number, not 0-by-construction
+    assert pm["overshootElDeg"] is None, pm                  # no crossing -> absent, distinguishable from 0.0
+    assert pm["minOffDeg"] < pm["terminalOffDeg"], pm        # decayed then rose again
+    assert abs(pm["minOffDeg"] - math.hypot(0.2, 0.3)) < 1e-9, pm
+    assert abs(pm["rmsPointingErrorDeg"] - rms([r["off"] for r in prow])) < 1e-9, pm
+    # terminal window = last 1.0 s; this segment is 1.1 s long, so it's samples 1..11, not all 12.
+    assert abs(pm["terminalOffDeg"] - statistics.fmean([r["off"] for r in prow[1:]])) < 1e-9, pm
+    # entryAzSign: both signs plus the exactly-0.00 case, and it must NOT follow the crossing.
+    assert pm["entryAzSign"] == 1, pm
+    neg = [dict(r, azErr=-r["azErr"]) for r in prow]
+    assert pointing_metrics([r["t"] for r in neg], neg, pcols)[0]["entryAzSign"] == -1
+    zero = [dict(r, azErr=0.0) for r in prow[:1]] + prow[1:]
+    assert pointing_metrics([r["t"] for r in zero], zero, pcols)[0]["entryAzSign"] == 0
+
+    # ...and the whole block is now on EVERY segment type (the defect: it was fine_track-only, so a
+    # steady lag through turn360 was invisible), including a missing-column segment that must skip
+    # rather than crash.
+    for st in ("az_step", "sustained_turn", "fine_track", "astern_wrap", "hover_hold", "unknown"):
+        seg = compute_segment("t", st, prow, pcols)
+        assert seg["metrics"]["rmsPointingErrorDeg"]["value"] > 0, (st, seg)
+        assert seg["metrics"]["overshootElDeg"]["value"] is None, (st, seg)   # None survives the wrapper
+    bare = compute_segment("t", "az_step", [{"t": 0.0}, {"t": 0.1}], {"t"})
+    assert "rmsPointingErrorDeg" in bare["skipped"] and "entryAzSign" in bare["skipped"], bare
+
+    # to_deviation + step_response_metrics reused for a RISING response (translate/bob-up shape):
+    # ramps 0->50 over 5 samples then holds at the 50 plateau.
+    resp = [0, 10, 20, 30, 40, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50]
+    t3 = list(range(len(resp)))
+    dev, plateau = to_deviation(resp)
+    assert abs(plateau - 50.0) < 1e-9, plateau
+    sr3 = step_response_metrics(t3, dev, settle_band=1.0, settle_dur=1.0)
+    assert abs(sr3["demand"] - 50.0) < 1e-9, sr3
+    assert abs(sr3["riseTime90"] - 5.0) < 1e-9, sr3
+    assert abs(sr3["settleTime"] - 5.0) < 1e-9, sr3
+    assert abs(sr3["overshoot"] - 0.0) < 1e-9, sr3
+
+    # rms() — sine wave of known amplitude: RMS = A/sqrt(2), sampled over many full periods.
+    A, f, dt, N = 4.0, 0.5, 1.0 / 60.0, 3600
+    sine = [A * math.sin(2 * math.pi * f * i * dt) for i in range(N)]
+    assert abs(rms(sine) - A / math.sqrt(2)) < 0.01, rms(sine)
+
+    # fine_track wiring: feed that same-shaped oscillation (now on azErr, amplitude clears the
+    # 0.5deg dead-band) through wobble_scan and confirm the reused episode detector reports both
+    # a nonzero count and roughly the known frequency.
+    rows = [{"t": i * dt, "azErr": 5.0 * math.sin(2 * math.pi * 0.4 * i * dt),
+             "outP": (0.6 if i % 2 else -0.6)} for i in range(600)]
+    tt = [r["t"] for r in rows]
+    wm = wobble_scan(tt, rows, {"azErr", "outP"}, tt[-1] - tt[0])
+    assert wm["wobbleEpisodesAzErr"] >= 1, wm
+    assert abs(wm["wobbleFreqHzAzErr"] - 0.4) < 0.08, wm     # crossing-based estimate, generous tolerance
+    assert wm["stickFlipRateP"] > 0, wm                      # outP alternates every sample -> flips every row
+
+    # hover_metrics — pure linear drift (no jitter): drift rate is exact; positionRMS is the RMS
+    # deviation from the mean of a 0..10 ramp, i.e. sqrt(mean([-5,-3,-1,1,3,5]^2)) = sqrt(70/6).
+    t4 = [0, 1, 2, 3, 4, 5]
+    xs = [0, 2, 4, 6, 8, 10]
+    ys = zs = [0] * 6
+    hv = hover_metrics(t4, xs, ys, zs)
+    assert abs(hv["driftRateMS"] - 2.0) < 1e-9, hv
+    assert abs(hv["positionRMSM"] - math.sqrt(70.0 / 6.0)) < 1e-9, hv
+
+    # aoa_g_metrics — exact counting/threshold check.
+    rows = [{"aoa": 5.0, "g": 3.0, "aoaGU": 1.0, "aoaGD": 1.0},
+            {"aoa": -12.0, "g": 8.0, "aoaGU": 0.4, "aoaGD": 1.0},
+            {"aoa": 6.0, "g": 4.0, "aoaGU": 1.0, "aoaGD": 1.0},
+            {"aoa": 7.0, "g": 5.0, "aoaGU": 1.0, "aoaGD": 1.0}]
+    m, skipped = aoa_g_metrics(rows, {"aoa", "g", "aoaGU", "aoaGD"})
+    assert abs(m["aoaPeakDeg"] - 12.0) < 1e-9, m
+    assert abs(m["aoaLimiterActivePct"] - 25.0) < 1e-9, m   # 1 of 4 rows gated
+    assert abs(m["gPeak"] - 8.0) < 1e-9 and abs(m["gSustained"] - 4.5) < 1e-9, m
+    assert skipped == {}, skipped
+    m2, skipped2 = aoa_g_metrics(rows, {"aoa"})
+    assert "aoaLimiterActivePct" in skipped2 and "gPeak" in skipped2, skipped2
+
+    # sustained_turn arithmetic wiring: constant turn rate, known deltaTAS/deltaEh.
+    rows = [{"t": 0.0, "headingRateFilt": 15.0, "spd": 100.0, "alt": 1000.0},
+            {"t": 1.0, "headingRateFilt": -15.0, "spd": 90.0, "alt": 1000.0}]
+    seg = compute_segment("sustained_turn_01", "sustained_turn", rows, {"headingRateFilt", "spd", "alt", "t"})
+    assert abs(seg["metrics"]["meanTurnRateDegS"]["value"] - 15.0) < 1e-9, seg
+    assert abs(seg["metrics"]["deltaTAS"]["value"] - (-10.0)) < 1e-9, seg
+    eh0 = 1000.0 + 100.0 ** 2 / (2 * G0)
+    eh1 = 1000.0 + 90.0 ** 2 / (2 * G0)
+    assert abs(seg["metrics"]["deltaEnergyHeightM"]["value"] - (eh1 - eh0)) < 1e-6, seg
+
+    # graceful degradation: sustained_turn with no alt column skips deltaEnergyHeightM, doesn't crash.
+    rows_noalt = [{"t": 0.0, "headingRateFilt": 10.0, "spd": 100.0},
+                  {"t": 1.0, "headingRateFilt": 10.0, "spd": 100.0}]
+    seg2 = compute_segment("sustained_turn_02", "sustained_turn", rows_noalt, {"headingRateFilt", "spd", "t"})
+    assert "deltaEnergyHeightM" not in seg2["metrics"], seg2
+    assert "deltaEnergyHeightM" in seg2["skipped"], seg2
+
+    # segmentation + type inference + arm exclusion, using the REAL tags ScenarioPlayer.cs emits.
+    # (The old version of this test used fictional tags like "az_step_10"/"hover_hold_01" that
+    # happened to satisfy the old, buggy startswith(KNOWN_PREFIXES) table -- which is exactly how
+    # the mismatch between infer_type() and the real cards went unnoticed.)
+    rows = ([{"t": i * 0.1, "segTag": "arm", "off": 0.0} for i in range(5)]
+            + [{"t": 0.5 + i * 0.1, "segTag": "az10", "off": max(0.0, 10 - i)} for i in range(12)]
+            + [{"t": 1.7 + i * 0.1, "segTag": "hover", "off": 0.0} for i in range(3)])
+    cols = {"t", "segTag", "off"}
+    segs = group_segments(rows, cols)
+    assert [tag for tag, _ in segs] == ["arm", "az10", "hover"], segs
+    types = [infer_type(tag) for tag, _ in segs]
+    assert types == ["arm", "az_step", "hover_hold"], types
+    arm_out = compute_segment("arm", "arm", segs[0][1], cols)
+    assert arm_out["excluded"] and arm_out["metrics"] == {}, arm_out
+
+    # infer_type: every tag the real cards (FixedWingSegs + the rotorcraft appendix in
+    # ScenarioPlayer.cs) actually emit, one per metric type -- this is the defect itself: NONE of
+    # these matched the old KNOWN_PREFIXES table except arm/reversal. Plus the two planned-but-not-
+    # yet-emitted types and one tag that is genuinely unrecognized.
+    real_tags = {
+        "arm": "arm", "az10": "az_step", "az30": "az_step", "az90": "az_step", "az150": "az_step",
+        "elUp": "el_step", "elDn": "el_step", "fine": "fine_track", "turn360": "sustained_turn",
+        "reversal": "reversal", "astern": "astern_wrap",
+        "micro1": "micro_step", "micro10": "micro_step",       # both single- and double-digit
+        "hover": "hover_hold", "hoveryaw": "hover_hold",        # hoveryaw must NOT fall to "unknown"
+        "bobup": "bobup",
+        "translate": "translate", "transition": "transition",  # planned (Appendix A), not emitted yet
+        "not_a_real_card_tag": "unknown",
+    }
+    for tag, expected in real_tags.items():
+        assert infer_type(tag) == expected, (tag, infer_type(tag), expected)
+
+    # _tag_warning: loud on a genuinely unrecognized tag, silent on a known type AND on the
+    # "unsegmented" sentinel (a legacy hand-flown capture with no segTag column -- normal, not a bug).
+    assert _tag_warning("az10", "az_step") is None
+    assert _tag_warning("unsegmented", "unknown") is None
+    w = _tag_warning("mystery_seg", "unknown")
+    assert w is not None and "mystery_seg" in w, w
+
+    # segTag absent entirely -> one "unsegmented" segment, generic (AoA/G) metric set only.
+    rows_flat = [{"t": i * 0.1, "aoa": 3.0, "g": 2.0} for i in range(5)]
+    segs_flat = group_segments(rows_flat, {"t", "aoa", "g"})
+    assert [tag for tag, _ in segs_flat] == ["unsegmented"], segs_flat
+    assert infer_type("unsegmented") == "unknown"
+
+    # load_csv(): a genuinely corrupt row (non-numeric value in a real numeric column) is dropped
+    # -- that part was already correct -- but must now be COUNTED and warned about, not silently
+    # eaten (the same gap analyze_wobble.load() had and already fixed; this was scorecard.py's own
+    # unfixed copy of the same bug).
+    import tempfile, io, contextlib
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write("t,off,segTag\n0.0,1.5,arm\n0.1,notanumber,az10\n0.2,1.1,az10\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _, rows_lc, _ = load_csv(tmp_path)
+        assert len(rows_lc) == 2, rows_lc                 # the one bad row dropped, the other two kept
+        assert "WARNING" in buf.getvalue() and "1/3" in buf.getvalue(), buf.getvalue()
+    finally:
+        os.remove(tmp_path)
+
+    print("selftest OK")
+
+
+def main(argv):
+    if not argv:
+        sys.exit(__doc__)
+    if argv[0] == "--selftest":
+        selftest()
+        return
+    json_path, files, i = None, [], 0
+    while i < len(argv):
+        if argv[i] == "--json":
+            if i + 1 >= len(argv):
+                sys.exit("--json requires a path")
+            json_path = argv[i + 1]
+            i += 2
+        else:
+            files.append(argv[i])
+            i += 1
+    if not files:
+        sys.exit("usage: scorecard.py [--json out.json] <recording.csv> [more.csv ...]\n"
+                  "       scorecard.py --selftest")
+    if json_path and len(files) != 1:
+        sys.exit("--json writes one run's score.json — pass exactly one CSV alongside --json")
+    for f in files:
+        result = score_run(f)
+        for w in result.get("warnings", []):    # stderr too: visible even when stdout is a --json file
+            print(f"WARNING: {f}: {w}", file=sys.stderr)
+        if json_path:
+            with open(json_path, "w", encoding="utf-8") as out:
+                json.dump(result, out, indent=2)
+            print(f"wrote {json_path}")
+        else:
+            print_table(f, result)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

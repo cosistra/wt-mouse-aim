@@ -57,9 +57,60 @@ Machine-specific paths are written as placeholders:
     gentle coordinated turn (gate `_settleOK` from the aim-direction angular rate; new recorder column
     `settleOn`). v0.61 Track A (shared) gated the eAlign anti-relay slew to the dead-astern wrap region
     and decoupled the azTR presence gate from the predFloor. `Legacy`/`BankToTurn` removed in v0.60;
-    `BankToTurnVmin` renamed `BankSpeedFloor` (shared bank airspeed floor). Also holds
+    `BankToTurnVmin` renamed `BankSpeedFloor` (shared bank airspeed floor). **v0.78** adds the
+    marker-rate feed-forward: `_aimAzRateFilt` (signed marker azimuth rate, same `HdgRateTau` LPF as
+    `_headingRateFilt`) is added at UNIT gain to `omega` at **both** lockstep sites, before the
+    achievability cap so `omegaMax` bounds it — the fix for the standing 9.5° lag a P-only loop must
+    hold to fly a sweeping marker; gated by `Cfg.MarkerRateFeedForward` as the in-session A/B lever.
+    Also holds
     `PilotPlayerStatePatch` (Harmony seam on `PilotPlayerState.PlayerAxisControls`).
   - `Recording.cs` — `ManeuverRecorder` + `AnomalyLog` (the log/recorder sinks ChaseController emits to).
+    v0.69/0.70 added the instructor-loop instrumentation: 58 CSV columns (alt/airDensity/pos/vel/
+    segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
+    snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
+    `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
+    bad throttle from a bad control law (R18 flew a whole card at idle and it read as an energy bug).
+    v0.78 added `aimRate` (SIGNED marker azimuth rate, deg/s) — the v0.78 feed-forward adds exactly
+    this quantity to the turn demand, and it is recorded on BOTH sides of the `MarkerRateFeedForward`
+    toggle, because otherwise a capture cannot tell "the feed-forward fired and helped" from "the
+    feed-forward never fired" (both read as a smaller azimuth lag).
+  - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). Scripted **test cards**: plays a
+    card by writing `AimRig.SetAimForward` from the *seam prefix* (so `Apply` reads the demand the
+    same tick — zero-tick lag is structural, don't move it), tags each segment via
+    `ManeuverRecorder.SegmentTag`, and brackets the run with the recorder. Also **records** a card
+    from a human flight (samples the aim demand on the fixed step) and binds one config checkbox per
+    card so F1 is the selection UI. Entirely idle unless a card is running.
+    **The only place the mod writes aircraft PHYSICS state** (`ForceEntryCondition`). Two pairings
+    there are mandatory and both were learned by destroying the airframe: (1) zero
+    `Pilot.velocityPrev` before the velocity write — the game reads G as a velocity difference across
+    fixed steps; (2) move the **whole assembly** — under complex physics an aircraft is one `Rigidbody`
+    **per part**, joined by `FixedJoint`s, so moving only `Aircraft.rb` stretches every joint and PhysX
+    returns it as ~`err/dt` of velocity. Apply the same rigid transform (same rotation about the same
+    pivot, same translation, same velocity) to every `ac.partLookup[].rb` and no joint sees a relative
+    change. **Do not** reach for `SetSimplePhysics`/`SetComplexPhysics` to sidestep this: its `Destroy`
+    is deferred to end-of-frame, so a FixedUpdate caller still simulates with live stretched joints,
+    and destroying components silently invalidates anything the game cached (Unity reports a destroyed
+    object as `null` without throwing).
+  - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81, **phase 1** of the uncrewed
+    harness). Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
+    launched on a stagger. `TestDrone` is the manager (live list + a dictionary keyed by
+    `Aircraft.GetInstanceID()`, the launch countdown, and the fixed-step `FrameDt` sample);
+    `Drone` is one aircraft and carries its **own** `Fly` delegate, because N drones need N
+    independent controllers; `TestDronePatch` is a Harmony **postfix on
+    `Pilot.Pilot_OnAeroInputsApplied`** that writes a drone's `ControlInputs` and then calls
+    `Aircraft.FilterInputs()` by hand (the FBW/`RelaxedStabilityController` pass is only ever run
+    *from a pilot state*, and an uncrewed aircraft has none). It **no-ops for every other aircraft**,
+    the player's first of all — an aircraft can only enter that dictionary through `Spawn`, which
+    spawns with `player=null` and then asserts `ac.Player == null` before registering.
+    **The AI is off by construction, not by fighting it:** spawning with `HQ = null` makes
+    `Pilot.SetStartingAiState` bail straight to `parkedState`, so the AI states are never built.
+    Needs an **active server** — single player is a host, so SP and hosting work; as an MP client the
+    spawn is refused with a log line. `Cfg.DroneEnabled` is off by default and the subsystem is inert
+    while it is (the hotkeys are not even read; the postfix is one int compare). Phase 2 attaches
+    `ChaseController` to `Drone.Fly`; the built-in level-hold there is a deliberately trivial
+    altitude/wings hold and is **not** the mod's control law — never tune it or compare against it.
+    Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
+    clock that exists before any drone does.
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
 
@@ -70,6 +121,9 @@ Machine-specific paths are written as placeholders:
 - Deploy target: `<game>\BepInEx\plugins\WTMouseAim\NuclearOption-MouseAim.dll`.
 - BepInEx log (read after a flight): `<game>\BepInEx\LogOutput.log`.
 - Live config: `<game>\BepInEx\config\com.no.wtmouseaim.cfg`.
+- Test cards (M1): `<game>\BepInEx\config\wtmouseaim-cards\<name>.json` — recorded cards land here and
+  are picked up at startup (one F1 checkbox each; the **file basename is the card id**). Built-in
+  cards live in `ScenarioPlayer.cs`, not on disk.
 
 ## Build / deploy / test loop
 **Deploying IS part of testing.** A change is not "tested" — or even testable — until the DLL is
@@ -101,6 +155,23 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   recording, run `--digest` first and only open raw rows for a segment it flags** — feeding raw CSV
   to an LLM is expensive and mostly steady-state redundancy. `--selftest` runs the in-memory asserts.
   Run this on user-reported recordings before theorizing.
+- **Scoring a test-card run.** `python debugtests/scorecard.py <rec.csv>` segments by `segTag` and
+  emits per-segment metrics (`--json`, `--selftest`). **An unrecognised tag prints a WARNING** —
+  never ignore it: the tag vocabulary lives in `ScenarioPlayer.cs` and the tag→metric table lives in
+  `scorecard.py`, with no compile-time link between them and no coverage from `check-architecture.py`.
+  That pair silently drifted once already (v0.71: 19 of 21 segments scored as "unknown" with no
+  output at all). **Adding or renaming a card segment means updating both, in the same change.**
+- **Comparing runs.** `python debugtests/compare-runs.py <rec1.csv> <rec2.csv> ...` reports
+  per-segment spread across N runs — the noise floor, and the A/B of a law change. It **groups by
+  airframe and refuses to pool**, and excludes truncated segments rather than blending them; heed
+  both warnings rather than working around them.
+- **Uncrewed drones (v0.81).** Tick `Drone/DroneEnabled` in F1, then the spawn key launches
+  `DroneCount` drones `DroneStaggerSec` apart. Everything it does is one grep: `[drone]` in
+  `LogOutput.log` covers spawn/despawn, every refusal (no server, unknown `DroneAirframe`, no
+  `Spawner`), a drone the game removed under us, and `[drone] frame hitch` for any rendered frame over
+  50 ms. **A refusal is always a log line, never a silent no-op** — the harness runs unattended, so a
+  key that appears to do nothing has to be explainable after the fact. `TestDrone.FrameDt` (the
+  fixed-step `Time.unscaledDeltaTime` sample) is the signal the stagger exists to defend against.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
   (hidden by default). Use it to watch the control law react in real time while flying.
 - **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**

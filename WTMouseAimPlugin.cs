@@ -19,7 +19,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.68.0";
+        public const string PluginVersion = "0.81.0";
 
         internal static ManualLogSource Log;
 
@@ -78,11 +78,20 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
+            // The drone seam is patched UNCONDITIONALLY, even with Drone/DroneEnabled off: the flag is
+            // live-tunable from F1, so a conditional patch would need a restart to take effect. The
+            // postfix costs one integer compare per aircraft per fixed step while no drone is alive.
+            harmony.PatchAll(typeof(TestDronePatch));
             // ponytail: the load line is a LOAD LINE — version + keys + where the history lives.
             // (It used to mirror the entire changelog; that lives in CHANGELOG.md now.)
             Logger.LogInfo($"{PluginName} v{PluginVersion} loaded — WT-style mouse-aim instructor (EvolvedLegacy law). "
                 + $"Keys: [{Cfg.ToggleKey.Value}] master on/off, [{Cfg.FlyLevelKey.Value}] fly level, "
                 + $"[{Cfg.RecordKey.Value}] maneuver recorder, F1 config, RMB free-look. "
+                // Card keys belong here too: CLAUDE.md promises this line lists every active binding.
+                + $"Cards: [{Cfg.ScenarioRunKey.Value}] run, [{Cfg.ScenarioRecordKey.Value}] record, "
+                + $"[{Cfg.ScenarioAbortKey.Value}] abort, [{Cfg.ScenarioEntryKey.Value}] on-condition. "
+                + $"Drones ({(Cfg.DroneEnabled.Value ? "on" : "off")}): [{Cfg.DroneSpawnKey.Value}] spawn, "
+                + $"[{Cfg.DroneDespawnKey.Value}] despawn all. "
                 + "Version history: CHANGELOG.md.");
             Logger.LogInfo($"[session] run R{RunIndex}  id {SessionId}  ({RunTag}) — recordings, the anomaly file and this log share this id for cross-referencing.");
         }
@@ -123,6 +132,33 @@ namespace NuclearOptionMouseAim
                 _toastRec = true;
             }
             else if (Time.time >= _toastUntil) { _toastRec = false; }
+
+            // Scenario player (M1). Key EDGES are a per-frame thing, so they're read here; everything
+            // that has to be deterministic (the card clock, the demand write) happens on the fixed
+            // step inside ScenarioPlayer.Tick. Ungated by Enabled so a running card can always be
+            // stopped, and idle unless one of these is pressed.
+            if (Input.GetKeyDown(Cfg.ScenarioRunKey.Value))    ScenarioPlayer.ToggleSuite();
+            if (Input.GetKeyDown(Cfg.ScenarioRecordKey.Value)) ScenarioPlayer.ToggleRecord();
+            if (Input.GetKeyDown(Cfg.ScenarioAbortKey.Value))  ScenarioPlayer.Abort("abort key");
+            if (Input.GetKeyDown(Cfg.ScenarioEntryKey.Value))  ScenarioPlayer.ForceEntryNow();
+
+            // Uncrewed test drones (v0.81, phase 1). Gated on DroneEnabled so the keys are DEAD, not
+            // merely harmless, while the harness is off — F2/F9 are otherwise perfectly ordinary keys
+            // and nobody expects a flight-control mod to consume them.
+            if (Cfg.DroneEnabled.Value)
+            {
+                if (Input.GetKeyDown(Cfg.DroneSpawnKey.Value))   TestDrone.RequestLaunch();
+                if (Input.GetKeyDown(Cfg.DroneDespawnKey.Value)) TestDrone.DespawnAll();
+            }
+        }
+
+        // The mod's only fixed-step hook that exists independently of an aircraft. The drone harness
+        // needs one: its launch stagger has to be counted on the same clock the run is measured on
+        // (not a coroutine, and not the render frame), and with zero drones alive there is no pilot of
+        // ours for the drone seam's per-pilot postfix to fire on. Also where frame time is sampled.
+        private void FixedUpdate()
+        {
+            TestDrone.FixedTick();
         }
 
         // True while the active toast is a recorder toast (so OnGUI labels it REC/REC OFF, not ON/OFF).
@@ -154,6 +190,31 @@ namespace NuclearOptionMouseAim
                 GUI.Label(new Rect((Screen.width - rw) * 0.5f, Screen.height * 0.08f, rw, 24f),
                     $"● REC  {ManeuverRecorder.Tag}  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
                 GUI.color = rc;
+            }
+
+            // Scenario NOTICE — why a card refused to start, or that it just moved the aircraft onto
+            // its entry condition. Drawn before every gate (and whether or not a card is running,
+            // since the common case is that one DIDN'T start): pressing the run key must never look
+            // like pressing a dead key. Amber, just under the card indicator.
+            string notice = ScenarioPlayer.Notice;
+            if (!string.IsNullOrEmpty(notice))
+            {
+                var nc = GUI.color;
+                GUI.color = new Color(1f, 0.75f, 0.2f, 0.95f);
+                const float nw = 640f;
+                GUI.Label(new Rect((Screen.width - nw) * 0.5f, Screen.height * 0.09f, nw, 24f), notice);
+                GUI.color = nc;
+            }
+
+            // Scenario/test-card indicator — like the REC indicator, drawn BEFORE every gate so a
+            // running card is visible even on the clean HUD: which card, which segment, time left.
+            if (ScenarioPlayer.Active)
+            {
+                var cc = GUI.color;
+                GUI.color = new Color(0.5f, 1f, 0.5f, 0.95f);
+                const float cw = 520f;
+                GUI.Label(new Rect((Screen.width - cw) * 0.5f, Screen.height * 0.05f, cw, 24f), ScenarioPlayer.HudLine);
+                GUI.color = cc;
             }
 
             if (!Cfg.ShowOverlay.Value || !Cfg.Enabled.Value)

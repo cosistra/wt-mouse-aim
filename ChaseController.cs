@@ -107,6 +107,13 @@ namespace NuclearOptionMouseAim
         private static float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
                                                // v0.51 anticipatory lead on the turn-rate bank command (azErrPred in Apply). Nose-only
                                                // (marker-independent), so the lead can never fight a mouse flick.
+        // Low-pass time constant shared by BOTH world-azimuth rate signals — the nose rate above and the
+        // v0.78 marker rate below. v0.54 raised it 0.18->0.35: the ±3 deg/s ripple at 1.3-1.5 Hz was feeding
+        // the brake-clamp rectifier (WOBBLE-FINDINGS UPDATE 4); ~2x more attenuation there costs ~0.2 s of
+        // rollout timing. ONE const on purpose — the two signals meet inside the same omega, so a mismatched
+        // tau would show up as a PHASE error between them, which no gain can tune out.
+        // ponytail: fixed, not a Cfg knob; promote to Cfg if flight tuning ever wants it.
+        private const float HdgRateTau = 0.35f;
         private static float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
         internal static float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
                                                // (the recorded targetBank is the shared yawWeak-gated blend, which EvolvedLegacy does
@@ -154,6 +161,16 @@ namespace NuclearOptionMouseAim
         private static float   _aimRateFilt;
         private static bool    _settleOK;
         private static bool    _settleOn;
+
+        // MARKER AZIMUTH RATE (v0.78) — the SIGNED world-azimuth rate of the aim direction (deg/s,
+        // + = sweeping right), in the same frame and sign convention as azErr and _headingRateFilt so the
+        // three are directly comparable, and low-passed with the SAME HdgRateTau as the nose rate.
+        // Deliberately NOT _aimRateFilt above: that one is an UNSIGNED total angular speed used only as a
+        // "is the marker moving at all" gate, and an unsigned magnitude cannot feed a signed turn demand.
+        // Fed forward into both omega sites — full rationale at the shared omegaDes site in Apply.
+        // _aimAzAcId guards the shared _prevAim sample against an aircraft change (see the compute block).
+        private static float _aimAzRateFilt;
+        private static int   _aimAzAcId = -1;
 
         // Hover / "flown-like-a-helicopter" regime state (v0.43). _collective latches the airframe class
         // (true = takeoffDistance==0 = heli/hover-VTOL) on engage; _heliBlend in [0,1] is the per-frame
@@ -251,6 +268,22 @@ namespace NuclearOptionMouseAim
             if (_rewired == null && ReInput.isReady)
                 _rewired = ReInput.players.GetPlayer(0);
             return _rewired;
+        }
+
+        // "Is the human on the stick RIGHT NOW?" — the single definition of manual input: the same
+        // three axes and the same ManualDeadzone the override block in Apply() uses (it calls this
+        // for its own `anyInput`). Exposed so the ScenarioPlayer can abort a test card on a stick
+        // touch instead of growing a second detector that could drift out of agreement with this one.
+        // Deliberately NOT gated on Cfg.ManualOverride: "the pilot grabbed the controls" is true
+        // whether or not the per-axis blend is enabled.
+        public static bool ManualStickInput()
+        {
+            var pl = RewiredPlayer();
+            if (pl == null) return false;
+            float dz = Cfg.ManualDeadzone.Value;
+            return Mathf.Abs(pl.GetAxis("Pitch")) > dz
+                || Mathf.Abs(pl.GetAxis("Roll"))  > dz
+                || Mathf.Abs(pl.GetAxis("Yaw"))   > dz;
         }
 
         // Override-on-touch for one axis: push past the deadzone and you INSTANTLY take that axis
@@ -509,6 +542,7 @@ namespace NuclearOptionMouseAim
                 _alphaSchedFilt = 1f; // fresh AoA-utilization demand schedule (v0.59)
                 _pitchEff = 1f; // fresh measured pitch-effectiveness estimate (v0.60)
                 _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
+                _aimAzRateFilt = 0f; _aimAzAcId = -1;     // fresh marker-rate feed-forward (v0.78)
                 HideNativeVirtualJoystick();
                 WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
             }
@@ -592,11 +626,29 @@ namespace NuclearOptionMouseAim
                 // micro-bank in ApplyEvolvedLegacy stands down (the main law + manual override own a
                 // moving marker); quasi-stationary = it may inject. aimDir is already in hand — no new
                 // game signal. Convergent/gated design is documented at the injection site.
+                // The v0.78 feed-forward differentiates the SAME _prevAim sample, so the staleness guard is
+                // hoisted here and covers both: on an aircraft change AimRig re-seeds the marker onto the new
+                // nose, and differencing across that seed would emit one enormous bogus rate into both signals.
+                int aimAcId = aircraft.GetInstanceID();
+                if (aimAcId != _aimAzAcId) { _aimAzAcId = aimAcId; _prevAimValid = false; }
                 if (_prevAimValid && dt > 1e-5f)
                 {
                     float aimRate = Vector3.Angle(_prevAim, aimDir) / dt;
                     _aimRateFilt += (dt / (0.15f + dt)) * (aimRate - _aimRateFilt);
+                    // MARKER AZIMUTH RATE (v0.78) — SIGNED, + = sweeping right, same frame as azErr and
+                    // _headingRateFilt. Atan2(x,z)+DeltaAngle rather than a raw subtraction because the
+                    // azimuth wraps: a plain difference spikes 360/dt (~21600 deg/s at the 60 Hz fixed step)
+                    // every time the marker crosses ±180°, and fed forward into omega that single frame is a
+                    // rail-to-rail bank command. DeltaAngle takes the short way round, so the wrap is a no-op.
+                    // Source is aimDir, not AimRig.AimForward directly: outside Fly Level they are the same
+                    // vector, and inside it aimDir is the LATCHED heading — the demand the loop is actually
+                    // tracking — so a marker sweep during a level hold can't inject a turn nobody asked for.
+                    float azNow  = Mathf.Atan2(aimDir.x,   aimDir.z)   * Mathf.Rad2Deg;
+                    float azPrev = Mathf.Atan2(_prevAim.x, _prevAim.z) * Mathf.Rad2Deg;
+                    float rawAR  = Mathf.DeltaAngle(azPrev, azNow) / dt;
+                    _aimAzRateFilt += (dt / (HdgRateTau + dt)) * (rawAR - _aimAzRateFilt);
                 }
+                else _aimAzRateFilt = 0f; // first frame after engage / aircraft change: no valid previous direction
                 _prevAim = aimDir; _prevAimValid = true;
                 const float aimStillRate = 3f; // deg/s — above frame noise (~0.8 deg/s), below a deliberate sweep
                 _settleOK = _aimRateFilt < aimStillRate;
@@ -672,10 +724,7 @@ namespace NuclearOptionMouseAim
                     if (prevNoseHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
                     {
                         float rawHR = Vector3.SignedAngle(prevNoseHW, noseHW, Vector3.up) / dt;
-                        const float hrTau = 0.35f; // v0.54: raised 0.18->0.35 — the ±3 deg/s ripple at 1.3-1.5 Hz was feeding the
-                                                   // brake-clamp rectifier (WOBBLE-FINDINGS UPDATE 4); ~2x more attenuation there
-                                                   // costs ~0.2 s of rollout timing. Still ponytail-fixed; promote to Cfg if tuning wants it.
-                        _headingRateFilt += (dt / (hrTau + dt)) * (rawHR - _headingRateFilt);
+                        _headingRateFilt += (dt / (HdgRateTau + dt)) * (rawHR - _headingRateFilt); // tau shared with the v0.78 marker rate
                     }
                 }
 
@@ -1013,6 +1062,30 @@ namespace NuclearOptionMouseAim
                 const float azRampW = 1.5f; // deg; regime constant (geometry of the hand-off, not per-plane). LOCKSTEP with EL.
                 float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
                 float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
+                // MARKER-RATE FEED-FORWARD (v0.78) — the standing sustained-turn lag. In the turn360 card the
+                // marker sweeps at a constant 12.066 deg/s and the aircraft ACHIEVES that rate (12.02 deg/s,
+                // ±0.01 across four replicates) while parked on a 9.54 deg azimuth lag (stdev 0.021 deg).
+                // Nothing is saturated: |outP| max 0.587, |outR| max 0.793, 5.17 g of a 9 g limit, AoA 7.7 of
+                // a 27 deg ceiling. That is not a fault, it is what a PURE-PROPORTIONAL loop must do. The only
+                // integral term on this axis is _iYaw, and it winds on fineBlend = clamp01(1 - off/FineAngle),
+                // which is EXACTLY 0 at off = 9.5 with FineAngle 6 — the capture shows both integrators flat at
+                // 0.000 for the whole 30 s. So the rate has to be BOUGHT with error: e_ss = w/K = 12.07/1.31 =
+                // 9.2 deg, which reproduces the measurement to a tenth of a degree.
+                // Supply the rate instead of making the loop earn it. Gain is exactly 1.0 and there is no
+                // multiplier to tune: matching the marker's own azimuth rate is KINEMATICS, not a per-plane
+                // constant, so this satisfies the generality rule by construction. Added BEFORE the
+                // achievability cap below, so the probed per-airframe omegaMax bounds the feed-forward exactly
+                // like the proportional demand — it can never command a turn this airframe cannot fly — and
+                // yawCapped therefore still reflects the TOTAL demand.
+                // SAFE BY CONSTRUCTION: _aimAzRateFilt is identically zero whenever the marker is stationary,
+                // and every other card segment (micro1-10, fine, az10/az30/az90/az150, elUp, elDn, reversal,
+                // astern) commands a STEP to a fixed direction and then holds it. The feed-forward contributes
+                // nothing there and those metrics cannot move. Only turn360 — and a human tracking a moving
+                // marker — sees any change at all, which is exactly why this is scoreable in one session.
+                // MarkerRateFeedForward is the A/B lever: off = bit-identical to v0.77, no restart needed.
+                // LOCKSTEP: ApplyEvolvedLegacy's local omega copy adds the SAME term at the same point,
+                // under the same rule as the azErrPred / achievability-cap lockstep notes.
+                if (Cfg.MarkerRateFeedForward.Value) omegaDes += _aimAzRateFilt * Mathf.Deg2Rad;
                 // ACHIEVABILITY CAP (v0.55) — the low-speed anti-windup. Below corner speed the FBW's
                 // deliverable pitch rate collapses (x q_ratio, see the probe above) but the turn-rate
                 // demand didn't know that: it kept asking for a turn the plane can't fly, the bank target
@@ -1149,7 +1222,7 @@ namespace NuclearOptionMouseAim
                         float ret = Cfg.ManualReturnTime.Value;
                         float axP = pl.GetAxis("Pitch"), axR = pl.GetAxis("Roll"), axY = pl.GetAxis("Yaw");
                         float handoff = Cfg.ManualHandoffTime.Value;
-                        bool anyInput = Mathf.Abs(axP) > dz || Mathf.Abs(axR) > dz || Mathf.Abs(axY) > dz;
+                        bool anyInput = ManualStickInput(); // same axes/deadzone, one definition (see above)
 
                         if (handoff > 0f)
                         {
@@ -1263,7 +1336,8 @@ namespace NuclearOptionMouseAim
                         spdR, aoaNow, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
                         aircraft.flightAssist, fbwTgtPR, fbwPR,
-                        tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn);
+                        tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn, _aimAzRateFilt,
+                        aircraft); // M0: the recorder reads alt/airDensity/pos/vel off it (fail-soft)
                 }
 
                 // Chase trace. Normal cadence ~2.5/sec; inside 10deg ("fine capture") ~5/sec at higher
@@ -1351,6 +1425,11 @@ namespace NuclearOptionMouseAim
             const float azRampW = 1.5f; // deg; regime constant. MUST match the shared site.
             float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
             float omega  = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;                              // rad/s, signed
+            // MARKER-RATE FEED-FORWARD (v0.78) — LOCKSTEP with Apply's shared omegaDes site; the full measured
+            // rationale lives there. Same term, same unit gain, and applied at the same point: BEFORE the
+            // achievability cap below, so omegaMax bounds it too. A sustained marker sweep is now paid for by
+            // the feed-forward instead of by a standing azimuth lag (measured 9.54 deg at 12.07 deg/s).
+            if (Cfg.MarkerRateFeedForward.Value) omega += _aimAzRateFilt * Mathf.Deg2Rad;
             // v0.55 ACHIEVABILITY CAP — the SAME clamp Apply's shared bankTR block applies to omegaDes
             // (see the comment there); the two sites MUST stay in lockstep, same rule as the azErrPred
             // note above. At low speed this shrinks the bank target physically instead of letting it slam
@@ -1896,6 +1975,13 @@ namespace NuclearOptionMouseAim
                     $"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only).");
             }
 
+            // TEST-CARD DEMAND (M1). Runs HERE, in the prefix, so the scripted aim direction for this
+            // fixed step is written BEFORE the postfix below calls Apply(), which reads
+            // AimRig.AimForward — same PlayerAxisControls invocation, so zero-tick lag by
+            // construction rather than by Harmony patch ordering or Unity's Update/FixedUpdate order
+            // (plan §5.1 M-1). No-op (two field reads) when no card is running.
+            ScenarioPlayer.Tick(aircraft);
+
             bool active = ChaseController.BeginFrame(aircraft, fixedWing, pilotStrength);
 
             // Skip the native body ONLY in the cockpit. There, native's mouse virtual-joystick would
@@ -1910,10 +1996,17 @@ namespace NuclearOptionMouseAim
         private static void Postfix(PilotPlayerState __instance)
         {
             if (TryResolve(__instance, out var aircraft, out _, out _))
+            {
                 ChaseController.Apply(aircraft);
+                // Throttle/brake ownership for a running card, on the FIXED step: this is the write
+                // that is guaranteed to be in place when Aircraft.FilterInputs consumes the inputs
+                // immediately after this postfix. PilotThrottlePatch below owns the Update-time half.
+                // No-op when no card is running.
+                ScenarioPlayer.OwnInputs(aircraft);
+            }
         }
 
-        private static bool TryResolve(PilotPlayerState inst, out Aircraft aircraft, out bool fixedWing, out float pilotStrength)
+        internal static bool TryResolve(PilotPlayerState inst, out Aircraft aircraft, out bool fixedWing, out float pilotStrength)
         {
             aircraft = null; fixedWing = false; pilotStrength = 1f;
             // PilotPlayerState never populates base.aircraft (it uses pilot.aircraft directly and
@@ -1926,6 +2019,35 @@ namespace NuclearOptionMouseAim
             // GLOC: native zeroes inputs when pilotStrength < 0.2 (blackout). Read it so we can defer.
             pilotStrength = Traverse.Create(inst).Field("pilotStrength").GetValue<float>();
             return true;
+        }
+    }
+
+    // v0.74 — THROTTLE OWNERSHIP AT THE UPDATE SEAM.
+    //
+    // PlayerThrottleAxis1Controls runs in Update (NOT FixedUpdate) and is the only place the player's
+    // hardware throttle axis reaches ControlInputs.throttle. Owning throttle from the fixed-step
+    // postfix alone was not enough, for a reason that only shows up in flight: Airbrake.Update reads
+    // ControlInputs.throttle every RENDERED frame and opens the boards whenever it is exactly zero —
+    //     openAmount += (throttle == 0f ? +openSpeed : -openSpeed) * Time.deltaTime;
+    // With more rendered frames than fixed steps, every frame that native wrote the pilot's idle lever
+    // before our next fixed-step write cracked the airbrakes open and bled energy off-script. The
+    // pilot's own report: "the UX is showing me I'm modifying the throttle... there is a point at zero
+    // percent where the game goes into airbraking mode."
+    //
+    // Skipping native outright (rather than overwriting after it) means the hardware axis never
+    // reaches ControlInputs at all while a card runs, so the throttle HUD shows what the card is
+    // actually flying instead of what the lever says. It also freezes customAxis1, which native writes
+    // in the same method — deliberate: that axis is another uncontrolled input during a capture.
+    // simulatedThrottle keeps its value while skipped and resumes from the lever when the card ends.
+    [HarmonyPatch(typeof(PilotPlayerState), "PlayerThrottleAxis1Controls")]
+    internal static class PilotThrottlePatch
+    {
+        // Return false => skip native (the card owns the throttle this frame).
+        private static bool Prefix(PilotPlayerState __instance)
+        {
+            if (!ScenarioPlayer.Playing) return true;                       // idle: two field reads
+            if (!PilotPlayerStatePatch.TryResolve(__instance, out var aircraft, out _, out _)) return true;
+            return !ScenarioPlayer.OwnInputs(aircraft);
         }
     }
 }

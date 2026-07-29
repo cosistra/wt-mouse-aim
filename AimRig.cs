@@ -94,7 +94,11 @@ namespace NuclearOptionMouseAim
             bool flying     = Cfg.WriteControl.Value;  // context is already true here
             bool menuWants  = Guards.MenusOpen() || CursorManager.GetFlags() != CursorFlags.None;
             bool flyHidden  = flying && !menuWants;
-            bool aimCapture = flyHidden && !frozen && (inCockpit || inOrbit);
+            // `&& !ScenarioPlayer.Playing` — a running test card owns the marker. Without this the
+            // mouse keeps nudging _aimForward every rendered frame while the card writes it on the
+            // fixed step, so any stray hand movement is silently summed into the stimulus and the run
+            // still scores. Free-look (lookCapture) stays live: it moves the camera, not the aircraft.
+            bool aimCapture = flyHidden && !frozen && (inCockpit || inOrbit) && !ScenarioPlayer.Playing;
             // Orbit free-look: WE drive the camera with the mouse (so it gets the same sensitivity as
             // aiming), so capture the cursor exactly like aiming (None+hidden + Win32 recenter) instead of
             // handing the look to native. Cockpit free-look stays native (Locked+hidden, below).

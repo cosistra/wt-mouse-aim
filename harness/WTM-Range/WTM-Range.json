@@ -1,0 +1,102 @@
+{
+  "JsonVersion": 6,
+  "MapKey": {
+    "Type": "GameWorldPrefab",
+    "Path": "Terrain_naval"
+  },
+  "missionSettings": {
+    "description": "WTM-Range - isolated test range for the automated sweep harness (plans/instructor-feedback-loop.md). No units, pinned weather/wind/time-of-day, allowRespawn on, wreck cleanup wired up. Both Terrain_naval factions are listed with a ZERO AI budget - that is what makes the range isolated; an empty factions list does the opposite, since the game then auto-creates each one at AIAircraftLimit 6. One Boscali airbase is enabled so the player has a spawn point besides the pre-placed airborne subject.",
+    "playerMode": "Singleplayer",
+    "allowRespawn": true,
+    "playerStartingRank": 0,
+    "rankMultiplier": 1.0,
+    "successfulSortieBonus": 0.0,
+    "nuclearEscalationThreshold": 0.0,
+    "strategicEscalationThreshold": 0.0,
+    "wrecksMaxNumber": 4,
+    "wrecksDecayTime": 0.2
+  },
+  "environment": {
+    "timeOfDay": 12.0,
+    "timeFactor": 0.0,
+    "weatherIntensity": 0.0,
+    "cloudAltitude": 1800.0,
+    "windSpeed": 0.0,
+    "windTurbulence": 0.0,
+    "windHeading": 0.0,
+    "windRandomHeading": 0.0,
+    "moonPhase": 14.0
+  },
+  "aircraft": [
+    {
+      "type": "Multirole1",
+      "faction": "Boscali",
+      "UniqueName": "wtm-subject-01",
+      "globalPosition": {
+        "x": 0.0,
+        "y": 4000.0,
+        "z": 0.0
+      },
+      "rotation": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "w": 1.0
+      },
+      "playerControlled": true,
+      "playerControlledPriority": 0,
+      "startingSpeed": 250.0,
+      "fuel": 1.0,
+      "skill": 1.0,
+      "bravery": 0.5,
+      "livery": 0,
+      "liveryType": "Builtin",
+      "liveryName": "",
+      "savedLoadout": {
+        "Selected": []
+      }
+    }
+  ],
+  "vehicles": [],
+  "ships": [],
+  "buildings": [],
+  "scenery": [],
+  "containers": [],
+  "missiles": [],
+  "pilots": [],
+  "factions": [
+    {
+      "factionName": "Boscali",
+      "AIAircraftLimit": 0,
+      "reduceAIPerFriendlyPlayer": 0.0,
+      "addAIPerEnemyPlayer": 0.0
+    },
+    {
+      "factionName": "Primeva",
+      "AIAircraftLimit": 0,
+      "reduceAIPerFriendlyPlayer": 0.0,
+      "addAIPerEnemyPlayer": 0.0
+    }
+  ],
+  "airbases": [
+    {
+      "IsOverride": true,
+      "faction": "Boscali",
+      "UniqueName": "NE Airbase",
+      "DisplayName": "WTM Range Field",
+      "Disabled": false,
+      "Capturable": false
+    }
+  ],
+  "objectives": [
+    {
+      "Type": "None",
+      "UniqueName": "Mission Start",
+      "Faction": "",
+      "DisplayName": "",
+      "Hidden": true,
+      "Outcomes": []
+    }
+  ],
+  "outcomes": []
+}

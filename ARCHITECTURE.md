@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 0.68.0 -->
+<!-- ARCH-VERSION: 0.81.0 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -40,13 +40,20 @@ flowchart TB
         aim_rig["<b>aim_rig</b><br/>AimRig<br/>world-locked aim marker<br/>+ cursor regime"]
         chase["<b>chase</b><br/>ChaseController<br/>the instructor: marker → stick"]
         seam["<b>seam</b><br/>PilotPlayerStatePatch<br/>own/skip the native stick"]
+        seam_thr["<b>seam_thr</b><br/>PilotThrottlePatch<br/>own the throttle axis<br/>(card only, Update-time)"]
         campatch["<b>campatch</b><br/>Camera patches ×3<br/>view follows the marker"]
         telem["<b>telem</b><br/>ManeuverRecorder · AnomalyLog<br/>instrumentation sinks"]
+        scenario["<b>scenario</b><br/>ScenarioPlayer<br/>test cards: play · record · select<br/>sets entry condition at card start<br/>(off unless a card is running)"]
+        drone["<b>drone</b><br/>TestDrone · Drone<br/>uncrewed aircraft: spawn · fly · despawn<br/>N at once, staggered launch<br/>(off unless DroneEnabled)"]
+        drone_seam["<b>drone_seam</b><br/>TestDronePatch<br/>write a DRONE's ControlInputs<br/>(no-op for every other aircraft)"]
     end
 
     subgraph GAME["🟥 GAME — Assembly-CSharp (read-only)"]
         direction TB
         pps["PilotPlayerState<br/>PlayerAxisControls"]
+        pps_thr["PilotPlayerState<br/>PlayerThrottleAxis1Controls<br/>(Update)"]
+        pilot_fx["Pilot<br/>Pilot_OnAeroInputsApplied<br/>(EVERY pilot's fixed step)"]
+        spawner["Spawner · Encyclopedia · Unit<br/>SpawnAircraft · TryGetPrefab<br/>DisableUnit"]
         aircraft["Aircraft<br/>GetInputs · FilterInputs · rb"]
         filters["ControlsFilter.FlyByWire<br/>HeloControlsFilter<br/>RelaxedStabilityController"]
         camstates["CameraCockpitState<br/>CameraOrbitState<br/>CameraStateManager"]
@@ -57,15 +64,21 @@ flowchart TB
     subgraph OUT["🟩 ARTIFACTS & OFFLINE TOOLS"]
         direction LR
         log["LogOutput.log<br/>[anomaly] [maneuver] [seam]"]
-        csv["mouseaim-rec-VER-RUN-NN-*.csv<br/>45-column capture (v0.65)"]
-        pytool["debugtests/analyze-wobble.py<br/>--digest · scoring · --selftest<br/>debugtests/replay-pitcheff.py<br/>_pitchEff replay (v0.64) · --selftest"]
+        csv["mouseaim-rec-VER-RUN-NN-*.csv<br/>58-column capture (v0.78)"]
+        sidecar["mouseaim-rec-*.airframe.json<br/>readable capability snapshot (v0.69)<br/>aero areas from partsWithAero (v0.70)"]
+        pytool["debugtests/analyze-wobble.py<br/>--digest · scoring · --selftest<br/>debugtests/replay-pitcheff.py<br/>_pitchEff replay (v0.64) · --selftest<br/>debugtests/scorecard.py<br/>per-segment metrics → score.json (v0.69) · --selftest<br/>debugtests/compare-runs.py<br/>cross-run spread, grouped by airframe (v0.72) · --selftest"]
+        cards["BepInEx/config/wtmouseaim-cards/NAME.json<br/>recorded test cards (v0.71)<br/>basename = card id · one F1 checkbox each"]
+        range["harness/WTM-Range/WTM-Range.json<br/>isolated test mission — no units, pinned<br/>weather/wind/time, wreck cleanup on<br/>debugtests/check-mission.py validates it"]
     end
 
     bepin --> plugin
     unity --> plugin
     harmony --> seam
+    harmony --> seam_thr
+    harmony --> drone_seam
     harmony --> campatch
     win32 <--> aim_rig
+    unity -->|"FixedUpdate<br/>(stagger clock + frame-time sample)"| drone
 
     plugin --> cfg
     plugin --> aim_rig
@@ -73,16 +86,26 @@ flowchart TB
     cfg -.->|"reads"| chase
     cfg -.->|"reads"| campatch
 
+    scenario -->|"SetAimForward<br/>(scripted demand,<br/>seam prefix)"| aim_rig
+    scenario -->|"SegmentTag · CardTag<br/>Start/Stop"| telem
     aim_rig -->|"aim direction<br/>(world unit vector)"| chase
     aim_rig -->|"aim direction"| campatch
     aim_rig -->|"marker + boresight"| plugin
 
     pps -.->|"patched"| seam
+    pps_thr -.->|"patched (card only)"| seam_thr
+    scenario -->|"throttle · brake<br/>(OwnInputs)"| seam_thr
+    scenario -->|"rigid move of ALL part rbs · fuel<br/>+ zero Pilot.velocityPrev<br/>(entry force only)"| aircraft
     seam --> chase
     chase -->|"pitch / roll / yaw"| aircraft
     aircraft --> filters --> phys
     phys -->|"attitude · rates · velocity"| chase
     filters -.->|"probed via reflection"| chase
+
+    drone -->|"SpawnAircraft(player=null, HQ=null)<br/>DisableUnit + Destroy(go, 2s)"| spawner
+    pilot_fx -.->|"patched (postfix)"| drone_seam
+    drone_seam -->|"resolve by aircraft instance id;<br/>skip anything not a live drone"| drone
+    drone -->|"pitch/roll/yaw/throttle,<br/>then FilterInputs() by hand —<br/>no pilot state ever calls it"| aircraft
 
     camstates -.->|"patched"| campatch
     campatch --> camstates
@@ -98,10 +121,10 @@ flowchart TB
     classDef game fill:#7f1d1d,stroke:#f87171,color:#fef2f2
     classDef plat fill:#78350f,stroke:#fbbf24,color:#fffbeb
     classDef art fill:#14532d,stroke:#4ade80,color:#f0fdf4
-    class plugin,cfg,aim_rig,chase,seam,campatch,telem mod
-    class pps,aircraft,filters,camstates,misc,phys game
+    class plugin,cfg,aim_rig,chase,seam,seam_thr,campatch,telem,scenario,drone,drone_seam mod
+    class pps,pps_thr,pilot_fx,spawner,aircraft,filters,camstates,misc,phys game
     class unity,bepin,harmony,win32 plat
-    class log,csv,pytool art
+    class log,csv,sidecar,pytool,cards,range art
 ```
 
 **The one-sentence version:** the mouse moves a **world-locked point** in front of the aircraft
@@ -122,20 +145,27 @@ The marker moves on the render frame (`Update`), the stick is written on the phy
 flowchart TB
     subgraph U["🟨 Update — once per rendered frame"]
         direction TB
-        u1["plugin.Update<br/>hotkeys: master toggle · fly-level · record"]
-        u2["aim_rig.Update<br/>1. pick cursor regime<br/>2. read raw Win32 mouse delta<br/>3. rotate world aim vector<br/>4. clamp into MaxAimAngle cone"]
-        u1 --> u2
+        u1["plugin.Update<br/>hotkeys: master toggle · fly-level · record<br/>cards: run · record · abort · on-condition"]
+        u2["aim_rig.Update<br/>1. pick cursor regime<br/>2. read raw Win32 mouse delta<br/>3. rotate world aim vector<br/>4. clamp into MaxAimAngle cone<br/>STEP 2-3 SKIPPED while a card plays —<br/>mouse and card would otherwise SUM"]
+        u3["🟥 PilotPlayerState.PlayerThrottleAxis1Controls"]
+        u4["🟦 seam_thr PREFIX<br/>card running? write ci.throttle + skip native,<br/>so the pilot's lever never reaches ControlInputs.<br/>Must be HERE, not only on the fixed step:<br/>🟥 Airbrake.Update opens the boards on<br/>throttle == 0 every rendered frame"]
+        u1 --> u2 --> u3 --> u4
     end
 
     subgraph F["🟨 FixedUpdate — physics tick"]
         direction TB
+        f0["🟦 plugin.FixedUpdate → drone.FixedTick<br/>launch stagger countdown · prune dead drones ·<br/>sample Time.unscaledDeltaTime (FrameDt).<br/>The mod's only fixed-step hook that exists<br/>with no aircraft — everything else below hangs<br/>off a pilot that may not be there yet"]
         f1["🟥 PilotPlayerState.PlayerAxisControls"]
-        f2["🟦 seam PREFIX → chase.BeginFrame<br/>decide ownership; return false to SKIP native<br/>(cockpit only — orbit needs native's view axes)"]
+        f2["🟦 seam PREFIX → scenario.Tick → chase.BeginFrame<br/>Tick advances the card clock + writes the scripted<br/>demand FIRST, so Apply's read below is same-tick<br/>then: decide ownership; return false to SKIP native<br/>(cockpit only — orbit needs native's view axes)"]
         f3["🟥 native body — runs only if not skipped"]
         f4["🟦 seam POSTFIX → chase.Apply<br/>always runs; writes ci.pitch/roll/yaw"]
         f5["🟥 Aircraft.FilterInputs<br/>RelaxedStabilityController → FBW → surfaces"]
-        f6["🟥 Rigidbody integration"]
-        f1 --> f2 --> f3 --> f4 --> f5 --> f6
+        f6["🟥 JobManager.FixedUpdateEarly<br/>ScheduleJobs() FIRST, then PilotAeroInputs()"]
+        f7["🟥 Pilot.Pilot_OnAeroInputsApplied — every pilot"]
+        f8["🟦 drone_seam POSTFIX<br/>live drone? write its ControlInputs, then call<br/>Aircraft.FilterInputs OURSELVES — an uncrewed<br/>aircraft has no pilot state, and FilterInputs is<br/>only ever called FROM one, so the FBW would<br/>otherwise never run on it"]
+        f9["🟥 Rigidbody integration"]
+        f1 --> f2 --> f3 --> f4 --> f5 --> f6 --> f7 --> f8 --> f9
+        f0 --> f1
     end
 
     subgraph L["🟨 Camera state update"]
@@ -153,8 +183,8 @@ flowchart TB
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
     classDef game fill:#7f1d1d,stroke:#f87171,color:#fef2f2
-    class u1,u2,f2,f4,l2,g1 mod
-    class f1,f3,f5,f6,l1 game
+    class u1,u2,f0,f2,f4,f8,l2,g1 mod
+    class f1,f3,f5,f6,f7,f9,l1 game
 ```
 
 **Why the prefix is conditional.** Returning `false` from the prefix skips the native body — which is
@@ -227,7 +257,7 @@ flowchart TB
     subgraph EST["2 · ESTIMATE REGIME"]
         e1["bigTurn blend — continuous ramp<br/>fine direct-nudge ↔ bank-and-pull"]
         e2["azErr — world azimuth error<br/>+ vertical deprojection (v0.58)"]
-        e3["heading-rate LPF (v0.51)<br/>nose-only, so lead can't fight a mouse flick"]
+        e3["heading-rate LPF (v0.51)<br/>nose-only, so lead can't fight a mouse flick<br/>v0.78: + MARKER azimuth-rate LPF, signed,<br/>same tau (one shared const) — the demand rate,<br/>Atan2/DeltaAngle so the ±180° wrap is a no-op"]
         e4["yaw-weakness estimate (v0.35)<br/>is the rudder actually CLOSING the error?"]
         e5["hover blend heliBlend (v0.43)<br/>fwd airspeed + AutoHover + tilt angle"]
         e1 --> e2 --> e3 --> e4 --> e5
@@ -244,7 +274,7 @@ flowchart TB
     end
 
     subgraph COND["5 · CONDITION"]
-        c1["anticipatory lead → brake-only clamp<br/>→ proportional floor → achievability cap<br/>(v0.67: cap also folds the LIVE alpha margin,<br/>not just gLimit — turn demand ≤ what the wing<br/>can pull at this AoA)"]
+        c1["anticipatory lead → brake-only clamp<br/>→ proportional floor → settle-exit ramp<br/>→ <b>marker-rate feed-forward (v0.78)</b><br/>→ achievability cap<br/>(v0.67: cap also folds the LIVE alpha margin,<br/>not just gLimit — turn demand ≤ what the wing<br/>can pull at this AoA)<br/>v0.78 order is load-bearing: the feed-forward is<br/>added BEFORE the cap, so the probed omegaMax<br/>bounds it too and yawCapped sees the TOTAL demand.<br/>Both lockstep omega sites do it identically"]
         c2["<b>AoA envelope</b> — ceiling gates (v0.55)<br/>predictive lead; cut only the command<br/>driving AoA OUTWARD"]
         c2b["<b>AoA-utilization demand schedule</b> (v0.59)<br/>live AoA vs this airframe's PROBED ceiling,<br/>folded into qSched. Fast-attack / slow-release<br/>so demand can't snap hot again as AoA falls<br/>back through the ceiling — the loaded-jet fix"]
         c2c["<b>AoA recovery bias</b> (v0.59, damped v0.62)<br/>restoring pitch ∝ predicted excess past either<br/>ceiling. Continuous + symmetric, exactly zero<br/>inside the envelope — the gates only CUT,<br/>so past the ceiling nothing flew it back in.<br/>v0.62: uses the TWO-SIDED predicted AoA<br/>(AoA + rate·lead), NOT the gates' one-sided<br/>preds — the lead is its damping term, so it<br/>fades as recovery develops instead of holding<br/>to the crossing (that was the +43→-47 bang-bang)"]
@@ -383,32 +413,111 @@ flowchart LR
 
     chase -->|"event only,<br/>per-type cooldown"| an["🟦 AnomalyLog<br/>overshoot · over-roll · hunt · yaw-wag<br/>roll-wobble · az-limit-cycle · persistent-miss · overstress"]
     chase -->|"one line per<br/>completed turn"| mv["🟦 [maneuver] summary"]
-    chase -->|"hotkey-armed,<br/>rate-limited"| rec["🟦 ManeuverRecorder<br/>45-column CSV, self-describing<br/># header: gains · law · airframe · FBW params · run/rec index<br/>v0.63: + tgtPRaw/aoaGU/aoaGD/aoaRec/qSched/pEff<br/>(the pitch decision variables)<br/>v0.65: + settleOn (B2 fine-settle gate engaged)"]
+    chase -->|"hotkey-armed,<br/>rate-limited"| rec["🟦 ManeuverRecorder<br/>58-column CSV, self-describing<br/># header: gains · law · airframe · FBW params · run/rec index<br/>v0.63: + tgtPRaw/aoaGU/aoaGD/aoaRec/qSched/pEff<br/>(the pitch decision variables)<br/>v0.65: + settleOn (B2 fine-settle gate engaged)<br/>v0.69: + alt/airDensity/pos·3/vel·3/segTag<br/>(energy + hover metrics, test-segment tagging)<br/>v0.70: + tSeg/tWall (segment clock + unscaled<br/>wall clock; dt/dtWall = timeScale)<br/>v0.77: + thr (COMMANDED throttle — the one<br/>flight input a card owns and the capture hid)<br/>v0.78: + aimRate (SIGNED marker azimuth rate —<br/>recorded on BOTH sides of the feed-forward toggle,<br/>so 'it fired and helped' is separable from<br/>'it never fired')"]
     chase -->|"live"| hud["🟦 debug HUD + anomaly flash"]
 
     an --> logf["🟩 LogOutput.log<br/>+ mouseaim-anomalies-VER-RUN-SESSION.log"]
     mv --> logf
     rec --> csvf["🟩 mouseaim-rec-SESSION.csv"]
+    rec -->|"once at Start()<br/>all reads fail-soft"| sidef["🟩 mouseaim-rec-*.airframe.json<br/>pilotType · mass · thrust · envelope<br/>FBW params · Cl/Cd(α) curves · loadout"]
 
     logf --> tool["🟩 analyze-wobble.py"]
     csvf --> tool
+    csvf --> sc["🟩 scorecard.py<br/>segments by segTag → per-type metrics<br/>reuses analyze-wobble's detectors"]
+    sidef --> sc
+    sc --> scj["🟩 score.json<br/>(M3: + physics-normalized grade)"]
+    sc --> cmp["🟩 compare-runs.py<br/>spread across N runs of one card<br/>GROUPS BY AIRFRAME, never pools<br/>excludes truncated segments"]
     tool --> d1["<b>--digest</b> — ~30-line phase-segmented timeline<br/>ALWAYS run this first; raw CSV to an LLM<br/>is expensive and mostly steady-state redundancy"]
     tool --> d2["default — death-wobble scoring<br/>episodes · frequency · amplitude · roll-rail %"]
     tool --> d3["--selftest"]
 
-    sess(["session id — yyyyMMdd-HHmmss<br/>the human join key across all three artifacts<br/>(Time.time is the per-row numeric join key)"])
+    sess(["session id — yyyyMMdd-HHmmss<br/>the human join key across all artifacts<br/>(Time.time is the per-row numeric join key)"])
     sess -.-> logf
     sess -.-> csvf
+    sess -.-> sidef
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
     classDef art fill:#14532d,stroke:#4ade80,color:#f0fdf4
     class chase,an,mv,rec,hud mod
-    class logf,csvf,tool,d1,d2,d3,sess art
+    class logf,csvf,sidef,tool,sc,scj,cmp,d1,d2,d3,sess art
 ```
 
 ---
 
-## L1.6 — `cfg`: configuration & live tuning
+## L1.6 — `drone`: the uncrewed harness (v0.81, phase 1)
+
+Every measurement this project has taken cost a human sitting in a cockpit for the length of the
+card. This subsystem removes that: the mod spawns its own aircraft, owns their `ControlInputs`, and
+destroys them again. **Phase 1 is the harness only** — nothing here is wired to `chase` or
+`scenario`, and the built-in level-hold exists solely to prove the inputs land.
+
+```mermaid
+flowchart TB
+    key["🟦 spawn key (F2)<br/>drone.RequestLaunch"]
+    key --> cap["capture the lane geometry ONCE<br/>player position + flat heading at key-press.<br/>Lanes are laid out from THERE, not from<br/>wherever he has flown to by drone N"]
+    cap --> pend["pending = DroneCount"]
+
+    tick["🟨 plugin.FixedUpdate → drone.FixedTick"]
+    tick --> ft["sample Time.unscaledDeltaTime → FrameDt<br/>log '[drone] frame hitch' on the RISING edge<br/>(a hitch runs several FixedUpdates back to back<br/>with the SAME dt — edge-gate or one 300 ms stall<br/>prints fifteen identical lines)"]
+    tick --> due{"pending > 0 and<br/>Time.time >= nextAt ?"}
+    due -->|yes| sp["spawn ONE, lane = Abeam + Lane*slot<br/>nextAt += DroneStaggerSec"]
+    tick --> prune["prune drones the game removed<br/>(shot down, hit the sea, mission cleanup) —<br/>Unity reports a destroyed object as null WITHOUT<br/>throwing, so a stale dict entry is silent"]
+
+    sp --> gate{"gates, in order —<br/>any failure spawns NOTHING"}
+    gate --> g1["Spawner in scene?"]
+    gate --> g2["<b>Spawner.IsServer?</b><br/>SpawnAircraft has no [Server] attribute; the gate<br/>is inside ServerObjectManager.Spawn. Asking the<br/>Spawner's own NetworkBehaviour asks the same<br/>question that will be enforced.<br/>SP is a HOST, so SP + hosting work, MP client never"]
+    gate --> g3["Encyclopedia.TryGetPrefab(DroneAirframe)"]
+    g1 --> call
+    g2 --> call
+    g3 --> call
+    call["<b>SpawnAircraft(player=null, HQ=null, …)</b><br/>fuel 1.0, unique name 'wtm-drone-N'.<br/><b>HQ=null IS THE AI SWITCH</b>: SetStartingAiState<br/>bails to parkedState when NetworkHQ == null, so the<br/>AI states are never even constructed.<br/>+ belt-and-braces SwitchState(null)"]
+    call --> assert["<b>ac.Player != null ⇒ DESTROY IT</b><br/>the one check that must never be skipped"]
+    assert --> reg["register: list + dict keyed by<br/>aircraft.GetInstanceID()"]
+
+    post["🟦 drone_seam POSTFIX on Pilot.Pilot_OnAeroInputsApplied"]
+    post --> idle{"TestDrone.Idle ?<br/>(one int compare)"}
+    idle -->|yes| out1["return — the cost of this file<br/>with no drone alive"]
+    idle -->|no| look["dict probe on the pilot's aircraft id.<br/>MISS ⇒ return. This is what keeps the player's<br/>aircraft out: it can only enter the dict via Spawn,<br/>which spawns with player=null and asserts it"]
+    look --> fly["<b>Drone.Fly(d)</b> — the PHASE-2 HOOK.<br/>Per DRONE, not one static: N drones need N<br/>independent controllers. Default = LevelHold"]
+    fly --> filt["<b>ac.FilterInputs()</b> — by hand.<br/>RelaxedStabilityController + FBW are only ever<br/>called FROM a pilot state, and this aircraft has<br/>none, so raw inputs would reach the surfaces —<br/>a DIFFERENT plant from the one the law is tuned<br/>against (the FBW reads pitch/yaw as a RATE)"]
+
+    classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
+    classDef plat fill:#78350f,stroke:#fbbf24,color:#fffbeb
+    class key,cap,pend,ft,due,sp,prune,gate,g1,g2,g3,call,assert,reg,post,idle,out1,look,fly,filt mod
+    class tick plat
+```
+
+**Why the launch is staggered.** The unit of measurement is a *replicate set*, not a run — a single
+capture has no spread. Replicates flown side by side cost one card length instead of N, but only if
+they stay **independent samples**. A frame hitch lands on whatever segment is running when it
+happens; launch N drones on the same instant and one hitch corrupts the *same* segment in all N
+identically, which is exactly the independence they were flown for. Offsetting the launches offsets
+their segment boundaries. `DroneStaggerSec` (default 3 s) only has to exceed a typical hitch — and
+because that is an assumption, `FrameDt` is sampled every fixed step and hitches over 50 ms are
+logged, so it stays a measurement.
+
+**Physics is full fidelity, with one documented difference.** `CheckIfLocalSim` is
+`Player != null ? IsLocalPlayer : Server.Active`, so on an SP host an unowned aircraft is LocalSim →
+`SetComplexPhysics()`, gravity on, every AeroPart in the aero job. The distance LOD `CheckPhysicsLod`
+has **zero call sites** in 0.34. The one real difference: with no player reference,
+`rb.collisionDetectionMode` stays `Discrete` instead of `Continuous` — aerodynamics unaffected, only
+high-speed tunnelling.
+
+**Two things to know rather than fix.** `Aircraft.ServerDisableUnit` calls `ReportKilled()` unless
+the aircraft is landed at a friendly airbase, so despawning posts a kill message to the HUD
+(cosmetic). And `UnitRegistry.persistentUnitLookup` is **never pruned** by the game, so every spawn
+leaks one dictionary entry for the life of the mission — a few hundred entries is nothing, and that
+dictionary is read from several places, so do not reach into it.
+
+**The built-in level-hold is NOT the mod's control law.** It is a two-gain cascade (altitude →
+climb rate → stick, plus a P wings-leveler) sharing nothing with `chase` — no probes, no schedules,
+no achievability cap, no AoA envelope. Its only job is to answer "did the inputs land, is the
+physics real?" with an aircraft that visibly holds altitude. It is scheduled for deletion in phase 2;
+do not tune it and never compare against it.
+
+---
+
+## L1.7 — `cfg`: configuration & live tuning
 
 ```mermaid
 flowchart LR
@@ -417,7 +526,7 @@ flowchart LR
     cfg -->|"SettingChanged hook"| logline["🟩 config logged at startup<br/>+ on every live edit"]
     cfg -->|"NoteConfigChange"| csvcomment["🟩 '# cfg' comment row<br/>inside the active recording"]
 
-    cfg --> sec["<b>sections</b><br/>General · HUD · Aim · Control · Camera<br/>Recorder · FlyLevel · ZZZ-Panic Button"]
+    cfg --> sec["<b>sections</b><br/>General · HUD · Aim · Control · Camera<br/>Recorder · Scenario · Scenario Cards · Drone<br/>FlyLevel · ZZZ-Panic Button"]
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
     classDef plat fill:#78350f,stroke:#fbbf24,color:#fffbeb
@@ -445,14 +554,36 @@ repo must appear here.** `debugtests/check-architecture.py` enforces exactly tha
 | `aim_rig` | `AimRig.cs` | `AimRig`, `Guards` | world-locked marker, Win32 raw mouse, cursor regimes; `Guards` = "should the mod be passive" |
 | `chase` | `ChaseController.cs` | `ChaseController` | the instructor: measure → estimate → probe → law → condition → handoff → write |
 | `seam` | `ChaseController.cs` | `PilotPlayerStatePatch` | Harmony prefix/postfix on `PilotPlayerState.PlayerAxisControls` |
+| `seam_thr` | `ChaseController.cs` | `PilotThrottlePatch` | Harmony prefix on `PilotPlayerState.PlayerThrottleAxis1Controls` (**Update**, not FixedUpdate). Skips native while a card plays, so the pilot's throttle/customAxis1 axes never reach `ControlInputs` — the game's airbrake reads `throttle == 0` every rendered frame, so owning throttle on the fixed step alone left it half-open |
 | `campatch` | `CameraPatches.cs` | `CockpitCameraPatch`, `CameraOrbitPatch`, `CameraSwitchStatePatch` | view follows the marker in cockpit + orbit |
-| `telem` | `Recording.cs` | `ManeuverRecorder`, `AnomalyLog` | CSV capture + event-only anomaly sink |
+| `telem` | `Recording.cs` | `ManeuverRecorder`, `AnomalyLog` | CSV capture (58 cols) + `.airframe.json` sidecar + event-only anomaly sink |
+| `scenario` | `ScenarioPlayer.cs` | `ScenarioPlayer` | test-card playback + card recording; writes `AimRig.SetAimForward` from the seam prefix, tags rows via `ManeuverRecorder.SegmentTag`. **The one place the mod writes aircraft PHYSICS state** (`rb.position/rotation/velocity` + fuel, at card start only — see below) rather than only control inputs. That write has **two** mandatory pairings, both learned by destroying the aircraft: (1) zero `Pilot.velocityPrev` — the game derives G by differencing velocity across fixed steps and destroys the airframe past 20 g, so an unpaired velocity step reads as ~870 g; (2) move the WHOLE ASSEMBLY — an aircraft under complex physics is one rigidbody per part joined by FixedJoints, so moving only `Aircraft.rb` stretches every joint by the displacement and PhysX pays it back as ~`err/dt` of velocity (measured 19x err). Apply the same rigid transform to every `partLookup[].rb` and no joint sees a relative change. **Do not** merge via `SetSimplePhysics` instead: its `Destroy` is deferred to end-of-frame (so a FixedUpdate caller still simulates with live stretched joints) and destroying components invalidates whatever the game cached |
+| `drone` | `TestDrone.cs` | `TestDrone`, `Drone` | uncrewed test aircraft: spawn / AI-disable / per-tick input write / despawn, so a card is flown by the harness instead of by a human. Holds **N drones at once**, keyed by `Aircraft.GetInstanceID()` — the player's aircraft is never in that dictionary, which is the failure this subsystem is built to make impossible. Launches on a **stagger** (`DroneCount` × `DroneStaggerSec`): replicates that fly the same segment at the same instant are not independent samples, so one frame hitch would corrupt all of them identically and read as a *tighter* noise floor. Inert unless `DroneEnabled`. Also samples `Time.unscaledDeltaTime` per fixed step (`FrameDt`) — during a hitch Unity runs several FixedUpdates back to back at the same value, so that one number identifies a hitch rather than leaving it inferred |
+| `drone_seam` | `TestDrone.cs` | `TestDronePatch` | Harmony postfix on `Pilot.Pilot_OnAeroInputsApplied`. This fires for **every** pilot's fixed step, player included, so it resolves `aircraft.GetInstanceID()` against the drone dictionary and returns immediately for anything else — the mod writing the player's stick from the drone path is the worst failure this file can have, so the guard is a dictionary miss rather than a heuristic. Chosen over a `MonoBehaviour.FixedUpdate` because `JobManager.FixedUpdateEarly` schedules the aero jobs *before* `PilotAeroInputs()`, so this is the seam where an input write still reaches the current tick |
+
+| `drone` | `TestDrone.cs` | `TestDrone`, `Drone` | the uncrewed harness (v0.81, phase 1): spawn / fly / despawn aircraft nobody is sitting in, **N alive at once**. `TestDrone` is the manager — a live list plus a dictionary keyed by `Aircraft.GetInstanceID()`, the staggered-launch countdown, and the fixed-step `FrameDt` sample. `Drone` is one aircraft: its id, its cached instance id (the dict key must outlive the aircraft), its spawn altitude, and its **own** `Fly` delegate — per drone, not one static, because N drones need N independent controllers. **The second place the mod writes aircraft state that is not the player's stick**, and the only one that creates and destroys units. Spawns with `player=null, HQ=null`, which is what turns the AI off *by construction* (`SetStartingAiState` bails to `parkedState` when `NetworkHQ == null`). Refuses cleanly with no active server — SP is a host, an MP client is not. Phase 2 attaches `chase` to `Drone.Fly`; until then the built-in level-hold flies them, and it is **not** the mod's control law |
+| `drone_seam` | `TestDrone.cs` | `TestDronePatch` | Harmony **postfix** on `Pilot.Pilot_OnAeroInputsApplied` — the fixed step the game gives *every* pilot, and the same seam the player path writes from (`PilotPlayerState.FixedUpdateState` is called from inside it), so a drone capture is comparable to a human one. Resolves the pilot's aircraft against the drone dictionary and **no-ops for everything else, the player's aircraft first of all**. Then calls `Aircraft.FilterInputs()` by hand: the FBW and `RelaxedStabilityController` are only ever run *from a pilot state*, and an uncrewed aircraft has none |
 
 ### Game types we patch or read
 
 | game type | how | where |
 |---|---|---|
 | `PilotPlayerState.PlayerAxisControls` | **patched** (prefix + postfix) | `seam` |
+| `Pilot.Pilot_OnAeroInputsApplied` | **patched** (postfix) — writes `GetInputs()` then calls `FilterInputs()` for **drone aircraft only**; a no-op for anything not in the drone dictionary | `drone` |
+| `Spawner.SpawnAircraft` | called via `NetworkSceneSingleton<Spawner>.i` (not `[Server]` itself, but ends in `ServerObjectManager.Spawn`, so it needs an active server — works single-player/hosting, refuses cleanly as an MP client). Spawned with `HQ = null` so `SetStartingAiState` bails before constructing any AI state | `drone` spawn |
+| `Encyclopedia.i.TryGetPrefab` | read — resolves the airframe prefab by json key | `drone` spawn |
+| `Pilot.SwitchState(null)` | called — belt-and-braces AI detach (spawning airborne with a null HQ already leaves the pilot stateless) | `drone` spawn |
+| `Aircraft.FilterInputs` | called **manually** — the FBW/stability filter runs only from pilot states, so a drone with no pilot state would fly completely unfiltered without this | `drone` per-tick |
+| `Unit.DisableUnit` + `Object.Destroy(go, 2f)` | called — the game's own removal path from `RemoveUnitOutcome.RemoveUnit`, minus the ejection branch (that fires only for an aircraft with a `Player`) | `drone` despawn |
+| `PilotPlayerState.PlayerThrottleAxis1Controls` | **patched** (prefix, skip-native, card only) | `seam_thr` |
+| `Pilot.Pilot_OnAeroInputsApplied` | **patched** (postfix) — fires for every pilot in the mission; no-ops unless the pilot's aircraft is in the drone dictionary | `drone_seam` |
+| `Spawner.SpawnAircraft` | **called** (public) via `NetworkSceneSingleton<Spawner>.i`, with `player=null, loadout=null, HQ=null, hangar=null` — the encyclopedia browser's own throwaway-aircraft call shape. Gated on `Spawner.IsServer`; refuses cleanly otherwise | `drone` |
+| `Encyclopedia.TryGetPrefab` | **called** (public) to resolve `DroneAirframe` (a mission-file `jsonKey`) to a prefab; a miss refuses the launch | `drone` |
+| `Pilot.SwitchState(null)`, `Pilot.dead` / `.ejected` / `.aircraft` | **called / read** (public) — belt-and-braces AI-off, and the two flags the patched method itself early-returns on | `drone` |
+| `Unit.DisableUnit` + `Object.Destroy(go, 2f)` | **called** (public) — the game's own removal path, copied from `RemoveUnitOutcome.RemoveUnit`. `Unit.OnDestroy` unregisters by itself | `drone` |
+| `Aircraft.GetInputs()`, `Aircraft.FilterInputs()` | **written / called** (public) on a DRONE only — the live `ControlInputs` instance, then the FBW pass no pilot state is there to run | `drone_seam` |
+| `Aircraft.pilots[].velocityPrev`, `Aircraft.velocityPrev` | **written** (public fields), one tick, at entry force only | `scenario` entry force |
+| `Aircraft.partLookup[].rb` | **written** (public) — every part rigidbody gets the SAME rigid transform as the root, so no joint sees a relative change | `scenario` entry force |
 | `CameraCockpitState.UpdateState` | **patched** (postfix) | `campatch` |
 | `CameraOrbitState.UpdateState` | **patched** (prefix + postfix) | `campatch` |
 | `CameraStateManager.SwitchState` | **patched** (prefix + postfix) | `campatch` |

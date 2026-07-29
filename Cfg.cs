@@ -85,6 +85,7 @@ namespace NuclearOptionMouseAim
         // pressure, so the flat cut just halved high-speed assist-off turns ("3x slower" reports); the
         // ChaseController FBW probe now reads the per-airframe params and normalizes pitch exactly.
         public static ConfigEntry<float> BankSlewRate;        // deg/s: rate limit on EvolvedLegacy's bank target (v0.54 anti-relay)
+        public static ConfigEntry<bool>  MarkerRateFeedForward; // v0.78: feed the marker's own azimuth rate into the turn demand (A/B lever)
 
         // --- Shared bank-target airspeed floor (v0.60, was BankToTurnVmin): the V floor in the
         // atan(omega*V/g) bank math, used at both lockstep sites (Apply's shared bankTR and
@@ -108,6 +109,32 @@ namespace NuclearOptionMouseAim
         // problem can be captured cleanly across aircraft and the assist calibrated against real data.
         public static ConfigEntry<KeyCode> RecordKey;         // start/stop the CSV capture (default F8)
         public static ConfigEntry<float>   RecordRateHz;      // samples per second written to the CSV
+
+        // --- Scenario player (M1 of plans/instructor-feedback-loop.md): hotkey-gated test cards that
+        // drive the AIM DEMAND (never the law) so a maneuver can be re-flown identically against a
+        // later build. Idle unless a key is pressed. The per-card enable checkboxes are bound by
+        // ScenarioPlayer.BindCards into the "Scenario Cards" section, one per card.
+        public static ConfigEntry<KeyCode> ScenarioRunKey;    // start/stop a suite of enabled cards
+        public static ConfigEntry<KeyCode> ScenarioRecordKey; // start/stop recording a card from your own flying
+        public static ConfigEntry<KeyCode> ScenarioAbortKey;  // panic key: stop whatever card is running
+        public static ConfigEntry<KeyCode> ScenarioEntryKey;  // put the aircraft on condition, without running
+        public static ConfigEntry<string>  ScenarioCardSet;   // non-empty overrides the checkboxes (scripted runs)
+        public static ConfigEntry<bool>    ScenarioForceEntry; // set speed/alt/attitude at card start instead of refusing
+        public static ConfigEntry<float>   ScenarioEntryFuel;  // fuel ratio pinned at card start (mass control); <=0 leaves it alone
+        public static ConfigEntry<float>   ScenarioThrottle;   // throttle held for the whole card (cruise, deliberately not full)
+        public static ConfigEntry<int>     ScenarioRepeat;     // replicate count: the whole selection, flown back to back
+
+        // --- Test drone (v0.81, phase 1 of the uncrewed harness): spawn/fly/despawn aircraft nobody is
+        // sitting in, so a card suite can run unattended and N replicates can fly side by side.
+        // Entirely inert unless DroneEnabled is ticked — the hotkeys are not even read while it is off.
+        public static ConfigEntry<bool>    DroneEnabled;     // master on/off for the whole harness
+        public static ConfigEntry<KeyCode> DroneSpawnKey;    // launch DroneCount drones, DroneStaggerSec apart
+        public static ConfigEntry<KeyCode> DroneDespawnKey;  // remove every live drone + cancel a pending launch
+        public static ConfigEntry<string>  DroneAirframe;    // Encyclopedia jsonKey of the airframe to spawn
+        public static ConfigEntry<float>   DroneSpawnAlt;    // m MSL (datum frame — same as a card's startAlt)
+        public static ConfigEntry<float>   DroneSpawnSpeed;  // m/s at spawn
+        public static ConfigEntry<int>     DroneCount;       // how many one key press launches
+        public static ConfigEntry<float>   DroneStaggerSec;  // gap between consecutive launches
 
         // --- Fly Level autopilot (v0.24): toggle a key to hold wings-level + nose-on-horizon at the
         // heading captured when you pressed it. Ignores the reticle; a stick nudge or re-press releases it.
@@ -294,6 +321,8 @@ namespace NuclearOptionMouseAim
             BankSlewRate        = cf.Bind("Control", "BankSlewRate", 60f, new ConfigDescription(
                 "EvolvedLegacy law only (v0.54). Rate limit (deg/s) on the atan(omega*V/g) bank target the roll servo chases. Nineteen v0.53 recordings (KR67 + AB4 Alcyon, 450-536 m/s) showed the brake-clamped lead rectifying heading-rate ripple into a bank target that BANGED 0<->48-65 deg at ~1.5 Hz from a 1-3 deg aim error — the roll servo faithfully chased it (corr 0.79-0.96) and the wings rocked +/-14-30 deg while station-keeping. A target that can only move this fast can't flap above the airframe's own roll response, and a slower-moving target also shrinks the 15-20 deg bank overshoot that sustained the slower 0.5 Hz cycle in big turns. 60 deg/s still reaches the full 72 deg bank in ~1.2 s (about what a real roll-in takes). 0 = off (instant target, old behaviour). Lower toward 40 if the wings still rock; raise toward 90-120 if turn entry feels lazy.",
                 new AcceptableValueRange<float>(0f, 360f)));
+            MarkerRateFeedForward = cf.Bind("Control", "MarkerRateFeedForward", true,
+                "Marker-rate feed-forward (v0.78). While the marker SWEEPS at a steady rate the turn loop is pure proportional — the only integral term is gated to the fine cone and is flat zero out at a 9-degree error — so the loop can only produce a turn rate by HOLDING an error to generate it. Measured: the aim marker sweeping at 12.07 deg/s, the aircraft matching it exactly, and a rock-steady 9.54 deg of azimuth lag behind it, with nothing saturated (5.2 g of a 9 g limit, 7.7 deg of a 27 deg AoA ceiling). ON adds the marker's own measured azimuth rate straight into the commanded turn rate, so that rate no longer has to be bought with standing error — gain is exactly 1.0 (matching the marker is kinematics, not a tuning constant) and it is bounded by the same probed per-airframe achievable-rate cap as everything else, so it can never ask for a turn the aircraft cannot fly. Contributes EXACTLY zero whenever the marker is stationary, so pointing, capturing and holding are untouched; only sustained tracking of a moving marker changes. This is a checkbox rather than a rebuild so the change can be A/B'd inside one session with no restart and no DLL swap: fly a set of runs ON, toggle here, fly the same runs OFF, everything else bit-identical. The aimRate CSV column is recorded on BOTH sides.");
             BankSpeedFloor      = cf.Bind("Control", "BankSpeedFloor", 50f, new ConfigDescription(
                 "Airspeed FLOOR (m/s) used inside the speed-correct bank physics phi=atan(omega*V/g) at both lockstep sites (Apply's shared bank target and the EvolvedLegacy law). The bank is sized in proportion to airspeed V; at very low speed / hover V->0 would collapse the commanded bank to nothing, so V is floored here to keep the maths sane (a gentle, sensible bank rather than zero). Has no effect above this speed. ~50 m/s is a safe floor; raise it if low-speed turns feel too weak, lower it toward true stall speed for more honest slow-flight banking. (v0.60: renamed from BankToTurnVmin — an old cfg line with that key is ignored and this binds at the identical default 50, so behaviour is unchanged.)",
                 new AcceptableValueRange<float>(10f, 150f)));
@@ -316,6 +345,49 @@ namespace NuclearOptionMouseAim
             RecordRateHz        = cf.Bind("Recorder", "RecordRateHz", 20f, new ConfigDescription(
                 "How many samples per second the maneuver recorder writes to the CSV. Higher = finer time resolution (bigger files); 20/s resolves a normal correction well without bloating the file. Sampling runs on the physics step, so very high values are capped by the fixed-update rate.",
                 new AcceptableValueRange<float>(5f, 60f)));
+
+            ScenarioRunKey      = cf.Bind("Scenario", "ScenarioRunKey", KeyCode.F6,
+                "Key that runs the enabled TEST CARDS (F1 > 'Scenario Cards') on the aircraft you're flying. A card scripts the AIM MARKER — a fixed sequence of steps, sweeps and fine-tracking segments, world-fixed at card start — while the instructor flies it exactly as it flies your mouse, and the maneuver recorder captures the whole thing with each segment named in the CSV. That makes a change to the mod measurable: run the same card before and after, diff the two CSVs. Press again (or touch the stick) to abort. Default F6.");
+            ScenarioRecordKey   = cf.Bind("Scenario", "ScenarioRecordKey", KeyCode.F5,
+                "Key that RECORDS a test card from your own flying: press once, fly the maneuver with the mouse as usual, press again to save. What's recorded is the aim demand (where you pointed), sampled on the physics step and stored relative to the heading you started on — so replaying it commands exactly the same maneuver and is indistinguishable from a built-in card. Saved as JSON into BepInEx/config/wtmouseaim-cards/; rename the file to rename the card. Default F5.");
+            ScenarioAbortKey    = cf.Bind("Scenario", "ScenarioAbortKey", KeyCode.F4,
+                "Panic key: immediately stops any running test card and hands the aim marker back to your mouse. Touching the stick / pedals does the same thing automatically, so this is only for stopping a card while hands-off. Default F4.");
+            ScenarioEntryKey    = cf.Bind("Scenario", "ScenarioEntryKey", KeyCode.F3,
+                "Key that puts the aircraft ON THE ENTRY CONDITION of the first enabled test card — its declared speed and altitude, wings level, nose on the horizon, heading unchanged, fuel set — WITHOUT starting the run. Use it to set up: press it, look around, press the run key when you're ready. It is the same placement a card start does, so what you get is exactly where the run would have begun. Default F3.");
+            ScenarioCardSet     = cf.Bind("Scenario", "ScenarioCardSet", "",
+                "Scripted-run override: a comma-separated list of card names to run, IN THIS ORDER, ignoring the per-card checkboxes (e.g. 'fixedwing-v1,rec-20260727-101500'). Leave EMPTY for normal use — then the checkboxes in 'Scenario Cards' decide. Cards whose airframe class doesn't match what you're flying are skipped either way.");
+            ScenarioForceEntry  = cf.Bind("Scenario", "ScenarioForceEntry", true,
+                "PUT THE AIRCRAFT ON CONDITION when a card starts, instead of refusing to run until you fly there yourself. The card's declared entry speed and altitude are applied directly (wings level, nose on the horizon, heading unchanged) and the card's first segment absorbs the transient. Hand-flying to 'roughly 250 m/s at roughly 4000 m' is not repeatable to the 1-3% the metrics now resolve, so this removes the largest remaining run-to-run variable. Turn OFF to go back to the old behaviour, where a card outside its entry window simply refuses to start. Cards that declare no entry condition are unaffected either way.");
+            ScenarioEntryFuel   = cf.Bind("Scenario", "ScenarioEntryFuel", 1.0f, new ConfigDescription(
+                "Fuel ratio (0..1) set at card start, so every run of a card flies at the SAME MASS. Fuel burn is otherwise a one-way drift across a session: four back-to-back Ifrit runs lost 1255 kg (5.1% of gross), which is larger than the 1-3% run-to-run spread the metrics resolve — so an uncontrolled tank turns a mass trend into what looks like a law difference. 1.0 (full) is the default because it is a well-defined anchor every run can reach. Lower it to test the same card at a lighter weight. Set to 0 to leave fuel untouched. Requires ScenarioForceEntry. Does not touch stores: a card fires nothing, so loadout mass is already constant within a session.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            ScenarioThrottle    = cf.Bind("Scenario", "ScenarioThrottle", 0.7f, new ConfigDescription(
+                "Throttle held for the WHOLE card, overriding your throttle axis so the energy profile is identical every run (your physical throttle is ignored while a card plays, and yours again the moment it ends). 0.7 is a CRUISE setting, chosen so the aircraft can still manoeuvre: v0.73 used the airframe's own cruiseThrottle, which turned out to be the AI's cruise-hold setpoint (0.9 on the Ifrit), lit the afterburner, and the card then over-G'd itself trying to fly a turn at a speed the airframe could not turn at. A baseline has to be a speed the plane can manoeuvre at, not its fastest. This is a fixed position, not a speed hold: entry speed is already forced and the demand sequence is fixed, so a fixed throttle makes the run repeatable without adding a second control loop fighting the one being measured. NOTE: exactly 0 is the game's airbrake trigger, so this is floored just above it.",
+                new AcceptableValueRange<float>(0f, 1f)));
+            ScenarioRepeat      = cf.Bind("Scenario", "ScenarioRepeat", 1, new ConfigDescription(
+                "REPLICATE COUNT: how many times the whole selection is flown, back to back, from ONE press of the run key. A single run of a card measures nothing on its own — every metric needs a spread before a change can be called real — and replicates were previously only reachable by typing a card name repeatedly into ScenarioCardSet, which is a text field nobody finds. Each replicate re-applies the entry condition (speed, altitude, attitude, fuel) and writes its OWN capture file, so 4 replicates give 4 independent CSVs, not one long one. The selection repeats as a BLOCK (A,B,A,B — not A,A,B,B) so that any one-way drift across the session lands on every card equally instead of stacking on the last one.",
+                new AcceptableValueRange<int>(1, 20)));
+
+            DroneEnabled        = cf.Bind("Drone", "DroneEnabled", false,
+                "Master ON/OFF for the UNCREWED TEST HARNESS (v0.81). When ON, a hotkey spawns aircraft nobody is sitting in, flies them, and despawns them — the point being that a test card no longer needs a human in a cockpit for its full length, and that several replicates can fly SIDE BY SIDE instead of back to back. OFF by default and genuinely inert while off: the spawn/despawn keys are not even read, no aircraft is created, and the per-aircraft seam that writes drone controls costs one integer compare per aircraft per physics step. Requires an ACTIVE SERVER — single player counts (single player is a host) and so does hosting a multiplayer game, but as a multiplayer CLIENT the spawn is refused with a log line rather than attempted. Phase 1: the drones fly a deliberately trivial built-in wings-level altitude hold, NOT this mod's control law — that is phase 2.");
+            DroneSpawnKey       = cf.Bind("Drone", "DroneSpawnKey", KeyCode.F2,
+                "Key that launches DroneCount test drones, DroneStaggerSec apart, in parallel lanes abeam of you (8 km out, 2 km between lanes, on your current heading — so they can never converge on you or on each other). Only read while DroneEnabled is on. Each drone appears at DroneSpawnAlt / DroneSpawnSpeed, flies wings-level, and shows on the map as an unaffiliated icon. Default F2.");
+            DroneDespawnKey     = cf.Bind("Drone", "DroneDespawnKey", KeyCode.F9,
+                "Key that removes EVERY live test drone and cancels any launch still staggering in. Safe to press when there are none. Only read while DroneEnabled is on. Note that removing a unit posts a kill message to the HUD — that is the game's own removal path, not a bug. Default F9.");
+            DroneAirframe       = cf.Bind("Drone", "DroneAirframe", "Multirole1",
+                "Which airframe the drones spawn as, by its Encyclopedia jsonKey — the SAME key a mission file uses in its 'aircraft[].type' field (see harness/WTM-Range/WTM-Range.json). 'Multirole1' is the key the test range already flies. An unknown key refuses the launch with a log line naming the key, so a typo costs a line in LogOutput.log rather than a mystery.");
+            DroneSpawnAlt       = cf.Bind("Drone", "DroneSpawnAlt", 4000f, new ConfigDescription(
+                "Altitude (m MSL) the drones are placed at. Expressed in the same frame as a card's startAlt and the recorder's alt column, so a drone card and a hand-flown card can be compared directly. Keep it well clear of the ground: the drones spawn AIRBORNE on purpose — the game's parked pilot state cuts the throttle and sets the wheel brake below 1 m radar altitude, and a drone that lands in that state never takes off again.",
+                new AcceptableValueRange<float>(500f, 12000f)));
+            DroneSpawnSpeed     = cf.Bind("Drone", "DroneSpawnSpeed", 250f, new ConfigDescription(
+                "Airspeed (m/s) the drones are given at spawn, along their spawn heading. 250 matches the built-in cards' entry condition, so a drone starts where a crewed run starts. Too low and the airframe mushes before the hold establishes; too high and it is above the speed its own turn demand would be derived at.",
+                new AcceptableValueRange<float>(50f, 500f)));
+            DroneCount          = cf.Bind("Drone", "DroneCount", 1, new ConfigDescription(
+                "How many drones ONE press of the spawn key launches. This is the whole reason the harness exists: replicates flown back to back cost wall clock linearly, replicates flown side by side cost one card length total. Start at 1 while you are checking the harness behaves, then raise it — every extra drone is a full-fidelity aircraft in the physics job, so the frame cost is real.",
+                new AcceptableValueRange<int>(1, 16)));
+            DroneStaggerSec     = cf.Bind("Drone", "DroneStaggerSec", 3f, new ConfigDescription(
+                "Seconds between consecutive drone launches. NOT cosmetic, and not about spawn cost: replicates are only independent samples if a disturbance cannot hit them all in the same place. A frame hitch lands on whatever segment is running when it happens, so launching N drones on the same instant means one hitch corrupts the same segment in all N runs identically — which destroys exactly the independence the replicates were flown for. Offsetting the launches offsets their segment boundaries. 0 = simultaneous (don't, unless you are deliberately testing that claim); a few seconds is plenty, since it only has to exceed the length of a typical hitch. Hitches over 50 ms are logged as '[drone] frame hitch' so this stays a measurement rather than an article of faith.",
+                new AcceptableValueRange<float>(0f, 30f)));
 
             FlyLevelEnabled     = cf.Bind("FlyLevel", "Enabled", true,
                 "Enable the 'Fly Level' toggle key. When you press it, the instructor locks the current heading and holds TRUE level flight — wings level, zero climb rate (the velocity vector on the horizon, accounting for angle-of-attack), ignoring the aim circle. Press again (or nudge the stick) to return to mouse-aim.");
@@ -387,6 +459,10 @@ namespace NuclearOptionMouseAim
                 // the data (no-op when not recording). Lets the CSV alone explain a feel change.
                 ManeuverRecorder.NoteConfigChange(s.Definition.Section, s.Definition.Key, s.BoxedValue);
             };
+            // One ConfigEntry<bool> per test card (built-in + every JSON in the cards folder), so the
+            // F1 panel is the enable/disable checklist without a line of custom UI. Fail-soft: a bad
+            // card file is skipped with a log line. Bound last so the descriptions can quote the keys.
+            ScenarioPlayer.BindCards(cf);
             LogSnapshot();
         }
 
@@ -405,7 +481,7 @@ namespace NuclearOptionMouseAim
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
                 $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
-                $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} " +
+                $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} mrFF={(MarkerRateFeedForward.Value ? 1 : 0)} " +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
         }
 

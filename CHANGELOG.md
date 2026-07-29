@@ -3,6 +3,554 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.81.0
+
+**The harness can fly its own aircraft now — phase 1: spawn, fly, despawn, N at a time.** Every
+measurement this project has taken cost a human sitting in a cockpit for the length of the card; a
+four-replicate suite of `fixedwing-v2` is ~12 minutes of watching a marker sweep. New `TestDrone.cs`
+spawns aircraft nobody is sitting in, owns their `ControlInputs`, and removes them again. **Nothing
+is wired to the control law or the scenario player yet** — that is phase 2, and it lands on
+`Drone.Fly`.
+
+- **N drones, not one.** `TestDrone` keeps a live list plus a dictionary keyed by
+  `Aircraft.GetInstanceID()`, and each `Drone` carries its **own** `Fly` delegate. Per-drone rather
+  than one static because N drones need N independent controllers — a single shared delegate would
+  funnel every drone through one instance's state, which is the same whole-file-of-statics problem
+  the control law is being unwound from.
+- **The AI is off by construction.** Spawning with `HQ = null` makes `Pilot.SetStartingAiState` bail
+  straight to `parkedState` before any AI state is constructed, so there is no combat brain to fight
+  for the stick. `SwitchState(null)` on top is belt and braces; the call site is null-safe.
+  `PilotParkedState.EnterState` cuts throttle and sets the wheel brake below 1 m radar altitude,
+  which is why drones spawn **airborne**.
+- **`Aircraft.FilterInputs()` is called by hand.** The FBW and `RelaxedStabilityController` pass runs
+  only *from a pilot state*, and an uncrewed aircraft has none — so raw `ControlInputs` would reach
+  the surfaces and the drone would be a **different plant** from the one the law is tuned against
+  (the FBW reads pitch/yaw as a commanded angular **rate**). Writing from a postfix on
+  `Pilot.Pilot_OnAeroInputsApplied` also puts the write at the same point in the frame as the player
+  path, which is what makes a drone capture comparable to a human one.
+- **The player's aircraft can never be flown by this.** It can only enter the drone dictionary via
+  `Spawn`, which spawns with `player=null` and then refuses (and destroys) anything reporting a
+  `Player`. The postfix is a dictionary probe with a miss-returns; every other aircraft in the
+  mission, and every AI, costs one lookup.
+- **Staggered launch, because replicates have to stay independent.** `DroneCount` drones launch
+  `DroneStaggerSec` apart (default 3 s) in parallel lanes 8 km abeam, 2 km apart, on the player's
+  heading at key-press. A frame hitch lands on whatever segment is running when it happens — launch N
+  drones on the same instant and one hitch corrupts the *same* segment in all N identically, which
+  destroys exactly the independence they were flown for. Because that is an assumption until it is
+  measured, `Time.unscaledDeltaTime` is now sampled every fixed step (`TestDrone.FrameDt`) and any
+  frame over 50 ms logs `[drone] frame hitch` on the rising edge.
+- **Refuses cleanly instead of throwing.** `SpawnAircraft` carries no `[Server]` attribute but ends
+  in `ServerObjectManager.Spawn`, which needs an active server — so the launch is gated on
+  `Spawner.IsServer`, the same question that will be enforced. Single player **is** a host, so SP and
+  hosting work and an MP client is refused with a log line. Same for a missing `Spawner`, an
+  unloaded `Encyclopedia`, and an unknown `DroneAirframe` key. A failed spawn leaves nothing behind.
+- **New `Drone` config section, `DroneEnabled` off by default and genuinely inert while off** — the
+  hotkeys are not read, and the seam costs one integer compare per aircraft per fixed step.
+  `DroneAirframe` takes the same `jsonKey` a mission file's `aircraft[].type` uses (default
+  `Multirole1`, which is what `harness/WTM-Range` already flies).
+- Two known behaviours documented rather than worked around: despawning posts a kill message to the
+  HUD (`Aircraft.ServerDisableUnit` calls `ReportKilled()` off a friendly airbase), and
+  `UnitRegistry.persistentUnitLookup` is never pruned by the game, so each spawn leaks one dictionary
+  entry for the life of the mission.
+- The built-in level-hold is a two-gain cascade that exists **only** to prove the inputs land and the
+  physics is real. It is not the mod's control law, shares nothing with it, and is scheduled for
+  deletion in phase 2.
+
+## 0.80.0
+
+**`ScenarioRepeat` — fly the selection N times back to back from one key press.** Replicates were
+already possible, but only by typing a card name repeatedly into `ScenarioCardSet`, a text field that
+in practice nobody finds; ticking the checkbox instead gave exactly one run and looked like the card
+was broken. A single run measures nothing — every metric needs a spread before a change can be called
+real — so the replicate count is now the obvious control it should always have been.
+
+- Default 1, range 1–20. Each replicate re-applies the full entry condition (speed, altitude,
+  attitude, fuel) and writes its **own** capture file, so 4 replicates give 4 independent CSVs.
+- The selection repeats as a **block** (A,B,A,B — not A,A,B,B) so one-way session drift lands on every
+  card equally instead of stacking on the last one.
+- Expanded after the airframe-class filter, so the number means "runs you will fly", not "runs
+  requested, some of which silently vanish". `ToggleSuite`'s existing `suite start: N card(s)` line
+  stays the single authoritative count — the expansion deliberately logs nothing of its own, since
+  `SelectCards` is also called by the standalone entry key, which flies nothing.
+
+## 0.79.0
+
+**New built-in card `fixedwing-sweep` — 36 s of `arm` + `turn360`, nothing else.** The v0.78 question
+is about one segment, and answering it with `fixedwing-v2` costs ~3 minutes per replicate. Four
+replicates of the short card cost 2.5 minutes total, which is the difference between an A/B that gets
+run on both arms and one that gets run once and argued about.
+
+- **It carries its own baseline; it is NOT comparable to `fixedwing-v2`'s `turn360`.** There the sweep
+  runs last, entering at ~235 m/s off a spent energy state; here it enters at the gated 250 m/s, so
+  the same derived 12.066 °/s demand needs n=5.46 instead of 5.24 — about 4% harder. Both A/B arms
+  must therefore be flown on *this* card. Scoring an `ON` run of the short card against R19's 9.536°
+  would be comparing two different flight conditions and calling the difference a law change.
+- No new segment tags (`arm` and `turn360` are both already in `scorecard.py`), so the card/scorer
+  pair that silently drifted in v0.71 is not touched here.
+- Nothing else changed: the control law, the config surface and the recorder are bit-identical to
+  0.78.0. `MarkerRateFeedForward` remains the live A/B toggle and `mrFF=` in the CSV header remains
+  what identifies which arm a capture flew.
+
+## 0.78.0
+
+**The aircraft tracked a sweeping marker perfectly and stayed 9.54° behind it the whole way.** Four
+valid replicate runs of the `turn360` segment: the marker sweeps at a constant **12.066 °/s**, the
+aircraft **achieves 12.02 °/s** (±0.01 across runs), and it holds a **standing 9.54° azimuth lag**
+with a stdev of 0.021°. Nothing is saturated — |outP| max 0.587, |outR| max 0.793, 5.17 g of a 9 g
+limit, AoA 7.7° of a 27° ceiling. The rate is right and the pointing is wrong, steadily, with margin
+everywhere.
+
+- **The azimuth loop is pure proportional in this regime, and its one integral term is dead.**
+  `_iYaw`/`_iPitch` wind on `fineBlend = clamp01(1 - off/FineAngle)`, and with `FineAngle` = 6 that is
+  *exactly* 0 at `off` = 9.5. The CSV confirms it: both integrators flat 0.000 for the whole 30 s. A
+  P-only loop cannot produce a rate without an error to produce it from — e_ss = ω/K = 12.07/1.31 =
+  **9.2°**, which is the measurement to a tenth of a degree. The lag was never a tuning failure; it
+  was the loop doing exactly what its structure requires.
+- **Feed the rate forward instead of making the loop earn it.** The marker's own signed world-azimuth
+  rate is differentiated across the fixed step, low-passed with the *same* time constant as the nose
+  heading rate (one shared const now, so they cannot drift apart — they meet inside the same `omega`,
+  where a tau mismatch reads as phase, not gain), and added straight into the commanded turn rate at
+  **both** lockstep omega sites. Differentiated via `Atan2`/`DeltaAngle`, so the ±180° wrap is a no-op
+  instead of a 21600 °/s spike.
+- **Gain is exactly 1.0 and there is nothing to tune.** Matching the marker's rate is kinematics, not
+  a per-airframe constant. It is added *before* the existing achievability cap, so the probed
+  per-airframe `omegaMax` bounds it exactly like the proportional demand — it can never command a turn
+  the airframe cannot fly — and `yawCapped` still reflects the total demand.
+- **Nothing that points, captures or holds can move.** The feed-forward is identically zero whenever
+  the marker is stationary, and every card segment except `turn360` is a step to a fixed direction
+  followed by a hold. Only sustained tracking of a moving marker sees any change at all — which is
+  what makes this scoreable against the R19 baseline in a single session.
+- **New config `MarkerRateFeedForward`** (Control, default on). It exists purely as the A/B lever: fly
+  four runs on, toggle it in F1, fly four off, no restart and no DLL swap, everything else
+  bit-identical. Off is byte-for-byte v0.77 behaviour.
+- **New CSV column `aimRate`** (58 total, appended last so column-indexed analyzers keep working) — the
+  filtered signed marker azimuth rate, recorded on *both* sides of the toggle. Without it a run cannot
+  distinguish "the feed-forward fired and helped" from "the feed-forward never fired": both show up as
+  a smaller azimuth lag, and only one of them is the fix.
+
+Not fixed here, deliberately — one variable per scored change: the az-step steady residuals
+(0.16 / 0.23 / 0.49 / 0.77°), the 89° bank that overshoots the law's own declared 72° `MaxBankAngle`
+(that ceiling is enforced on `targetBank`/`tBankE`, and the sustained-turn path bypasses both), and
+the dead integrator gate itself (`fineBlend` zeroing every integral term outside the 6° fine cone).
+Each gets its own scored change.
+
+## 0.77.0
+
+**R18 flew the whole card at idle, and nothing in the capture said so.** The entry force and the
+placement key both worked (v0.76 holds), so all four runs got airborne on condition — and then bled
+250 → 116 m/s, dropping 3.5 km until two of them tripped the altitude-floor abort. The control law
+was never involved: engine at 33% RPM for 189 seconds.
+
+- **The cause is a config value that outlived the meaning it was written with.** BepInEx only writes
+  a key it has not already written, so changing a code default never reaches an existing install.
+  v0.73's `ScenarioThrottle = 0` meant *"use the airframe's own cruiseThrottle"*; v0.74 rewrote the
+  knob so 0 meant a literal zero throttle, and the 0 already on disk silently changed meaning under
+  it. The stored value wins forever, and it never announces itself.
+- **The floor was an epsilon where it should have been a throttle.** `EntryThrottle()` clamped to
+  0.001 — one ulp clear of the game's exact-zero airbrake test (`Airbrake.Update` reads the *same*
+  `ControlInputs` the card writes: `openAmount += (throttle == 0f ? +open : -open)`), so it was
+  technically safe and completely useless. 0.001 is idle: `Turbojet.FixedUpdate` spools toward
+  `Mathf.Lerp(minRPM, …, t)`, and at t≈0 the target is still `minRPM` — the observed 33% is the
+  engine's own idle floor, not a throttle-mapping bug.
+- **Below a manoeuvring throttle now means UNSET, and heals itself.** Under 0.25 snaps back to the
+  default in the config entry, which fires `SettingChanged` — so the heal is logged as a `[config]`
+  line, lands in the recording header, and leaves F1 showing what is actually flying instead of a
+  value the card is quietly ignoring. A stale install fixes itself on the next card; the card path
+  can no longer write exact zero, so it can no longer open the airbrake either.
+- **New CSV column `thr`** (commanded throttle, 57 total, appended at the end so column-indexing
+  analyzers keep working). Throttle is the one flight input a card takes over and the only one the
+  capture could not show — so an idle run was indistinguishable from a control-law energy failure.
+  Commanded, not achieved: the engine lags it through its own spool, so a disagreement between this
+  column and the speed trace is itself the signal.
+- **The card-start log line now states the throttle it is flying.**
+- **`analyze-wobble.py --digest` was silently reporting zero anomalies — on every capture ever.**
+  `load_anomalies()` rebuilt the sidecar path as `mouseaim-anomalies-<session>.log`, but the real
+  name carries version and run first (`mouseaim-anomalies-v0.76.0-R18-<session>.log`), so the
+  `open()` always missed and a bare `except OSError: pass` turned the miss into an empty list. R18
+  had 11 anomalies per run and the digest showed none. It now scans every `mouseaim-anomalies-*.log`
+  beside the CSV and filters on the `rec=` field the lines already carry — the filename stops being
+  load-bearing. Regression test added; verified against R18 (0 → 11).
+
+Not fixed here: the recorder still has no aircraft-destroyed column, `scorecard.py` does not yet
+reject a run on out-of-band `thr`, and the altitude floor is still a fixed 500 m constant rather
+than a card-declared one.
+
+## 0.76.0
+
+**Same explosion, one layer down — and the fix for it was the wrong fix.** v0.75 merged the aircraft's
+part rigidbodies onto the root before moving it. That worked from the entry key and destroyed the
+aircraft from the run key: identical code, opposite outcome.
+
+- **`Destroy` is deferred.** `SetSimplePhysics` → `MergeWithParent` calls `Destroy()` on the part
+  rigidbodies and joints, and Unity defers destruction to **end of frame**. So when the call returns,
+  every joint is still alive and still connected.
+  - The **entry key** fires in `Update`: merge → write → frame ends → destroys processed → *then*
+    physics. The stretched joints never exist during a simulation step.
+  - The **run key** ran in `FixedUpdate`: merge → write → `Physics.Simulate()` immediately, same
+    frame, joints alive and now stretched by the full displacement. Same explosion as v0.74.
+  - The pilot found the tell without the mechanism: pressing the entry key *then* the run key
+    survived, because the aircraft was already on condition and the displacement was ~0.
+
+- **Replaced the merge with a rigid transform of the whole assembly.** Apply the same rotation about
+  the same pivot, the same translation and the same velocity to `Aircraft.rb` *and* every
+  `partLookup[].rb`. No joint sees a relative change, so there is nothing for the solver to correct.
+  - Destroys nothing, so there is no deferred-destruction hazard and **no frame staging** — the
+    intermediate 3-phase placement machine, the owed rebuild, and its Update-side safety net are all
+    deleted. It is a single call again, correct from either clock.
+  - Works unchanged in simple physics: merged parts share the root's `Rigidbody` and are skipped by an
+    identity check, so there is no physics-mode branch at all.
+- **It also fixes the broken cockpit HUD**, which was the same bug wearing a different hat.
+  `FlightHud` caches the cockpit's `Rigidbody` in a private `cockpitRB` field, set **once** in
+  `SetAircraft()` — which is called from exactly one place (`CameraCockpitState.EnterState`) and is
+  guarded by `this.aircraft != aircraft`, so it never re-fires for an aircraft you are already in.
+  `FlightHud.Update()` then early-outs on `if (!(cockpitRB != null)) return;`. The merge destroyed
+  that Rigidbody, Unity's `==` override started reporting the stale reference as null, and the whole
+  Update body stopped for the rest of the flight: flight-path marker, velocity vector, pitch ladder
+  and heading tape all froze together. The AoA *numbers* were still being computed correctly — they
+  re-read `cockpit.rb` fresh every call — but the AoA bracket is anchored to the frozen marker
+  cluster, so it looked like the AoA readout had died. Nothing is destroyed now, so nothing goes stale.
+  - **A HUD already broken by v0.75 does not heal itself** — `SetAircraft` only re-fires on a
+    *different* aircraft, so changing camera view will not fix it. Respawn or restart the mission.
+  - Two further round-trip defects found and now moot: control-surface `HingeJoint`s (`movingJoints`)
+    were destroyed by the merge and **never rebuilt** by `SetComplexPhysics`, and
+    `SetComplexPhysics` resets centre of mass but **not** the inertia tensor.
+  - The game itself never does this round trip on a player-occupied aircraft: `SetSimplePhysics`/
+    `SetComplexPhysics` run only via `SetLocalSim`, i.e. once at spawn. Every subsystem downstream was
+    written assuming that invariant, which is why so much broke at once.
+
+- Placement failure now refuses the run from the card path too, not just the entry key.
+- The altitude floor no longer aborts a card **before** the placement has run. It gated on raw
+  altitude, so pressing the run key on the runway refused the run at 151 m instead of lifting the
+  aircraft to the card's 4000 m entry — the floor now guards a *running* card only.
+
+## 0.75.0
+
+**The entry force was still destroying the aircraft — for a second, unrelated reason.** v0.74 fixed
+the phantom G reading; this fixes the real velocity spike underneath it. Session R15 pressed the run
+key three times while already on condition (4000 m, ~250 m/s, level) and lost the airframe every
+time, which ruled out the velocity delta as the cause outright.
+
+- **An aircraft is not one rigidbody.** Under complex physics — what anything the player flies is in
+  — `Aircraft.SetComplexPhysics` unparents every `AeroPart` to the world, gives it **its own
+  `Rigidbody`**, and joins it back to its parent part with a `FixedJoint`. Writing `Aircraft.rb`
+  moves the fuselage root and leaves the wings, tail and gear where they were: every joint is
+  stretched by the full displacement, and PhysX pays that back as a velocity impulse of roughly
+  `err/dt` across the whole assembly. The G path then reads the result and destroys the airframe.
+  - Measured from the R15 anomaly trails: a **14 m** altitude step added **~262 m/s**, a **35 m**
+    step added **~665 m/s** — **19× `err` in both**, i.e. linear in the displacement. That linearity
+    is the constraint solver's signature; it is not game logic and there is nothing in C# to patch.
+    Reported G: **133 g** and **342 g**.
+  - Fix: `SetSimplePhysics()` **before** any `rb` write. That merges every part back onto the root,
+    restoring its exact local position and destroying the joints, so there is one body to move and
+    nothing left to stretch. It is the same ordering the game itself uses at spawn — `OnStartClient`
+    writes position, rotation and velocity *before* the call that builds the per-part bodies.
+  - `SetComplexPhysics()` rebuilds them, but **two frames later**: `MergeWithParent` `Destroy`s the
+    part rigidbodies and Unity defers that to end-of-frame, so rebuilding on the same frame would
+    have `AddComponent<Rigidbody>()` land on a component that is still present.
+  - That rebuild is **owed, not opportunistic**: `Aircraft.CheckPhysicsLod` — the game's own restore
+    path — has no callers in 0.34. Nothing else will ever undo the merge.
+  - v0.74's `velocityPrev` zeroing stays. It was correct and is still needed; it just addressed the
+    smaller half. The two failures look identical and have nothing to do with each other: one is a
+    phantom reading of our own write, the other is real velocity the aircraft genuinely acquires,
+    one or two ticks later, from a mechanism the mod never touched.
+
+- **New key: on-condition (F3, `Scenario/ScenarioEntryKey`).** Puts the aircraft on the first enabled
+  card's declared entry condition — speed, altitude, wings level, heading unchanged, fuel set —
+  **without starting the run**. Set up, look around, press the run key when ready. It is also the
+  isolated test for the teleport itself, which is worth having: the placement has now been the cause
+  of two separate airframe losses, and until this key existed it could only be exercised by
+  committing to a 3-minute capture.
+  - Card selection is now shared between the two keys (`SelectCards`), so F3 places you exactly where
+    the run key would have started you. Two answers to "which card" is how they drift apart.
+  - `ForceEntryCondition` no longer carries the "is forcing enabled / does this card declare a
+    condition" guards — those belong to the card path and were in the way of calling it directly.
+
+## 0.74.0
+
+**Three bugs the first forced-entry flight session (R14) found, all in v0.73's own new code.**
+
+- **The entry force was destroying the aircraft.** Pressing the run key while slow, diving, or at
+  high AoA killed the airframe on the spot; pressing it while already near the card's entry
+  condition was harmless. Cause: the game derives G by **differencing velocity across fixed steps**
+  (`Pilot.Pilot_OnAeroInputsApplied`), and past **20 g** calls `TakeGForceDamage(g²)`, whose damage
+  goes as `(g² − 400) × 0.007`. A teleport is a one-tick velocity *step*, so setting 250 m/s onto an
+  aircraft whose velocity vector was 28° off the nose reads as ~870 g and applies four figures of
+  damage. The fix zeroes `Pilot.velocityPrev` (and `Aircraft.velocityPrev`) *before* the velocity
+  write, taking the engine's own escape hatch — that zero check exists so a freshly-spawned aircraft
+  doesn't report a spike on its first tick, which is exactly why the game's own spawner can set
+  `rb.velocity` on an airborne mission aircraft and get away with it.
+  - **Because damage goes as the square of G, this was never binary.** R14's one "good" run still
+    took a ~150 g step at entry and roughly 155 points of damage before it flew a single segment.
+    Runs captured under v0.73 with a non-trivial entry delta were flown on a damaged airframe and
+    should not be pooled with v0.74 captures.
+  - A failed entry force now **refuses the run** instead of falling through. Forcing bypasses the
+    pre-flight gate, so falling through would have flown the card from whatever state the pilot was
+    in and scored it as if it were on condition.
+- **The card was flying on afterburner.** `ScenarioThrottle` defaulted to the airframe's own
+  `cruiseThrottle`, on the assumption it meant "the throttle this aircraft cruises at". It does not
+  — it is the **AI pilot's cruise-hold setpoint** (0.9 on the Ifrit), used only by the AI state
+  machine, and it lit the burner. The aircraft then accelerated to **439 m/s** and pulled **9.34 g**
+  against a 9 g limit on the `az150` segment (and 9.25 g on `reversal`) at only 4.3° AoA — a
+  high-speed overstress, not a stall. **A baseline has to be a speed the airframe can still
+  manoeuvre at, not its fastest.** Default is now a flat **0.7** for every airframe.
+- **The airbrake was still the pilot's.** v0.73 forced `ControlInputs.brake = 0` — but that field is
+  the *wheel* brake. The game's `Airbrake.Update` opens the boards whenever `ControlInputs.throttle`
+  is **exactly 0**, and it reads that every *rendered* frame while v0.73 only wrote throttle on the
+  *fixed* step, so an idle lever cracked the boards open on every frame in between and bled energy
+  off-script. New Harmony patch **`PilotThrottlePatch`** on `PilotPlayerState.PlayerThrottleAxis1Controls`
+  (which runs in `Update`, and which the mod had never patched) skips the native body outright while
+  a card plays, so the hardware axis never reaches `ControlInputs` at all. Side benefits: the
+  throttle HUD now shows what the card is actually flying, and `customAxis1` — written by the same
+  method — stops being an uncontrolled input during a capture. Throttle is floored at 0.001 so a
+  pinned value of 0 can never re-trigger the airbrake.
+- A hover card (one that declares no entry airspeed) keeps the pilot's collective — pinning a fixed
+  throttle on a rotorcraft would just drive it into the ground or the sky.
+
+### WTM-Range — the "isolated" range was spawning AI, and had no way in
+
+The range had `"factions": []` and `"airbases": []`, on the assumption that empty meant isolated. It
+means the opposite. `FactionHQ.OnMissionLoad` runs for every faction HQ baked into the map —
+`Terrain_naval` always carries Boscali and Primeva — and `Mission.EnsureFactionExists` auto-inserts a
+**default** `MissionFaction` for any the JSON omits, with `AIAircraftLimit = 6`. `DeployAIAircraft`
+then starts filling the range about five seconds in. Emptying the list didn't remove the factions, it
+removed the mod's control over them. It also left the player with no faction to join and no airbase
+to spawn from, and the pre-placed `"faction": ""` aircraft spawned neutral and uncontrollable.
+
+Fixed by listing **both** factions with an explicitly zeroed AI budget (the shipped "Free Flight —
+Ignus Archipelago" mission does exactly this), enabling one real airbase, and giving the subject
+aircraft a real faction. Ground truth came from the shipped mission itself: built-in missions are
+plain-text JSON inside `NuclearOption_Data/resources.assets` (classic `Resources.LoadAll<TextAsset>`,
+not addressables), so the faction and airbase names are verbatim rather than reconstructed.
+
+`check-mission.py` enforced the wrong invariant and passed the broken file, so it now checks the
+inverse: every map HQ listed, each AI-budget field explicitly 0 (the class defaults are the trap), at
+least one airbase, and every `UniqueName` matched against the real per-map list. An unrecognised
+airbase name is **not** a load failure — `Mission.SetupAirbase` only logs and drops the entry — so the
+validator is the only thing standing between a typo and a wasted test flight.
+
+**Known gaps this session exposed, not fixed here:** the recorder has no aircraft-destroyed column
+and the card has no watchdog, so a dead aircraft leaves the capture silently open until the run key
+is pressed again (both failed runs produced a 1-row CSV closed by a manual keypress). And the card's
+demanded turn rate is derived **once**, from entry airspeed — if the aircraft still accelerates at
+0.7 throttle, that demand drifts toward the airframe's limit as speed builds.
+
+## 0.73.0
+
+**The harness now puts the aircraft on condition, and says so on screen.** Both changes come
+straight out of the first clean measurement session (R13, four Ifrit runs of `fixedwing-v2`), which
+established a **1–3% run-to-run noise floor** on every metric that matters — tight enough that
+hand-flown entry state is now the dominant error term rather than a rounding detail.
+
+- **`ScenarioForceEntry` (new, default on).** A card that declares `startSpeed`/`startAlt` now has
+  them **applied** at card start — speed, altitude and a wings-level attitude, heading preserved —
+  instead of refusing to run until the pilot flies there. Hand-flying to "roughly 250 m/s at roughly
+  4000 m" is not repeatable to the precision the metrics now resolve; R13 held everything else
+  constant and `turn360`'s `deltaEnergyHeightM` still spread **35.5%** (−107 m to −285 m) on
+  throttle setting alone, while `meanTurnRateDegS` in the same segment held 1.3%. The card's opening
+  `arm` segment (already excluded from scoring) absorbs the transient. Turn the setting off to get
+  the old refuse-to-start gate back; ungated cards are unaffected either way.
+  - **Order is load-bearing in `StartCard`:** the force runs *before* `SustainableTurnRate`, which
+    reads live airspeed. Deriving the sweep rate first would key the card's headline stimulus to
+    whatever speed the pilot happened to be at — the exact variable the entry condition removes.
+  - This is **the first place the mod writes aircraft physics state** (`rb.position/rotation/
+    velocity`) rather than only control inputs. Noted as such in `ARCHITECTURE.md`. It is fail-soft:
+    a throw is caught and logged, and the entry gate remains as the backstop.
+- **`ScenarioEntryFuel` (new, default 1.0 = full tanks) pins MASS.** Fuel burn is a one-way drift,
+  which is the dangerous kind — the four R13 runs lost **1255 kg (5.1% of gross) monotonically**,
+  larger than the noise floor they were used to measure, so an uncontrolled tank turns a mass trend
+  into what reads as a law difference. Set to 0 to leave fuel alone; lower it to fly the same card
+  at a lighter weight. Stores are deliberately untouched: a card fires nothing, so loadout mass is
+  already constant within a session.
+  - `Aircraft.fuelLevel` is **not** the current gauge — it is the target ratio `Refuel()` writes into
+    the tanks, and `FuelTank.Refuel` sets absolutely (`fuelMass = fuelCapacity * ratio`, with a signed
+    `part.ModifyMass`), so it drains down as readily as it fills. `Refuel(null)` suppresses the
+    "Refueled by …" banner. The sibling InfiniteAmmo mod documents this trap; credited in the source.
+- **A running card now OWNS every manual input, instead of asking the pilot not to touch them.** A
+  variable the harness merely requests is not controlled: one slipped mouse nudge rewrote the
+  stimulus and the run still scored, looking like a law difference.
+  - **Mouse → marker is locked out** (`AimRig` drops `aimCapture` while a card plays). This was the
+    real hole — the card wrote the demand on the fixed step while the mouse kept nudging the same
+    vector every rendered frame, and the two simply summed. Free-look still works: it moves the
+    camera, not the aircraft.
+  - **Throttle and airbrake are written by the card** (`ScenarioThrottle`, new; default −1 = the
+    airframe's own `cruiseThrottle` read from the game, so it generalises with no hand-tuned
+    per-plane number). Throttle needed its own seam: the game reads it in
+    `PlayerThrottleAxis1Controls` during `Update`, which the mod does not patch, so it is written
+    from the postfix — after native's write, immediately before `FilterInputs` consumes it.
+  - Pitch/roll/yaw needed no change; they were already owned.
+  - **A stick twitch no longer aborts the run.** Killing a 3-minute capture by accident is the same
+    class of failure as silently polluting one, and with the axes owned a twitch changes nothing about
+    what was flown. Stopping is deliberate: the abort key (now named in the card HUD line), the run
+    key, the altitude floor, or losing the aircraft.
+  - `customAxis1` (flaps/tilt/nozzles) is deliberately left alone — a blanket write would retract a
+    tiltrotor's nozzles mid-card.
+- **Every card refusal is now on screen, not only in the log.** Pressing the run key out of
+  condition, with no card enabled for the airframe, or with no aircraft, wrote a `LogWarning` and
+  nothing else — indistinguishable from pressing a dead key, which is exactly how it was reported.
+  A 4-second amber notice now names the reason, drawn before the HUD gates so it appears on the
+  clean HUD too. Reuses the existing toast slot rather than adding a second overlay.
+
+## 0.72.0
+
+**The first M1 flight session found the test card, not the control law, to be the problem.** Four
+acceptance runs on v0.71.0 ended with the aircraft spiralling into the sea. No control-law change
+here either — every fix is to the card, the guards around it, or the recorder.
+
+- **`turn360` demanded 100% of the airframe's structural limit.** Its fixed 20 °/s sweep is, for a
+  KR-67 Ifrit at 250 m/s with n=9, exactly the instantaneous ceiling `g·√(n²−1)/V` = 20.1 °/s. No
+  jet can *sustain* its instantaneous rate, so the aircraft banked to 85° pulling 9 g and descended
+  — a spiral by definition, and the captures show it pinned at `outP` −1.00 with AoA a modest 6–8°
+  (not stalled: energy-limited). The rate is now **derived per airframe** at card start from the
+  readable `aircraftGLimit` and the entry speed, at 60% of the instantaneous ceiling. Derived once,
+  not from live speed — a rate that chased V would be a feedback loop and two builds could be fed
+  different demands.
+- **Segment order is now load-bearing.** v1 ran the sustained turn ninth of nineteen, so the
+  reversal, dead-astern wrap and all ten micro-steps were flown from a wrecked energy state — and
+  the micro-steps are the entire reason the card exists. v2 runs cheap-and-precise first (micro-steps
+  and fine tracking at the gated entry condition), then step response, then the energy sink **last**,
+  where it can contaminate nothing after it.
+- **`elDn` shortened** to 10 s at −20° (was 15 s at −30°, ~1900 m of altitude at 250 m/s on its own).
+- **Cards renamed `fixedwing-v2` / `rotorcraft-v2`** — order and stimulus both changed, so a v1
+  capture is not comparable to a v2 one. The card id is in the CSV filename and the `# card` header,
+  so renaming makes an accidental cross-version comparison impossible rather than merely unwise.
+- **Entry-condition gate.** `startSpeed`/`startAlt` were written by the card recorder and read by
+  nothing; a card that declares them now refuses to start outside tolerance (fixed-wing: 250 m/s
+  ±15%, 4000 m ±800 m). Uncontrolled entry state was feeding straight into every score. Cards that
+  declare nothing stay ungated, so ad-hoc recordings still just work.
+- **Altitude floor.** A card aborts below 500 m MSL **and hands back a wings-level climbing demand**
+  as it does — `AimRig` keeps whatever the card last wrote and the instructor keeps chasing it, so
+  stopping the card alone would fly into the water anyway.
+- **The recorder no longer flushes to disk every row.** `AutoFlush` meant ~50 main-thread flushes a
+  second; the v0.71 captures contain multi-second holes with position continuous across them (a
+  freeze, not a teleport). Now flushed every 50 rows — same ~1 s crash-loss bound, a fraction of the
+  syscalls.
+- **Why a run ended is written into the CSV** (`# stop … reason=…`), not just the log. A run aborted
+  at the floor was otherwise indistinguishable from a clean completion to anything reading the
+  capture — it just had fewer rows — so a batch would silently average truncated runs in with whole
+  ones. `scorecard.py` parses it and prints a loud `ABORTED:` line.
+
+**Offline tooling — two defects that made the first session's data unreadable.**
+
+- **`scorecard.py` scored 19 of 21 segments as "unknown", silently.** Its `KNOWN_PREFIXES` list
+  (`az_step`, `hover_hold`, …) predates the cards and matched no tag `ScenarioPlayer.cs` actually
+  emits except `arm` and `reversal`; everything else fell through to a 4-metric generic path, so no
+  step-response, fine-tracking or sustained-turn metric was ever computed — with nothing printed.
+  Replaced with a regex table keyed to the real tags, and **an unresolved tag is now a loud warning**
+  in both the table and the `--json` output. The silence was the worse half of the bug: the tag
+  vocabulary spans C# and Python with no compile-time link, and `check-architecture.py` cannot see it.
+- **`analyze-wobble.py --digest` returned "no data rows" for every test-card capture.** Its loader
+  casts all non-`phase`/`controlLaw` columns to float, so M0's `segTag` string column made every row
+  throw and get dropped silently. `STRING_COLS` now has one definition (in `analyze-wobble.py`, the
+  already-imported module — the reverse direction would be circular) and a dropped row is counted
+  and warned about. This had made the documented first step for reading any recording a no-op.
+- **New `debugtests/compare-runs.py`.** Scores N captures via `scorecard.py` and reports per-segment
+  spread (min/max/mean/stdev/%). **Groups by airframe and refuses to pool** — the first session
+  unknowingly compared an Ifrit against a Trainer. Truncated segments are excluded and listed rather
+  than blended into a spread. Grouping key is lowercased: the sidecar says `trainer` and the CSV
+  header says `Trainer` for the same aircraft, which would otherwise split one airframe into two.
+
+**Harness range — `WTM-Range` never loaded at all.** Reported as "no airport to spawn into"; the
+real cause is that the mission was rejected at load, so nothing spawned and the session tore down.
+Three defects, all found by reading the 0.34 decompile:
+
+- **No `"Mission Start"` objective.** `MissionObjectivesFactory.Load()` requires an objective with
+  that exact `UniqueName` and throws `MissionLoadException` without it; `MissionManager.StartMission()`
+  catches it and returns before `AddStartingUnits`. Added as a hidden `None`-type objective — which
+  is also what the stock *Free Flight — Ignus Archipelago* mission uses, and what makes the
+  pre-placed player aircraft auto-spawn.
+- **Missing `savedLoadout`.** `SavedAircraft.savedLoadout` has no field initializer, and
+  `Spawner.TrySpawnAircraft()` calls `savedLoadout.CreateLoadout(prefab)` unconditionally — an absent
+  key is a `NullReferenceException` during the player's own spawn. Now `{"Selected": []}` (unarmed).
+- **Wrong aircraft, and below the card's own entry gate.** `type` was `Fighter1`; the KR-67 Ifrit
+  every baseline capture was flown on is `Multirole1` (the sidecar's `jsonKey`). Spawn altitude was
+  3000 m, which `fixedwing-v2`'s 4000 m ±800 m gate rejects — the range would have refused to run
+  the card it exists to host. Both corrected.
+- **`check-mission.py` now checks the two load-time requirements** rather than only the harness's own
+  isolation/pinning invariants. Both are silent-until-fatal, and neither was covered; the validator
+  passed this mission while it could not load. Faction/budget turned out to be a red herring — a
+  pre-placed `playerControlled` aircraft with `faction: ""` bypasses `FactionHQ` entirely.
+
+## 0.71.0
+
+**Milestone M1 of the instructor loop (`plans/instructor-feedback-loop.md`): scripted test cards.**
+No control-law change — the mod is byte-identical when no card is running.
+
+- **New `ScenarioPlayer.cs`.** A *card* is an ordered list of segments, each a tagged aim demand held
+  for a duration, expressed in the aircraft's heading frame captured at card start (world-fixed
+  after that, so the demand never chases the nose). Playback writes `AimRig.SetAimForward` from the
+  **seam prefix**, i.e. the same patched `PlayerAxisControls` call whose postfix runs
+  `ChaseController.Apply` — so the law reads the scripted demand in the same tick it was written.
+  Zero-tick lag is structural, not a Harmony priority or an Update/FixedUpdate race.
+- **Two built-in cards, chosen by `pilotType`** (not the old takeoff-distance heuristic):
+  `fixedwing-v1` (194 s — arm, az steps 10/30/90/150°, ±30° elevation, 20 s fine tracking, a 360°
+  sustained turn, a 180° reversal, a dead-astern wrap, ten 0.2–1° micro-steps) and `rotorcraft-v1`
+  (254 s — the same plus hover hold, a 90° pedal turn and a bob-up).
+- **Record your own card:** a hotkey captures what the aim demand does while you fly, sampled on the
+  fixed step (so replay is frame-rate independent), saved to
+  `BepInEx/config/wtmouseaim-cards/<name>.json`. Replay is indistinguishable from a scripted card.
+- **Selection without a new UI:** each card gets a config checkbox, so the F1 ConfigurationManager
+  panel *is* the enable/disable list; a config string overrides the set for scripted runs.
+- Hotkeys (all rebindable): **F6** run suite, **F5** record card, **F4** abort. A card also aborts on
+  any manual stick input — via `ChaseController.ManualStickInput()`, now the single shared definition
+  rather than a second detector.
+- Recorder: card name folds into the CSV filename and a `# card <name>` header line, so two builds'
+  runs of the same card sort together and diff.
+- Card JSON is parsed with Unity's own `JsonUtility` (ships with the game, referenced like the
+  existing IMGUI/InputLegacy modules) rather than a hand-rolled parser — about 120 fewer lines we own.
+- Appendix A's `translate` and `transition` segments are **deliberately absent**: neither can be
+  commanded through an aim direction (they need position demand / `customAxis1`), and a segment that
+  can't produce its own stimulus would score as perfect tracking — worse than not existing. They move
+  to M2's `TestPilotState`.
+
+## 0.70.0
+
+**Instrumentation only — no control-law change.** Fixes a real defect in 0.69.0's sidecar, found by
+checking it against two real captures (KR-67 Ifrit, SAH-46 Chicane) rather than trusting it.
+
+- **Fixed: wing/drag area was read from the wrong place.** 0.69.0 summed `AeroPart`s found by
+  `GetComponentsInChildren`, which reported **1 aero part and a 2 m² wing** for an 18-tonne jet
+  (level flight needs S ≈ 20 m²). A complex-physics aircraft is multi-rigidbody and its parts
+  *register themselves* into `Aircraft.partsWithAero`, so a hierarchy scan sees only the root part.
+  Now read from that list by reflection, falling back to the old scan; new sidecar field
+  `aeroPartSource` records which path was used. This matters because wing area is a required input
+  to the physics-normalized turn-rate bound (`n_max = ½ρV²·S·Clmax / mg`) the scorer will grade
+  against — a 10× wrong S would have made every airframe look like it beat its own theoretical best.
+- **Recorder: 54 → 56 columns.** `tSeg` — seconds since the current `segTag` began, so a card
+  segment's metrics don't depend on when in the session it ran; and `tWall` — unscaled wall clock
+  (`Time.realtimeSinceStartup`), pinned to absolute time by the existing `# started` header line and
+  the sidecar's `utc`. The pair is also a diagnostic: `dt/dtWall` should equal `timeScale`, so a run
+  whose physics got clamped by a CPU stall is visible in its own capture instead of inferred.
+
+## 0.69.0
+
+**Instrumentation only — no control-law change.** v0.68's flight behaviour is carried forward
+untouched as the frozen baseline for the instructor feedback loop
+(`plans/instructor-feedback-loop.md`, milestone M0).
+
+- **Recorder: 45 → 54 columns.** New: `alt` (m MSL), `airDensity` (kg/m³), `posX/Y/Z` (datum-relative
+  `GlobalPosition`, so a floating-origin rebase can't step the trace), `velX/Y/Z` (`rb.velocity`),
+  and `segTag` — a settable string tag (`ManeuverRecorder.SegmentTag`) that lets a scripted test
+  card label each segment of a capture. True dynamic pressure `q = ½·airDensity·V²` is now derivable
+  offline; no law code was changed to use it yet.
+- **New per-run artifact: `mouseaim-rec-*.airframe.json`** alongside each CSV — a one-shot snapshot
+  of everything the game will *tell* us about the airframe: `pilotType`, live mass, fuel, per-store
+  loadout mass/drag, max thrust, the `AircraftParameters` envelope (G limit, corner speed, turning
+  radius, max speed), buffet AoA, wing/drag area, the FBW parameter block, and sampled Cl(α)/Cd(α)
+  curves (−5°…+40°). This is what makes offline *physics-normalized* scoring possible — grading a
+  maneuver against what that airframe could theoretically have done. Every field is fail-soft: a
+  missing type or member omits the key and never interrupts recording.
+- Reflection-backed sidecar fields (fail-soft per field): `gLimitPositive`, `alphaLimiter`,
+  `alphaLimiterStrength`, `maxRollAngularVel`, `maxRollSpeed`, `heloGLimit`, `heloMaxAngularVel`.
+- **New offline tool `debugtests/scorecard.py`** (stdlib-only, `--selftest`): splits a capture by
+  `segTag` and scores each segment by type — step response (rise/settle/overshoot), fine-tracking
+  RMS and stick sign-flip rate, sustained-turn energy-height delta, hover position RMS and drift,
+  AoA-limiter time and G peaks — emitting `score.json` plus a terminal table. It reuses
+  `analyze-wobble.py`'s oscillation and pitch-authority detectors rather than duplicating them, and
+  degrades gracefully on pre-0.69 captures that lack the new columns. Angular step segments use a
+  **demand-scaled settle band** (10% of the step, clamped to 0.05–0.5°): a fixed 0.5° band is wider
+  than an entire 0.2–1° micro-step and would report it settled at t=0, silently making the
+  high-q small-correction regime unmeasurable.
+
 ## 0.68.0
 
 Compatibility fix for **Nuclear Option 0.34.0**. No control-law change.

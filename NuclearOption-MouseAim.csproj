@@ -75,6 +75,12 @@
         <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
         <Private>false</Private>
       </Reference>
+      <!-- JsonUtility: test-card (de)serialisation in ScenarioPlayer. Unity's own serializer, shipped
+           with the game — so card files need no JSON library of our own. -->
+      <Reference Include="UnityEngine.JSONSerializeModule">
+        <HintPath>$(GameManaged)\UnityEngine.JSONSerializeModule.dll</HintPath>
+        <Private>false</Private>
+      </Reference>
       <!-- OnGUI overlay (step 2) -->
       <Reference Include="UnityEngine.IMGUIModule">
         <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>

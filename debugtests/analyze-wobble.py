@@ -35,14 +35,29 @@ DIGEST (--digest) — collapse consecutive same-phase rows into one segment each
 capture reads as a ~30-line timeline: per segment the phase, duration, the signals that actually
 moved (start->end, interior peak when it overshoots the endpoints) and per-axis stick sign-flip
 counts. Inline # cfg t=... changes and any [anomaly] lines from the sibling
-mouseaim-anomalies-<session>.log (matched by rec=<this file>) are slotted at their timestamp.
+mouseaim-anomalies-*.log (matched by rec=<this file>) are slotted at their timestamp.
 The raw CSV stays the ground truth — open raw rows only for a segment the digest flags.
 """
 import csv, math, sys, os, re, statistics
 
+# Non-numeric columns. Single source of truth: scorecard.py imports this module already (as `aw`,
+# to reuse the episode detector / pitch_authority / etc. without reimplementing them) and has no
+# reason to be imported back, so this definition living HERE — not a second copy in scorecard.py —
+# is the direction that can't go circular. scorecard.py reads it as aw.STRING_COLS.
+# segTag (M0/M1, a test-card capture's per-row segment label) used to be missing from this set
+# entirely: every row of every test-card capture has a non-empty segTag, so float(r["segTag"])
+# raised on EVERY row and load() silently returned zero rows for every such capture (--digest and
+# the default score both printed "no data rows"). See CHANGELOG.
+STRING_COLS = {"phase", "controlLaw", "segTag"}
+
 
 def load(path):
-    """Return (meta, rows). meta = {cfg, headers[], cfg_marks[(t,text)], session}."""
+    """Return (meta, rows). meta = {cfg, headers[], cfg_marks[(t,text)], session}.
+
+    A row that fails to parse (some column outside STRING_COLS held a non-numeric value) is dropped
+    and counted; if any were, that's reported on stderr rather than staying silent -- a handful of
+    genuinely corrupt lines is plausible, but EVERY row (the segTag bug above) or any large fraction
+    almost always means STRING_COLS is missing an entry, not that the data is bad."""
     meta = {"cfg": "", "headers": [], "cfg_marks": [], "session": ""}
     data = []
     with open(path, newline="") as f:
@@ -64,12 +79,17 @@ def load(path):
             data.append(raw)
     rdr = csv.DictReader(data)
     out = []
+    dropped = 0
     for r in rdr:
         try:
-            out.append({k: (r[k] if k in ("phase", "controlLaw") else float(r[k]))
+            out.append({k: (r[k] if k in STRING_COLS else float(r[k]))
                         for k in r if r[k] is not None and r[k] != ""})
         except ValueError:
-            continue
+            dropped += 1
+    if dropped:
+        print(f"WARNING: {path}: dropped {dropped}/{dropped + len(out)} row(s) that failed to parse "
+              f"(non-numeric value in a column outside STRING_COLS={sorted(STRING_COLS)})",
+              file=sys.stderr)
     return meta, out
 
 
@@ -316,11 +336,30 @@ def convergence(rows):
     return out
 
 
+# Below this many rows there isn't enough data for ANY discriminator below to mean something. A
+# run aborted seconds after it started (run key pressed again, altitude floor, aircraft lost) can
+# leave a handful of rows of pure entry-teleport transient -- and pitch_authority/model_fit don't
+# know that; they'll happily compute a confident-looking PASS or FAIL from it (observed: v0.74 R15
+# aborts with 1/2/8 rows produced "PASS" and a false "PITCH AUTHORITY REVERSED"). --digest has no
+# such floor (it just reports what little is there), so point there instead of guessing here.
+# ponytail: a flat row count, not calibrated against sample rate -- the shortest real card segment
+# is a 2s micro-step (~100 rows at the recorder's ~50 Hz), so 20 leaves wide margin without needing
+# to parse the recording rate. Raise/replace with a duration check if a legitimately shorter capture
+# format ever shows up.
+MIN_ROWS = 20
+
+
 def analyze(path):
     meta, rows = load(path)
     cfg = meta["cfg"]
     if not rows:
         print(f"{path}: no data rows")
+        return
+    if len(rows) < MIN_ROWS:
+        dur = rows[-1]["t"] - rows[0]["t"]
+        print(f"\n=== {path}")
+        print(f"  UNUSABLE: only {len(rows)} sample(s) ({dur:.1f}s) -- too few to score (aborted "
+              f"or truncated capture). Use --digest to see what little was recorded.")
         return
     human = [r for r in rows if r.get("engP", 0) or r.get("engR", 0) or r.get("engY", 0)]
     auto = [r for r in rows if not (r.get("engP", 0) or r.get("engR", 0) or r.get("engY", 0))]
@@ -482,25 +521,38 @@ def seg_flips(segrows):
     return out
 
 
-def load_anomalies(csv_path, session):
-    """[(t, type, line)] from the sibling anomaly log, filtered to rec=<this csv>."""
-    if not session:
-        return []
-    logp = os.path.join(os.path.dirname(csv_path), f"mouseaim-anomalies-{session}.log")
+def load_anomalies(csv_path):
+    """[(t, type, line)] from the sibling anomaly log(s), filtered to rec=<this csv>.
+
+    Scans every mouseaim-anomalies-*.log next to the CSV instead of rebuilding one filename from
+    the header's session id. That reconstruction was simply wrong -- the log is named
+    mouseaim-anomalies-<version>-R<run>-<session>.log, so f"mouseaim-anomalies-{session}.log" never
+    matched, the open() raised OSError, and the bare `except OSError: pass` turned it into "0
+    anomalies" on every digest ever run. R18 had 11 anomalies per run and the digest showed none.
+    Every anomaly line already carries rec=<csv>, so that filter is the ground truth and the
+    filename does not have to be one. A directory listing is also cheap next to parsing the CSV.
+    """
+    d = os.path.dirname(csv_path) or "."
     base = os.path.basename(csv_path)
-    out = []
     try:
-        with open(logp) as f:
-            for line in f:
-                if f"rec={base}" not in line:
-                    continue
-                mt = re.search(r"\bt=([\d.]+)", line)
-                mty = re.search(r"\[anomaly[^\]]*\]\s+(\S+)", line)
-                if mt:
-                    out.append((float(mt.group(1)), mty.group(1) if mty else "anomaly", line.strip()))
+        names = sorted(n for n in os.listdir(d)
+                       if n.startswith("mouseaim-anomalies-") and n.endswith(".log"))
     except OSError:
-        pass
-    return out
+        return []
+    out = []
+    for name in names:
+        try:
+            with open(os.path.join(d, name)) as f:
+                for line in f:
+                    if f"rec={base}" not in line:
+                        continue
+                    mt = re.search(r"\bt=([\d.]+)", line)
+                    mty = re.search(r"\[anomaly[^\]]*\]\s+(\S+)", line)
+                    if mt:
+                        out.append((float(mt.group(1)), mty.group(1) if mty else "anomaly", line.strip()))
+        except OSError:
+            continue
+    return sorted(out)
 
 
 def digest(path):
@@ -509,7 +561,7 @@ def digest(path):
         print(f"{path}: no data rows")
         return
     segs = segment(rows)
-    anoms = load_anomalies(path, meta["session"])
+    anoms = load_anomalies(path)
     fbw = fbw_params(meta)
     t0, tN = rows[0]["t"], rows[-1]["t"]
     events = sorted([(t, f"# cfg {txt}") for t, txt in meta["cfg_marks"]]
@@ -611,6 +663,76 @@ def selftest():
     rows = [{"t": (i if i < 100 else i + 200) / 15.0, "outP": 0.03 * (1 if i % 2 else -1)} for i in range(200)]
     total, _, _, _ = buzz_scan(rows)
     assert total > 0.0  # buzz on both sides of the gap still found
+
+    # v0.71/defect-2 regression: a test-card capture's segTag column used to make load() drop EVERY
+    # row -- float(r["segTag"]) raised on literally every row, since segTag wasn't in the old
+    # ("phase","controlLaw") tuple, so --digest and the default score both printed "no data rows"
+    # for every card capture. Write a REAL tiny CSV (the bug is in how load() reads a file end to
+    # end, not just in the dict comprehension in isolation) and confirm both rows now survive.
+    import tempfile, io, contextlib
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write("# mouseaim recording v0.71.0 run=R1 rec=1 session=test\n"
+                    "t,off,segTag\n"
+                    "0.0,1.5,arm\n"
+                    "0.1,1.2,az10\n")
+        _, rows = load(tmp_path)
+        assert len(rows) == 2, rows                                  # neither row silently dropped
+        assert rows[0]["segTag"] == "arm" and rows[1]["segTag"] == "az10", rows
+        assert isinstance(rows[0]["off"], float) and rows[0]["off"] == 1.5, rows
+    finally:
+        os.remove(tmp_path)
+
+    # A row that's genuinely corrupt (non-numeric value in a REAL numeric column) is still dropped
+    # -- that part was never wrong -- but must now be COUNTED and warned about, not silently eaten.
+    fd2, tmp_path2 = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd2, "w", newline="") as f:
+            f.write("t,off,segTag\n0.0,1.5,arm\n0.1,notanumber,az10\n0.2,1.1,az10\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _, rows2 = load(tmp_path2)
+        assert len(rows2) == 2, rows2                    # the one bad row dropped, the other two kept
+        assert "WARNING" in buf.getvalue() and "1/3" in buf.getvalue(), buf.getvalue()
+    finally:
+        os.remove(tmp_path2)
+
+    # The anomaly sidecar is found by SCANNING, not by rebuilding its name from session= (which was
+    # wrong for every real capture -- see load_anomalies). Lay out a directory the way the mod
+    # actually writes one: the log name carries version+run BEFORE the session id, and holds a line
+    # for a different recording that must not leak into this one's digest.
+    tmpd = tempfile.mkdtemp()
+    try:
+        csvp = os.path.join(tmpd, "mouseaim-rec-v0.9.0-R7-02-fixedwing-v2-20260101-120500.csv")
+        with open(csvp, "w", newline="") as f:
+            f.write("# mouseaim recording v0.9.0 run=R7 rec=2 session=20260101-120000\n"
+                    "t,off,segTag\n0.0,1.5,arm\n")
+        with open(os.path.join(tmpd, "mouseaim-anomalies-v0.9.0-R7-20260101-120000.log"), "w") as f:
+            f.write(f"[anomaly] overshoot t=12.5 rec={os.path.basename(csvp)} detail\n"
+                    "[anomaly] over-roll t=99.0 rec=some-other-run.csv detail\n")
+        got = load_anomalies(csvp)
+        assert len(got) == 1, got                        # the other recording's line stayed out
+        assert got[0][0] == 12.5 and got[0][1] == "overshoot", got
+    finally:
+        import shutil; shutil.rmtree(tmpd)
+
+    # v0.74 R15 regression: a run aborted seconds in leaves a handful of rows of pure entry-
+    # teleport transient (observed: spd 250->669, aoa swinging to -84 deg, all inside 8 rows / 0.4s).
+    # analyze() used to compute a confident PASS/FAIL straight off that garbage; it must now refuse.
+    fd3, tmp_path3 = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd3, "w", newline="") as f:
+            f.write("t,off,fbwTgtPR,fbwPR\n"
+                    + "".join(f"{i * 0.067:.3f},1.0,0.2,-0.2\n" for i in range(8)))  # 8 rows: < MIN_ROWS
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            analyze(tmp_path3)
+        out = buf.getvalue()
+        assert "UNUSABLE" in out and "8 sample" in out, out
+        assert "VERDICT" not in out, out                  # no PASS/FAIL computed from 8 rows
+    finally:
+        os.remove(tmp_path3)
 
     print("selftest OK")
 
