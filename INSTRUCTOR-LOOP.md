@@ -215,10 +215,10 @@ with probes** — which is the project's actual goal.
 
 ---
 
-## 5. Open hypothesis: where the cross-fighting comes from
+## 5. Where the cross-fighting comes from — tested, and it was not what I thought
 
-Not yet tested — the first thing to run once `flightscore.py` lands, and it needs **no new flying**,
-only the 162 existing captures.
+**Status: the gate-chatter hypothesis below is FALSIFIED.** Kept in place because the reasoning that
+killed it is the reusable part. Full detail in [`GATE-CHATTER-FINDINGS.md`](debugtests/GATE-CHATTER-FINDINGS.md).
 
 The `Apply` pipeline allocates azimuth error across roll and yaw through several independent gates
 and blends: `bankBlend`, `assist`, `yawEff`/`yawWeak`, `qSched`, and the v0.65 `settleOn` gate. Each
@@ -230,14 +230,46 @@ small-movement region where the confusion is reported.
 already logs `settleOn`, `bankBlend`, `assist`, `qSched` per tick, so this is a correlation over data
 we have. If it holds, the fix direction is fewer gates with hysteresis, not more gain tuning.
 
-**The R21 forensics already support the mechanism class, in a regime where it wasn't even suspected.**
-In a *steady sustained turn* — no small movements, no mode switching by design — three separate
-gates were found pinned at a rail for essentially the whole window: `lateralHold` at 1.0 (97%),
-`predFloor` binding (100%), `_iPitch` held at zero by a magnitude gate (100%). That is the same
-disease presenting statically: independent thresholds, each locally reasonable, composing into a
-loop whose actual gain and actual integrator bear little resemblance to the configured ones. If the
-gates rail in the *easy* case, expect them to chatter in the hard one.
+### The answer: no
 
-This reframes the likely fix. "Confused in small movements" and "9.4° of standing lag in a sweep"
-may not be two bugs — they may be one architecture in which too many independent gates decide, per
-tick and without hysteresis, which term owns the error.
+REGRESSING density does not spike at gate crossings in the regions the hypothesis was built to
+explain — and the effect runs **backwards**. `fine` has the highest crossing rate in the corpus
+(5.66/s) and a regression ratio of **0.82**; `micro1..10` 3.03/s and **0.88**. The chattiest
+segments are the unaffected ones. `settleOn`, the gate singled out above, crosses 0.29/s in `micro`
+and carries **RR 0.00** — not one regressing tick near any crossing. The `fineVsAlign` contradiction
+(two gates disagreeing about who owns the error) occurs in **0.0%** of every segment. It never
+happens.
+
+**What killed it was the controls, and they are the reusable part.** Alongside the real gates the
+analysis ran **sham gates** — same functional form, thresholds appearing nowhere in
+`ChaseController` — plus a circular-shift null and stratification by (run × block). Pooled median RR:
+real 3.65, sham 3.16. `turn360`'s headline RR of 7.29 collapses to **1.28 (p=0.31)** once the first
+2 s is skipped, and its shams score as high as its real gates. The apparent correlation is **common
+cause**: every real gate thresholds on `|azErr|` or `off`, and those cross a small value exactly when
+the nose passes through the target — which is exactly when a P-loop overshoot reads as REGRESSING.
+Without the sham arm this would have read as clean confirmation.
+
+*Any* future claim of this shape needs a sham control. A threshold that fires when the error is small
+will always look correlated with events that happen when the error is small.
+
+### What is actually wrong
+
+- **`elDn` is a sustained roll limit cycle with measured positive feedback** — not chatter. Against
+  its mirror segment `elUp` (a *larger* step, upper hemisphere): `off` **6.92° ± 2.40 vs 0.03°**,
+  bank half-amplitude **43.3° vs 0.11°**, `outR` sign flips **0.58/s vs 0.00**. `blendWeight`
+  correlates **+0.918** with the very `|azErr|` that roll-to-align is itself generating.
+  `belowSuppress` exists precisely to break this, and its `(1 − lateralHold)` factor removes **51%**
+  of the intended suppression — because `lateralHold > 0` on 88% of ticks *as a consequence of the
+  symptom*. **The suppressor is disarmed by the thing it is meant to suppress.** And `blendWeight`
+  sits **81% in the mid band**: nothing rails, so hysteresis would have done nothing.
+- **Sub-degree REGRESSING is step-size overshoot**, not confusion. r(reg%, max off) = **+0.888**,
+  while partial r(reg%, crossings/s | off) = **−0.632** — negative once step size is controlled for.
+- **`predFloor` is the one gate that survives.** RR 6.5–36.1 (p ≤ 0.01) across all four azimuth
+  steps, 2–16× its matched shams, robust to both skip controls. It is the only *ratio* condition
+  rather than a magnitude threshold, and crossing it swings azimuth P gain ~3× with no ramp. R21
+  flagged it independently from the opposite direction. Fix is a continuous blend on lead
+  confidence, not a hard 0.30 step.
+
+**Caveat that bounds all of this:** 11 captures, **one airframe** (KR-67 Ifrit), one entry condition.
+A low-q STOL trainer, where `qSched` and `omegaMax` actually bind, could put real crossings on gates
+that never move here.
