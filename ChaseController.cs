@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HarmonyLib;
 using Rewired;
 using UnityEngine;
@@ -14,21 +15,29 @@ namespace NuclearOptionMouseAim
     // blend roll between "bank toward target" (far off) and "wings level" (on target). We fully OWN
     // the stick while active (native is skipped); only a short ramp on disengage. The game's FBW/
     // AutoTrimmer limit G/AoA downstream, so no integral term — just P + a slew-rate limit.
-    internal static class ChaseController
+    //
+    // ONE INSTANCE PER AIRCRAFT (v0.82). Every field below is per-aircraft state — integrators,
+    // filters, the ring buffer, the reflection probe caches, the phase/maneuver trackers. As statics
+    // they were fine while exactly one aircraft was ever flown by the mod; the v0.81 drone harness
+    // flies N at once, and N aircraft sharing one integrator does not produce a slightly worse
+    // capture, it produces a meaningless one. Get a controller through `For(aircraft)` — never
+    // `new` — so the same aircraft always gets the same state back. The handful of members that
+    // remain `static` are genuinely process-global and each says why at its declaration.
+    internal sealed class ChaseController
     {
-        private static bool  _active;     // owning the stick this frame
-        private static bool  _wasActive;  // last frame (edge detection)
-        private static float _outP, _outR, _outY;
-        private static float _disRamp;    // 1->0 disengage blend
-        private static Vector3 _prevFwd;  // last frame's nose direction (for pitch/yaw rate damping)
-        private static Vector3 _prevUp;   // last frame's up axis (for roll-rate damping)
-        private static bool  _prevFwdValid;
-        private static float _lastChaseLog; // throttle the [chase] trace to ~5/sec
+        private bool  _active;     // owning the stick this frame
+        private bool  _wasActive;  // last frame (edge detection)
+        private float _outP, _outR, _outY;
+        private float _disRamp;    // 1->0 disengage blend
+        private Vector3 _prevFwd;  // last frame's nose direction (for pitch/yaw rate damping)
+        private Vector3 _prevUp;   // last frame's up axis (for roll-rate damping)
+        private bool  _prevFwdValid;
+        private float _lastChaseLog; // throttle the [chase] trace to ~5/sec
 
         // Per-axis manual override-on-touch state. _eng* is 0 (mouse-aim owns the axis) .. 1 (you own it);
         // _mApply* freezes the manual value at release so the axis eases back to chase, not to zero.
-        private static float _engP, _engR, _engY;
-        private static float _mApplyP, _mApplyR, _mApplyY;
+        private float _engP, _engR, _engY;
+        private float _mApplyP, _mApplyR, _mApplyY;
         private static Player _rewired;   // cached Rewired player 0 (same one PilotPlayerState reads)
 
         // Global hard-handoff state (v0.49). When ManualHandoffTime > 0 the per-axis blend is replaced
@@ -38,40 +47,40 @@ namespace NuclearOptionMouseAim
         // only re-engages once _manualHold counts back down to 0 (i.e. that many seconds after your last
         // input). _gEng in [0,1] is the global manual->instructor blend (1 = you own it, eases to 0 as
         // the chase takes back over) — the global twin of the per-axis _eng*.
-        private static float _manualHold;  // seconds the instructor stays off after the last manual input
-        private static float _gEng;        // 1 = full manual on all axes, 0 = full instructor
+        private float _manualHold;  // seconds the instructor stays off after the last manual input
+        private float _gEng;        // 1 = full manual on all axes, 0 = full instructor
 
         // Fine-regime integrator state (v0.24). The game's FBW is a rate-command law, so a proportional
         // outer loop asymptotes and parks short; these wind in the steady bias that closes the last bit.
-        private static float _iPitch, _iYaw;
+        private float _iPitch, _iYaw;
 
         // Fly Level autopilot (v0.24). When active, the chase ignores the marker and flies straight-and-
         // level at the heading captured on toggle-on (horizontal projection of the nose at that instant).
-        public static bool FlyLevelActive;
-        private static Vector3 _levelHeading = Vector3.forward; // world-space, horizontal, unit
+        public bool FlyLevelActive;
+        private Vector3 _levelHeading = Vector3.forward; // world-space, horizontal, unit
 
         // Anomaly detection state (v0.25). Event-only logger: each detector keeps a little rolling state
         // and emits ONE [anomaly] line on the triggering frame, with a per-type cooldown.
-        private static float _offMin = float.MaxValue;          // closest approach during the current command (overshoot)
-        private static float _prevOff;                          // last frame's off (closing test)
-        private static float _huntWinStart;                     // start of the 1 s sign-flip window
-        private static int   _flipsP, _flipsY;                  // output sign-flips this window (hunt)
-        private static float _prevSignP, _prevSignY;            // last non-trivial output sign per axis
-        private static float _missTimer;                        // seconds off has stayed high while saturated (no progress)
-        private static float _missAnchorOff;                    // off captured at the start of the current stall window
-        private static float _yawWagWinStart;                   // start of the low-speed yaw-wag window
-        private static int   _yawWagFlips;                      // yaw output sign-flips this window (low-speed wag)
-        private static float _prevSignYW;                       // last non-trivial yaw output sign (wag counter)
-        private static float _wobbleWinStart;                   // start of the high-speed roll-wobble window
-        private static int   _wobbleFlips;                      // roll output sign-flips this window (high-speed wobble)
-        private static float _prevSignRW;                       // last non-trivial roll output sign (wobble counter)
-        private static float _anOvershootT, _anOverRollT, _anHuntT, _anMissT, _anYawWagT, _anWobbleT, _anStressT, _anAzlcT; // per-type cooldown stamps
-        private static float _azlcWinStart;                      // az-limit-cycle (v0.58) half-window start
-        private static int   _azlcFlips, _azlcFlipsPrev;         // azErr sign flips, current/previous half-window
-        private static float _azlcPeak, _azlcPeakPrev;           // peak |azErr| per half-window (envelope)
-        private static float _azlcOutRMin, _azlcOutRMax;         // outR span this half-window (is roll chasing?)
-        private static float _azlcPrevAz;                        // last azErr (flip edge detect)
-        private static float _stressTimer;                      // seconds past the airframe's g/AoA limits (overstress detector)
+        private float _offMin = float.MaxValue;          // closest approach during the current command (overshoot)
+        private float _prevOff;                          // last frame's off (closing test)
+        private float _huntWinStart;                     // start of the 1 s sign-flip window
+        private int   _flipsP, _flipsY;                  // output sign-flips this window (hunt)
+        private float _prevSignP, _prevSignY;            // last non-trivial output sign per axis
+        private float _missTimer;                        // seconds off has stayed high while saturated (no progress)
+        private float _missAnchorOff;                    // off captured at the start of the current stall window
+        private float _yawWagWinStart;                   // start of the low-speed yaw-wag window
+        private int   _yawWagFlips;                      // yaw output sign-flips this window (low-speed wag)
+        private float _prevSignYW;                       // last non-trivial yaw output sign (wag counter)
+        private float _wobbleWinStart;                   // start of the high-speed roll-wobble window
+        private int   _wobbleFlips;                      // roll output sign-flips this window (high-speed wobble)
+        private float _prevSignRW;                       // last non-trivial roll output sign (wobble counter)
+        private float _anOvershootT, _anOverRollT, _anHuntT, _anMissT, _anYawWagT, _anWobbleT, _anStressT, _anAzlcT; // per-type cooldown stamps
+        private float _azlcWinStart;                      // az-limit-cycle (v0.58) half-window start
+        private int   _azlcFlips, _azlcFlipsPrev;         // azErr sign flips, current/previous half-window
+        private float _azlcPeak, _azlcPeakPrev;           // peak |azErr| per half-window (envelope)
+        private float _azlcOutRMin, _azlcOutRMax;         // outR span this half-window (is roll chasing?)
+        private float _azlcPrevAz;                        // last azErr (flip edge detect)
+        private float _stressTimer;                      // seconds past the airframe's g/AoA limits (overstress detector)
 
         // Anomaly index + on-screen flash (v0.25.2). Every anomaly that clears its cooldown gets the next
         // sequential number (monotonic across the whole session, so #N is unambiguous even across respawns).
@@ -86,25 +95,25 @@ namespace NuclearOptionMouseAim
         // plan is legible on the HUD ("PHASE: ALIGN"), and emits ONE [maneuver] summary line per completed
         // turn — the "how did the planned path actually work out" record. Phase is surfaced always; the
         // maneuver tracker only runs while AnomalyLogging is on (it reuses the overshoot flag).
-        public  static string LastPhase = "";                   // surfaced to OnGUI + the [anomaly] line
-        private static bool   _manvActive;                      // a maneuver (off rose above AlignAngle) is in progress
-        private static float  _manvStartT, _manvStartOff, _manvPeakOff; // start time / start & peak off
-        private static float  _manvAlignT, _manvCaptureT;       // sec to first |phi|<20deg / first off<FineAngle (-1 = not yet)
-        private static float  _manvPeakBank, _manvPeakG, _manvPeakRoll; // peak |bank| / |g| / |rollRate| over the maneuver
-        private static float  _manvSettle;                      // sec off has stayed under FineAngle (capture-settle timer)
-        private static bool   _manvOvershot;                    // an overshoot anomaly fired during this maneuver
+        public  string LastPhase = "";                   // surfaced to OnGUI + the [anomaly] line
+        private bool   _manvActive;                      // a maneuver (off rose above AlignAngle) is in progress
+        private float  _manvStartT, _manvStartOff, _manvPeakOff; // start time / start & peak off
+        private float  _manvAlignT, _manvCaptureT;       // sec to first |phi|<20deg / first off<FineAngle (-1 = not yet)
+        private float  _manvPeakBank, _manvPeakG, _manvPeakRoll; // peak |bank| / |g| / |rollRate| over the maneuver
+        private float  _manvSettle;                      // sec off has stayed under FineAngle (capture-settle timer)
+        private bool   _manvOvershot;                    // an overshoot anomaly fired during this maneuver
 
         // Recent-frame ring buffer (v0.25.1): every FixedUpdate we stash a compact state snapshot here but
         // log NOTHING. When a detector fires, DumpTrail emits the last ~20 frames as a single [anomaly:trail]
         // line so the lead-UP to the event is visible (how the wag built / how the bank blew past) without
         // any continuous spam. Formatting only happens on a real anomaly, so the buffer itself is free.
         private struct AnFrame { public float t, off, bank, tgtBank, p, r, y, yr, rr, rf, spd, g; }
-        private static readonly AnFrame[] _ring = new AnFrame[64];
-        private static int   _ringHead;     // next write index
-        private static int   _ringCount;    // valid entries (<= _ring.Length)
+        private readonly AnFrame[] _ring = new AnFrame[64];
+        private int   _ringHead;     // next write index
+        private int   _ringCount;    // valid entries (<= _ring.Length)
         private static float _lastTrailT;   // one trail dump per second across all anomaly types
-        private static float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
-        private static float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
+        private float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
+        private float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
                                                // v0.51 anticipatory lead on the turn-rate bank command (azErrPred in Apply). Nose-only
                                                // (marker-independent), so the lead can never fight a mouse flick.
         // Low-pass time constant shared by BOTH world-azimuth rate signals — the nose rate above and the
@@ -114,16 +123,16 @@ namespace NuclearOptionMouseAim
         // tau would show up as a PHASE error between them, which no gain can tune out.
         // ponytail: fixed, not a Cfg knob; promote to Cfg if flight tuning ever wants it.
         private const float HdgRateTau = 0.35f;
-        private static float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
-        internal static float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
+        private float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
+        internal float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
                                                // (the recorded targetBank is the shared yawWeak-gated blend, which EvolvedLegacy does
                                                // NOT fly; reading it cost two red herrings in the v0.53 analysis)
-        private static float _eAlignSlew;      // v0.57: slew-limited big-turn roll-alignment error — breaks the ~1 Hz tail-on
+        private float _eAlignSlew;      // v0.57: slew-limited big-turn roll-alignment error — breaks the ~1 Hz tail-on
                                                // roll relay (phi sign-flips in one tick when the target crosses dead-astern;
                                                // eAlign followed it rail-to-rail, bypassing every bank-target slew/deadzone)
-        private static float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
-        private static float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
-        private static float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
+        private float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
+        private float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
+        private float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
                                                // down to the 0.3 q-clamp floor near this airframe's own alpha ceiling).
                                                // Fast attack / slow release — the hysteresis that stops demand snapping
                                                // hot again as AoA falls back through the ceiling mid-cycle (loaded-jet fix)
@@ -133,18 +142,18 @@ namespace NuclearOptionMouseAim
         // when the rudder is empirically failing to CLOSE the heading error despite being commanded toward
         // it, and decays toward 0 otherwise. It has memory (the LPF) so it pre-biases the next nudge in the
         // same regime. _prevAzErr feeds the heading-closing rate. Reset on engage with the other detectors.
-        private static float _yawWeak;          // 0 = rudder is working, 1 = rudder ineffective -> bank-and-pull
-        private static float _yawEffFilt;       // low-passed |yawRate|/|outY| (diagnostic, logged to the CSV)
-        private static float _prevAzErr;        // last frame's azimuth error (deg) for d|azErr|/dt
-        private static bool  _prevAzErrValid;   // skip the first frame's bogus derivative
-        private static float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
+        private float _yawWeak;          // 0 = rudder is working, 1 = rudder ineffective -> bank-and-pull
+        private float _yawEffFilt;       // low-passed |yawRate|/|outY| (diagnostic, logged to the CSV)
+        private float _prevAzErr;        // last frame's azimuth error (deg) for d|azErr|/dt
+        private bool  _prevAzErrValid;   // skip the first frame's bogus derivative
+        private float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
 
         // Measured pitch-effectiveness estimate (v0.60) — the pitch twin of _yawWeak, consumed by
         // ApplyEvolvedLegacy. 1 = the plant delivers the commanded pitch rate; < 1 = it's under-delivering
         // (loaded / mushing / low-q / damaged). Low-passed achieved/commanded ratio of the game FBW's
         // own pitch rate pair, with the same fast-attack/slow-release asymmetry (memory/hysteresis) as
         // _yawWeak. Computed in Apply's shared pre-compute; reset to 1 on engage.
-        private static float _pitchEff = 1f;
+        private float _pitchEff = 1f;
         // v0.65 C1 reversal threshold AND v0.67 dead-command self-probe level — one const so they can't
         // drift apart. Below this, _pitchEff means "reversed/lost plant" (C1 drops the floor); it is also
         // the level a GATED-OUT command drifts toward so the pitch loop keeps a ~15% self-probe alive
@@ -156,11 +165,11 @@ namespace NuclearOptionMouseAim
         // inject a small V-INDEPENDENT sub-gate micro-bank that closes a high-q azimuth residual without
         // re-arming the V-scaled bank relay. _settleOn = did that injection fire this frame (recorder
         // column settleOn). _prevAim/_prevAimValid feed the rate. Reset on engage like the other estimators.
-        private static Vector3 _prevAim;
-        private static bool    _prevAimValid;
-        private static float   _aimRateFilt;
-        private static bool    _settleOK;
-        private static bool    _settleOn;
+        private Vector3 _prevAim;
+        private bool    _prevAimValid;
+        private float   _aimRateFilt;
+        private bool    _settleOK;
+        private bool    _settleOn;
 
         // MARKER AZIMUTH RATE (v0.78) — the SIGNED world-azimuth rate of the aim direction (deg/s,
         // + = sweeping right), in the same frame and sign convention as azErr and _headingRateFilt so the
@@ -169,18 +178,18 @@ namespace NuclearOptionMouseAim
         // "is the marker moving at all" gate, and an unsigned magnitude cannot feed a signed turn demand.
         // Fed forward into both omega sites — full rationale at the shared omegaDes site in Apply.
         // _aimAzAcId guards the shared _prevAim sample against an aircraft change (see the compute block).
-        private static float _aimAzRateFilt;
-        private static int   _aimAzAcId = -1;
+        private float _aimAzRateFilt;
+        private int   _aimAzAcId = -1;
 
         // Hover / "flown-like-a-helicopter" regime state (v0.43). _collective latches the airframe class
         // (true = takeoffDistance==0 = heli/hover-VTOL) on engage; _heliBlend in [0,1] is the per-frame
         // regime blend (0 = fixed-wing bank-to-turn, 1 = hover yaw-to-point), computed in Apply from
         // forward airspeed + AutoHover. _vFwd/_hoverOn are surfaced for the CSV/trace. EvolvedLegacy only.
-        internal static bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
-        internal static float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
-        internal static float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
-        internal static float _speed;           // total airspeed magnitude (m/s) — surfaced for the debug HUD
-        internal static bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
+        internal bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
+        internal float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
+        internal float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
+        internal float _speed;           // total airspeed magnitude (m/s) — surfaced for the debug HUD
+        internal bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
 
         // FBW probe cache (v0.55). The decompiled ControlsFilter.FlyByWire.Filter showed the pitch stick
         // is a g-scaled RATE command whose gain collapses below corner speed, and that the in-game
@@ -191,13 +200,13 @@ namespace NuclearOptionMouseAim
         // the plane can actually fly (see the FBW PROBE block in Apply). Cached per aircraft instance id;
         // EVERYTHING fails soft: helicopters (HeloControlsFilter / FBW disabled) or a game update renaming
         // a field just leave the probe not-ok and the pre-0.55 behaviour intact.
-        private static int   _fbwAcId;                   // aircraft instance id the cache belongs to
-        private static ControlsFilter.FlyByWire _fbwFbw; // resolved FBW block (null = unavailable)
-        private static bool  _fbwEnabled;                // FBW Enabled flag for the cached airframe
-        private static float _fbwCorner, _fbwMaxPitchVel;// public params ([2]=cornerSpeed, [1]=maxPitchAngularVel)
-        private static float _fbwGLimit = 9f, _fbwAlphaLimit = 25f, _fbwAlphaLimStr = 0.05f; // private trio (defaults = decompiled class defaults)
-        private static bool  _fbwRefsTried, _fbwRefsOk;  // AccessTools field-ref bootstrap (attempted once per session)
-        private static AccessTools.FieldRef<ControlsFilter.FlyByWire, float> _fbwGLimRef, _fbwALimRef, _fbwALimStrRef;
+        private int   _fbwAcId;                   // aircraft instance id the cache belongs to
+        private ControlsFilter.FlyByWire _fbwFbw; // resolved FBW block (null = unavailable)
+        private bool  _fbwEnabled;                // FBW Enabled flag for the cached airframe
+        private float _fbwCorner, _fbwMaxPitchVel;// public params ([2]=cornerSpeed, [1]=maxPitchAngularVel)
+        private float _fbwGLimit = 9f, _fbwAlphaLimit = 25f, _fbwAlphaLimStr = 0.05f; // private trio (defaults = decompiled class defaults)
+        private bool  _fbwRefsTried, _fbwRefsOk;  // AccessTools field-ref bootstrap (attempted once per session)
+        private AccessTools.FieldRef<ControlsFilter.FlyByWire, float> _fbwGLimRef, _fbwALimRef, _fbwALimStrRef;
 
         // CANARD PROBE cache (v0.57). The KR-67 Ifrit is the one airframe with a RelaxedStabilityController:
         // before the FBW ever sees the stick, the game REPLACES pitch with Lerp(AoA/canardRange, stick,
@@ -207,11 +216,11 @@ namespace NuclearOptionMouseAim
         // on the Ifrit only (buzz on up to 82% of a file, both assist states, back to v0.53). The mod
         // inverts the remap (see InvertCanardRemap) so the game delivers the pitch the law intended.
         // Same fail-soft rules as the FBW cache: missing component / renamed field => identity (old behaviour).
-        private static RelaxedStabilityController _rsCtrl; // null = airframe has none (everything but the Ifrit)
-        private static float _rsCanardRange;               // its serialized canardRange (deg)
-        private static bool  _rsRefsTried, _rsRefsOk;
-        private static AccessTools.FieldRef<Aircraft, RelaxedStabilityController> _rsCtrlRef;
-        private static AccessTools.FieldRef<RelaxedStabilityController, float> _rsRangeRef, _rsEffRef;
+        private RelaxedStabilityController _rsCtrl; // null = airframe has none (everything but the Ifrit)
+        private float _rsCanardRange;               // its serialized canardRange (deg)
+        private bool  _rsRefsTried, _rsRefsOk;
+        private AccessTools.FieldRef<Aircraft, RelaxedStabilityController> _rsCtrlRef;
+        private AccessTools.FieldRef<RelaxedStabilityController, float> _rsRangeRef, _rsEffRef;
 
         // HELO FBW PROBE cache (v0.58). Rotorcraft don't fly the base flyByWire the v0.55 probe reads:
         // HeloControlsFilter OVERRIDES Filter entirely and runs its own private heloFlyByWire — a 3-axis
@@ -222,18 +231,75 @@ namespace NuclearOptionMouseAim
         // NORMALIZATION block in ApplyEvolvedLegacy). The archetype refs drive the tilt/nozzle-angle
         // hover-regime blend. Same fail-soft contract as the FBW/canard probes: any miss leaves _heloOk
         // false / refs null and the exact pre-0.58 behaviour.
-        private static bool    _heloOk;                          // helo FBW resolved, Enabled, params sane
-        private static float   _heloGLimit    = 3f;              // its serialized gLimit (class default)
-        private static Vector3 _heloMaxAngVel = new Vector3(1f, 2f, 2f); // rad/s per unit stick (x=pitch, y=yaw, z=roll)
-        private static TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
-        private static SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
-        private static bool _hasCompound;                        // CompoundHeloController present (log-only for now)
+        private bool    _heloOk;                          // helo FBW resolved, Enabled, params sane
+        private float   _heloGLimit    = 3f;              // its serialized gLimit (class default)
+        private Vector3 _heloMaxAngVel = new Vector3(1f, 2f, 2f); // rad/s per unit stick (x=pitch, y=yaw, z=roll)
+        private TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
+        private SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
+        private bool _hasCompound;                        // CompoundHeloController present (log-only for now)
 
-        public static bool IsFlying => _active;
+        // =========================================================================================
+        // THE REGISTRY (v0.82) — one controller per aircraft, keyed by Aircraft.GetInstanceID(),
+        // the same key TestDrone uses for its own dictionary.
+        // =========================================================================================
+        private static readonly Dictionary<int, ChaseController> _byAc = new Dictionary<int, ChaseController>();
+        private Aircraft _ac;   // the aircraft this controller belongs to — read ONLY by the eviction sweep
+
+        // THE HUD'S CONTROLLER. OnGUI has no aircraft in hand and must show the LOCAL PLAYER's
+        // numbers — never a drone's, which is the whole reason the controller stopped being static.
+        // BeginFrame publishes itself here only when its aircraft is the one the game calls local, so
+        // a drone can never claim it. Null until the player has flown one fixed step, hence every
+        // HUD read is null-conditional.
+        internal static ChaseController Player { get; private set; }
+
+        // The controller for this aircraft, created on first use. Never `new ChaseController()`
+        // anywhere else: a second instance for the same aircraft is a silently-reset integrator.
+        internal static ChaseController For(Aircraft ac)
+        {
+            int id = ac.GetInstanceID();
+            if (_byAc.TryGetValue(id, out var c)) return c;
+            // EVICTION, on the MISS path only. A miss happens once per aircraft, not once per fixed
+            // step, so the sweep costs nothing on the hot path while still bounding the dictionary
+            // over an unattended session (every drone spawn and every player respawn is a new
+            // aircraft). Unity reports a destroyed object as null WITHOUT throwing, so a dead entry
+            // never announces itself — it just keeps a corpse mapped forever.
+            Sweep();
+            c = new ChaseController { _ac = ac };
+            _byAc[id] = c;
+            return c;
+        }
+
+        // Drop an aircraft's controller. Idempotent; safe to call for an aircraft that never had one.
+        // TestDrone calls this from both removal paths (deliberate despawn and the prune of a drone
+        // the game removed under us), which is what keeps a long unattended run flat.
+        internal static void Forget(Aircraft ac) { if (ac != null) Forget(ac.GetInstanceID()); }
+
+        internal static void Forget(int aircraftId)
+        {
+            if (_byAc.TryGetValue(aircraftId, out var c))
+            {
+                if (ReferenceEquals(c, Player)) Player = null;   // don't leave the HUD reading a corpse
+                _byAc.Remove(aircraftId);
+            }
+        }
+
+        // ponytail: linear scan + a throwaway list, on a path that runs once per new aircraft. The
+        // dictionary holds single digits in practice (DroneCount caps at 16); if it ever holds
+        // thousands, that is a missing Forget call, not a reason to index this.
+        private static void Sweep()
+        {
+            List<int> dead = null;
+            foreach (var kv in _byAc)
+                if (kv.Value._ac == null) (dead ?? (dead = new List<int>())).Add(kv.Key);
+            if (dead == null) return;
+            foreach (int k in dead) Forget(k);
+        }
+
+        public bool IsFlying => _active;
 
         // Toggle Fly Level. On engage, latch the current horizontal heading so we hold THIS course (not
         // wherever the nose happens to drift). Capturing the heading here keeps Apply() purely reactive.
-        public static void ToggleFlyLevel(Aircraft aircraft)
+        public void ToggleFlyLevel(Aircraft aircraft)
         {
             FlyLevelActive = !FlyLevelActive;
             if (FlyLevelActive && aircraft != null)
@@ -254,13 +320,13 @@ namespace NuclearOptionMouseAim
         // Latest pilot G-tolerance (PilotPlayerState.pilotStrength), 1 = fine, <0.2 = blacked/redded out
         // and the game has zeroed all stick input. Surfaced for the overlay's G-LOC warning. Seeded to 1
         // so we never flash the warning before the first read.
-        public static float PilotStrength { get; private set; } = 1f;
+        public float PilotStrength { get; private set; } = 1f;
 
         // The instructor's own slewed stick command this frame (before any manual override blends on top),
         // surfaced for the top-left debug readout: "what the instructor is saying". 0 when not flying.
-        public static float LastPitch { get; private set; }
-        public static float LastRoll  { get; private set; }
-        public static float LastYaw   { get; private set; }
+        public float LastPitch { get; private set; }
+        public float LastRoll  { get; private set; }
+        public float LastYaw   { get; private set; }
 
         // The player's manual stick/keyboard/pedal source. Null until Rewired is ready.
         private static Player RewiredPlayer()
@@ -302,7 +368,7 @@ namespace NuclearOptionMouseAim
         // call per airframe (an int compare). Returns true when the FBW block is present, Enabled and its
         // params are sane — the callers' gate for every v0.55 normalization/cap. All reflection guarded;
         // any failure leaves the probe not-ok for this airframe (fail SOFT, old behaviour).
-        private static bool ResolveFbw(Aircraft ac)
+        private bool ResolveFbw(Aircraft ac)
         {
             if (ac == null) return false;
             int id = ac.GetInstanceID();
@@ -366,7 +432,7 @@ namespace NuclearOptionMouseAim
         // CANARD PROBE resolve (v0.57) — see the cache comment above. Called on the aircraft-change edge
         // inside ResolveFbw so both probes rebind together. Fail SOFT: any miss leaves _rsCtrl null and
         // the pitch path untouched (identity — exactly the pre-0.57 behaviour on every other airframe).
-        private static void ResolveCanard(Aircraft ac)
+        private void ResolveCanard(Aircraft ac)
         {
             _rsCtrl = null; _rsCanardRange = 0f;
             try
@@ -422,7 +488,7 @@ namespace NuclearOptionMouseAim
         // PRIVATE NESTED class (no compile-time type), so this reads it with Traverse instead of the
         // typed FieldRef pattern the other probes use. Fail SOFT: any miss leaves _heloOk false and
         // the archetype refs null — exact pre-0.58 behaviour (hot direct gains, speed-only blend).
-        private static void ResolveHelo(Aircraft ac)
+        private void ResolveHelo(Aircraft ac)
         {
             _heloOk = false; _twc = null; _sds = null; _hasCompound = false;
             if (!_collective) return; // fixed-wing: nothing to probe, keep the refs null
@@ -479,7 +545,7 @@ namespace NuclearOptionMouseAim
 
         // Is the canard remap live THIS frame? (component present, engine running — the game zeroes
         // effectiveness on engine-off — and above the game's own 30 m/s gate.)
-        private static bool CanardActive(float vMag)
+        private bool CanardActive(float vMag)
         {
             if (_rsCtrl == null || vMag <= 30f) return false;
             try { return _rsEffRef(_rsCtrl) != 0f; }
@@ -487,7 +553,7 @@ namespace NuclearOptionMouseAim
         }
 
         // One-line FBW parameter summary for the maneuver-recorder header ("what plane was this, really").
-        internal static string FbwHeader(Aircraft ac)
+        internal string FbwHeader(Aircraft ac)
         {
             try
             {
@@ -501,8 +567,15 @@ namespace NuclearOptionMouseAim
         }
 
         // Called from the prefix. Returns true if WE own the stick (native should be skipped).
-        public static bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
+        public bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
         {
+            // v0.82 — publish THIS controller as the HUD's, but only if this aircraft is the one the
+            // game itself calls local. GetLocalAircraft is the game's own definition (the same one
+            // AimRig.TryGetContext and the recorder use), so an uncrewed drone can never satisfy it,
+            // and a failed read leaves the previous publication alone rather than blanking the HUD.
+            if (GameManager.GetLocalAircraft(out var localAc) && ReferenceEquals(localAc, aircraft))
+                Player = this;
+
             PilotStrength = pilotStrength; // surface for the overlay's G-LOC warning (runs every FixedUpdate)
             _collective = !fixedWing;      // latch airframe class for the hover-regime blend (EvolvedLegacy)
             // NOTE: deliberately NOT gated on Guards.MenusOpen(). While a menu/map is up the sim keeps
@@ -558,7 +631,7 @@ namespace NuclearOptionMouseAim
         }
 
         // Called from the postfix every frame (native may or may not have run).
-        public static void Apply(Aircraft aircraft)
+        public void Apply(Aircraft aircraft)
         {
             var ci = aircraft.GetInputs();
             if (ci == null) return;
@@ -1398,7 +1471,7 @@ namespace NuclearOptionMouseAim
         //        degrees until |azErr| is also small, so the law doesn't level early and park short.
         // Everything else (pitch, yaw, fine integrator winding, roll-rate low-pass) is byte-for-byte
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
-        private static void ApplyEvolvedLegacy(
+        private void ApplyEvolvedLegacy(
             Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
             float targetBank, float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
@@ -1642,7 +1715,7 @@ namespace NuclearOptionMouseAim
         // Event-only anomaly logger (v0.25). Each detector keeps small rolling state and fires at most
         // once per cooldown, writing a single compact [anomaly] line. Runs every FixedUpdate while flying,
         // so it catches the exact frame a command goes wrong without the per-frame [chase] spam.
-        private static void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
+        private void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
         {
             float now = Time.time;
             float spdNow = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
@@ -1830,7 +1903,7 @@ namespace NuclearOptionMouseAim
         // No per-anomaly gain snapshot: gains are logged once at startup + on every change ([config] lines)
         // and embedded in each recording's header, so repeating them here only burned log/context. Instead
         // we tag the active control law and, when a recording is running, the CSV it belongs to.
-        private static void Anomaly(string type, string detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
+        private void Anomaly(string type, string detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
         {
             if (now - lastStamp < 1f) return; // per-type cooldown
             lastStamp = now;
@@ -1852,7 +1925,7 @@ namespace NuclearOptionMouseAim
         // event is visible (how the wag built, how the bank blew past its target) without per-frame spam.
         // Throttled to once per second across all anomaly types so a multi-type frame doesn't repeat it.
         // Per frame: t | off / bank>tgtBank | P,R,Y outputs | yaw rate | spd. Oldest → newest, left → right.
-        private static void DumpTrail(float now)
+        private void DumpTrail(float now)
         {
             if (now - _lastTrailT < 1f || _ringCount == 0) return;
             _lastTrailT = now;
@@ -1893,7 +1966,7 @@ namespace NuclearOptionMouseAim
         // off, time-to-align (first |phi|<20°, "lift vector on target"), time-to-capture (first off<FineAngle),
         // and peak bank / G / roll rate — the "how did the planned path actually work out" record. Cheap: one
         // line per completed turn. Reset on engage alongside the anomaly state.
-        private static void TrackManeuver(Aircraft ac, float off, float phi, float bank, float rollRate, float dt)
+        private void TrackManeuver(Aircraft ac, float off, float phi, float bank, float rollRate, float dt)
         {
             float now = Time.time;
 
@@ -1982,7 +2055,7 @@ namespace NuclearOptionMouseAim
             // (plan §5.1 M-1). No-op (two field reads) when no card is running.
             ScenarioPlayer.Tick(aircraft);
 
-            bool active = ChaseController.BeginFrame(aircraft, fixedWing, pilotStrength);
+            bool active = ChaseController.For(aircraft).BeginFrame(aircraft, fixedWing, pilotStrength);
 
             // Skip the native body ONLY in the cockpit. There, native's mouse virtual-joystick would
             // fight us for the stick, so we own it outright. In external/orbit views we let native RUN —
@@ -1997,7 +2070,7 @@ namespace NuclearOptionMouseAim
         {
             if (TryResolve(__instance, out var aircraft, out _, out _))
             {
-                ChaseController.Apply(aircraft);
+                ChaseController.For(aircraft).Apply(aircraft);
                 // Throttle/brake ownership for a running card, on the FIXED step: this is the write
                 // that is guaranteed to be in place when Aircraft.FilterInputs consumes the inputs
                 // immediately after this postfix. PilotThrottlePatch below owns the Update-time half.

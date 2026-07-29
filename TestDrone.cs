@@ -182,6 +182,7 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
                 _live.RemoveAt(i);
                 _byAircraftId.Remove(d.AircraftId);
+                ChaseController.Forget(d.AircraftId);   // v0.82: drop its control state with it
             }
         }
 
@@ -326,6 +327,9 @@ namespace NuclearOptionMouseAim
             if (d == null) return;
             _live.Remove(d);
             _byAircraftId.Remove(d.AircraftId);
+            // v0.82: a ChaseController is per-aircraft state, so it dies with the aircraft. Keyed by
+            // the CACHED id for the same reason the dictionary is — the aircraft may already be gone.
+            ChaseController.Forget(d.AircraftId);
             var ac = d.Aircraft;
             if (ac == null) return;
             try

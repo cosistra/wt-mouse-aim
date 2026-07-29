@@ -3,6 +3,40 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.82.0
+
+**`ChaseController` is one instance per aircraft instead of one pile of statics.** This is the
+blocker phase 2 of the drone harness sits behind: the controller held ~90 mutable `static` fields —
+integrators, low-pass filters, the anomaly ring buffer, the FBW/canard/helo reflection caches, the
+phase and maneuver trackers — so N aircraft flown at once would not merely degrade each other's
+captures, they would share one integrator and make every capture meaningless.
+
+- **The control law is untouched, and provably so.** The refactor is `internal static class` →
+  `internal sealed class` plus deleting the word `static` from 107 per-aircraft declarations. **No
+  method body was edited** — not a gain, not a clamp, not a sign, not a reordering. That is the
+  entire reason for doing it this way: with the bodies untouched the law is identical by
+  construction, and any reference that *should* have been converted and wasn't becomes a compile
+  error rather than a silently-shared float. The diff bears this out — of 110 removed lines, 107 are
+  a pure `static` deletion and the other three are the class declaration and the two seam call sites.
+- **`ChaseController.For(aircraft)`** is the only way to get one; it is keyed by
+  `Aircraft.GetInstanceID()`, the same key `TestDrone` uses. Never `new ChaseController()`: a second
+  instance for the same aircraft is a silently-reset integrator.
+- **Eviction, so an unattended session stays flat.** `Forget(aircraft)`/`Forget(id)` is called from
+  **both** of `TestDrone`'s removal paths — the deliberate despawn and the prune of a drone the game
+  removed under us — and `For` sweeps out controllers whose aircraft Unity has destroyed. The sweep
+  runs on the dictionary-**miss** path only, which happens once per aircraft rather than once per
+  fixed step, so it costs nothing on the hot path.
+- **The HUD reads `ChaseController.Player`.** `OnGUI` has no aircraft in hand and must show the local
+  player's numbers, never a drone's, so `BeginFrame` publishes itself there only when its aircraft is
+  the one `GameManager.GetLocalAircraft` calls local — the game's own definition, which an uncrewed
+  drone cannot satisfy. Every HUD read is null-guarded with its pre-0.82 static default, so the
+  overlay is visually identical.
+- **What deliberately stayed `static`:** the Rewired player-0 cache, the anomaly stream's index and
+  its three HUD-flash fields, and the `[anomaly:trail]` dump throttle — one process-wide input
+  device and one process-wide log stream. Everything else, **including `LastPhase`**, is per-aircraft:
+  that one feeds `ManeuverRecorder.Sample`, so leaving it shared would have written one aircraft's
+  phase into another's CSV — capture corruption of exactly the kind this change exists to prevent.
+
 ## 0.81.0
 
 **The harness can fly its own aircraft now — phase 1: spawn, fly, despawn, N at a time.** Every

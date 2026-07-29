@@ -162,7 +162,7 @@ namespace NuclearOptionMouseAim
                     {
                         acRef = ac;
                         if (ac.definition != null) acName = ac.definition.name;
-                        fbwLine = ChaseController.FbwHeader(ac); // v0.55: per-airframe FBW params (fail-soft)
+                        fbwLine = ChaseController.For(ac).FbwHeader(ac); // v0.55: per-airframe FBW params (fail-soft)
                     }
                 }
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }

@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 0.81.0 -->
+<!-- ARCH-VERSION: 0.82.0 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -38,7 +38,7 @@ flowchart TB
         plugin["<b>plugin</b><br/>WTMouseAimPlugin<br/>lifecycle · hotkeys · HUD overlay"]
         cfg["<b>cfg</b><br/>Cfg<br/>~80 live-tunable binds"]
         aim_rig["<b>aim_rig</b><br/>AimRig<br/>world-locked aim marker<br/>+ cursor regime"]
-        chase["<b>chase</b><br/>ChaseController<br/>the instructor: marker → stick"]
+        chase["<b>chase</b><br/>ChaseController<br/>the instructor: marker → stick<br/>ONE INSTANCE PER AIRCRAFT (v0.82)<br/>get it via ChaseController.For(ac)"]
         seam["<b>seam</b><br/>PilotPlayerStatePatch<br/>own/skip the native stick"]
         seam_thr["<b>seam_thr</b><br/>PilotThrottlePatch<br/>own the throttle axis<br/>(card only, Update-time)"]
         campatch["<b>campatch</b><br/>Camera patches ×3<br/>view follows the marker"]
@@ -245,6 +245,20 @@ leaves the instructor holding the heading you ended on.
 airframe can do → pick a control law → condition the output → hand off to manual if the pilot is on
 the stick → instrument.
 
+**One controller per aircraft (v0.82).** Everything the pipeline below carries between ticks —
+integrators, low-pass filters, the anomaly ring buffer, the probe caches, the phase/maneuver
+trackers — is *per-aircraft state*, so `ChaseController` is an ordinary instance class and you get
+one with **`ChaseController.For(aircraft)`** (keyed by `Aircraft.GetInstanceID()`, the same key the
+drone harness uses). Never construct one directly: a second instance for the same aircraft is a
+silently-reset integrator. `Forget(ac)` drops one, and `For` sweeps out controllers whose aircraft
+Unity has destroyed — on the dictionary-**miss** path only, which runs once per aircraft rather than
+once per fixed step. Two things stay `static` on purpose and say so at their declarations: the
+Rewired player-0 cache (one input device per process) and the anomaly stream's index/flash fields
+plus the trail-dump throttle (one log stream per process). Because `OnGUI` has no aircraft in hand,
+`BeginFrame` publishes itself as **`ChaseController.Player`** when — and only when — its aircraft is
+the one `GameManager.GetLocalAircraft` calls local, and the HUD reads that; a drone can never satisfy
+that test, so the overlay cannot end up showing a drone's numbers.
+
 ```mermaid
 flowchart TB
     subgraph MEAS["1 · MEASURE"]
@@ -449,7 +463,9 @@ flowchart LR
 Every measurement this project has taken cost a human sitting in a cockpit for the length of the
 card. This subsystem removes that: the mod spawns its own aircraft, owns their `ControlInputs`, and
 destroys them again. **Phase 1 is the harness only** — nothing here is wired to `chase` or
-`scenario`, and the built-in level-hold exists solely to prove the inputs land.
+`scenario`, and the built-in level-hold exists solely to prove the inputs land. The *other* half of
+phase 2 landed in **v0.82**: `chase` is now one instance per aircraft (see L1.3), so attaching it to
+`Drone.Fly` no longer means N drones sharing one integrator.
 
 ```mermaid
 flowchart TB
@@ -461,7 +477,7 @@ flowchart TB
     tick --> ft["sample Time.unscaledDeltaTime → FrameDt<br/>log '[drone] frame hitch' on the RISING edge<br/>(a hitch runs several FixedUpdates back to back<br/>with the SAME dt — edge-gate or one 300 ms stall<br/>prints fifteen identical lines)"]
     tick --> due{"pending > 0 and<br/>Time.time >= nextAt ?"}
     due -->|yes| sp["spawn ONE, lane = Abeam + Lane*slot<br/>nextAt += DroneStaggerSec"]
-    tick --> prune["prune drones the game removed<br/>(shot down, hit the sea, mission cleanup) —<br/>Unity reports a destroyed object as null WITHOUT<br/>throwing, so a stale dict entry is silent"]
+    tick --> prune["prune drones the game removed<br/>(shot down, hit the sea, mission cleanup) —<br/>Unity reports a destroyed object as null WITHOUT<br/>throwing, so a stale dict entry is silent.<br/>BOTH removal paths (this and Despawn) call<br/>ChaseController.Forget — the control state<br/>dies with the aircraft (v0.82)"]
 
     sp --> gate{"gates, in order —<br/>any failure spawns NOTHING"}
     gate --> g1["Spawner in scene?"]
@@ -478,7 +494,7 @@ flowchart TB
     post --> idle{"TestDrone.Idle ?<br/>(one int compare)"}
     idle -->|yes| out1["return — the cost of this file<br/>with no drone alive"]
     idle -->|no| look["dict probe on the pilot's aircraft id.<br/>MISS ⇒ return. This is what keeps the player's<br/>aircraft out: it can only enter the dict via Spawn,<br/>which spawns with player=null and asserts it"]
-    look --> fly["<b>Drone.Fly(d)</b> — the PHASE-2 HOOK.<br/>Per DRONE, not one static: N drones need N<br/>independent controllers. Default = LevelHold"]
+    look --> fly["<b>Drone.Fly(d)</b> — the PHASE-2 HOOK.<br/>Per DRONE, not one static: N drones need N<br/>independent controllers. Default = LevelHold.<br/>v0.82 cleared the blocker on the other side —<br/>ChaseController.For(ac) now returns N of those"]
     fly --> filt["<b>ac.FilterInputs()</b> — by hand.<br/>RelaxedStabilityController + FBW are only ever<br/>called FROM a pilot state, and this aircraft has<br/>none, so raw inputs would reach the surfaces —<br/>a DIFFERENT plant from the one the law is tuned<br/>against (the FBW reads pitch/yaw as a RATE)"]
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
@@ -552,7 +568,7 @@ repo must appear here.** `debugtests/check-architecture.py` enforces exactly tha
 | `plugin` | `WTMouseAimPlugin.cs` | `WTMouseAimPlugin` | BepInEx entry point, hotkeys, IMGUI overlay, `PluginVersion` SoT, session id |
 | `cfg` | `Cfg.cs` | `Cfg`, `ConfigurationManagerAttributes` | every config bind + F1 metadata |
 | `aim_rig` | `AimRig.cs` | `AimRig`, `Guards` | world-locked marker, Win32 raw mouse, cursor regimes; `Guards` = "should the mod be passive" |
-| `chase` | `ChaseController.cs` | `ChaseController` | the instructor: measure → estimate → probe → law → condition → handoff → write |
+| `chase` | `ChaseController.cs` | `ChaseController` | the instructor: measure → estimate → probe → law → condition → handoff → write. **An instance class since v0.82, one per aircraft** — every integrator, filter, ring buffer and probe cache in it is per-aircraft state, so N aircraft flown at once (the drone harness) need N controllers or they share one integrator and every capture is meaningless. Obtain one with `ChaseController.For(ac)` (keyed by `Aircraft.GetInstanceID()`), release one with `Forget`; `For` also sweeps controllers whose aircraft Unity destroyed, on the miss path so the hot path pays nothing. `ChaseController.Player` is the local player's controller, published from `BeginFrame` only when `GameManager.GetLocalAircraft` names that aircraft — it exists because `OnGUI` has no aircraft in hand and must never render a drone's numbers |
 | `seam` | `ChaseController.cs` | `PilotPlayerStatePatch` | Harmony prefix/postfix on `PilotPlayerState.PlayerAxisControls` |
 | `seam_thr` | `ChaseController.cs` | `PilotThrottlePatch` | Harmony prefix on `PilotPlayerState.PlayerThrottleAxis1Controls` (**Update**, not FixedUpdate). Skips native while a card plays, so the pilot's throttle/customAxis1 axes never reach `ControlInputs` — the game's airbrake reads `throttle == 0` every rendered frame, so owning throttle on the fixed step alone left it half-open |
 | `campatch` | `CameraPatches.cs` | `CockpitCameraPatch`, `CameraOrbitPatch`, `CameraSwitchStatePatch` | view follows the marker in cockpit + orbit |

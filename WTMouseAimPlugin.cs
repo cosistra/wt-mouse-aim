@@ -19,7 +19,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.81.0";
+        public const string PluginVersion = "0.82.0";
 
         internal static ManualLogSource Log;
 
@@ -119,7 +119,7 @@ namespace NuclearOptionMouseAim
                 Input.GetKeyDown(Cfg.FlyLevelKey.Value) &&
                 AimRig.TryGetContext(out var ac, out _) && !ac.disabled)
             {
-                ChaseController.ToggleFlyLevel(ac);
+                ChaseController.For(ac).ToggleFlyLevel(ac);
             }
 
             // Maneuver recorder toggle (v0.35). Ungated by aircraft/Enabled so it can always be stopped;
@@ -224,6 +224,12 @@ namespace NuclearOptionMouseAim
             if (ac.disabled) // plane destroyed/disabled — nothing to aim, so draw nothing
                 return;
 
+            // v0.82: the instructor is per-aircraft now, so the HUD reads the LOCAL PLAYER's
+            // controller rather than a set of statics. Null until it has flown one fixed step (and
+            // after a respawn), so every read below carries its pre-0.82 static default as the
+            // fallback — the overlay looks identical, it just can no longer show a drone's numbers.
+            var chase = ChaseController.Player;
+
             // G-LOC fade-to-black (v0.55): progressively grey the whole screen as the pilot's G-tolerance
             // drops toward the 0.2 blackout point, so third-person pilots (who get none of the game's
             // cockpit-only black-out) see it coming instead of an instant control cut. Drawn FIRST so the
@@ -232,7 +238,7 @@ namespace NuclearOptionMouseAim
             if (Cfg.GLocFadeEnabled.Value)
             {
                 // t = 0 at the onset, 1 at the 0.2 blackout point (InverseLerp clamps and stays 1 below it).
-                float ft = Mathf.InverseLerp(Cfg.GLocFadeOnset.Value, 0.2f, ChaseController.PilotStrength);
+                float ft = Mathf.InverseLerp(Cfg.GLocFadeOnset.Value, 0.2f, chase != null ? chase.PilotStrength : 1f);
                 float alpha = ft * Cfg.GLocFadeMaxAlpha.Value;
                 if (alpha > 0f)
                 {
@@ -281,20 +287,20 @@ namespace NuclearOptionMouseAim
             if (Cfg.ShowDebugHud.Value)
             {
                 string ctrl = !Cfg.WriteControl.Value ? "overlay-only"
-                            : ChaseController.IsFlying ? "FLYING (mod owns stick)"
+                            : chase != null && chase.IsFlying ? "FLYING (mod owns stick)"
                             : "native";
-                string spd = ChaseController._collective
-                    ? $"spd={ChaseController._speed:0} m/s (fwd={ChaseController._vFwd:0}, heliBlend={ChaseController._heliBlend:0.00})"
-                    : $"spd={ChaseController._speed:0} m/s";
+                string spd = chase != null && chase._collective
+                    ? $"spd={chase._speed:0} m/s (fwd={chase._vFwd:0}, heliBlend={chase._heliBlend:0.00})"
+                    : $"spd={(chase != null ? chase._speed : 0f):0} m/s";
                 GUI.Label(new Rect(12f, 12f, 560f, 22f),
                     $"WT MouseAim  off={off:0.0}°  cone={half:0}°  law=EL  [{ctrl}]  {spd}");
                 // Instructor's live stick command (what the mod is telling the plane, before manual override).
                 GUI.Label(new Rect(12f, 30f, 560f, 22f),
-                    $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
-                    $"yaw={ChaseController.LastYaw:+0.00;-0.00;0.00}  roll={ChaseController.LastRoll:+0.00;-0.00;0.00}");
+                    $"instructor  pitch={(chase != null ? chase.LastPitch : 0f):+0.00;-0.00;0.00}  " +
+                    $"yaw={(chase != null ? chase.LastYaw : 0f):+0.00;-0.00;0.00}  roll={(chase != null ? chase.LastRoll : 0f):+0.00;-0.00;0.00}");
             }
             // Fly Level indicator — distinct cyan so it's obvious the marker is being ignored on purpose.
-            if (ChaseController.FlyLevelActive)
+            if (chase != null && chase.FlyLevelActive)
             {
                 GUI.color = new Color(0.3f, 0.9f, 1f, 0.95f);
                 GUI.Label(new Rect(12f, 48f, 560f, 22f),
@@ -315,10 +321,10 @@ namespace NuclearOptionMouseAim
                         $"ANOMALY #{ChaseController.LastAnomalyIndex}  {ChaseController.LastAnomalyType}");
                 }
                 // Live phase of the instructor's plan (LEVEL/FINE/ALIGN/PULL/TURN/HOLD) — white, under the readout.
-                if (ChaseController.IsFlying && !string.IsNullOrEmpty(ChaseController.LastPhase))
+                if (chase != null && chase.IsFlying && !string.IsNullOrEmpty(chase.LastPhase))
                 {
                     GUI.color = Color.white;
-                    GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {ChaseController.LastPhase}");
+                    GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {chase.LastPhase}");
                 }
             }
             GUI.color = prev;
@@ -327,7 +333,7 @@ namespace NuclearOptionMouseAim
             // stick input (PilotPlayerState: pilotStrength < 0.2), so the mod can't fly either. Surface it
             // discreetly in amber, centred near the top, so the loss of control is explained rather than
             // feeling like a mod bug.
-            if (ChaseController.PilotStrength < 0.2f)
+            if (chase != null && chase.PilotStrength < 0.2f)
             {
                 var pc = GUI.color;
                 GUI.color = new Color(1f, 0.55f, 0.1f, 0.9f); // amber/orange warning

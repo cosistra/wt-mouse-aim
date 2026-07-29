@@ -39,7 +39,16 @@ Machine-specific paths are written as placeholders:
   - `WTMouseAimPlugin.cs` — `WTMouseAimPlugin` (Awake/OnGUI overlay). Holds `PluginVersion`, the version SoT.
   - `Cfg.cs` — `Cfg` (all config binds) + `ConfigurationManagerAttributes`.
   - `AimRig.cs` — `AimRig` (world-locked marker + Win32 raw mouse) + `Guards`.
-  - `ChaseController.cs` — `ChaseController` (the control law in `Apply`, nested
+  - `ChaseController.cs` — `ChaseController`. **An instance class, ONE PER AIRCRAFT (v0.82)** —
+    get one with `ChaseController.For(aircraft)` (keyed by `Aircraft.GetInstanceID()`), release it
+    with `Forget`, and **never `new` one**: a second instance for the same aircraft is a silently
+    reset integrator. Every integrator/filter/ring buffer/probe cache in it is per-aircraft state, so
+    the drone harness flying N at once needs N controllers. Only two things stay `static` and both
+    say why in place: the Rewired player-0 cache (one input device per process) and the anomaly
+    stream's index/flash fields + trail throttle (one log stream per process). `ChaseController.Player`
+    is the LOCAL player's controller — published from `BeginFrame` only when
+    `GameManager.GetLocalAircraft` names that aircraft — and it exists solely because `OnGUI` has no
+    aircraft in hand; the HUD must never render a drone's numbers. Contents: the control law in `Apply`, nested
     `AnFrame`; also `DetectAnomalies`/`TrackManeuver`, the v0.55 FBW probe — per-airframe
     stick→pitch-rate params read from the game's `ControlsFilter.FlyByWire`, fail-soft — and the
     v0.57 canard probe/`InvertCanardRemap` — undoes the KR-67's `RelaxedStabilityController`
@@ -48,7 +57,7 @@ Machine-specific paths are written as placeholders:
     rotorcraft commands and drive the hover regime by tilt angle, fail-soft; rotorcraft are
     force-flown with EvolvedLegacy — and the v0.59 AoA-utilization demand schedule/recovery
     bias — folds live AoA vs the probed alpha ceiling into `qSched`, gates `FineGainBoost`,
-    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix). **ONE fixed-wing
+    and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix. **ONE fixed-wing
     law now: `ApplyEvolvedLegacy`** (the Unified A/B alternative + its enum/hotkey were removed in
     v0.65 — see CHANGELOG); rotorcraft are force-flown through it too. v0.64 scales `pErrTerm` by the
     measured `_pitchEff` estimator; **v0.65 C1** reversal-gates that floor (below `revThresh` the floor
@@ -107,10 +116,13 @@ Machine-specific paths are written as placeholders:
     Needs an **active server** — single player is a host, so SP and hosting work; as an MP client the
     spawn is refused with a log line. `Cfg.DroneEnabled` is off by default and the subsystem is inert
     while it is (the hotkeys are not even read; the postfix is one int compare). Phase 2 attaches
-    `ChaseController` to `Drone.Fly`; the built-in level-hold there is a deliberately trivial
+    `ChaseController` to `Drone.Fly` — unblocked in v0.82, when the controller became one instance
+    per aircraft; the built-in level-hold there is a deliberately trivial
     altitude/wings hold and is **not** the mod's control law — never tune it or compare against it.
     Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
-    clock that exists before any drone does.
+    clock that exists before any drone does. **Both** removal paths (`Despawn` and `PruneDead`) call
+    `ChaseController.Forget(d.AircraftId)` so the control state dies with the aircraft — keyed by the
+    CACHED id for the same reason the dictionary is (the aircraft may already be destroyed).
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
 

@@ -401,6 +401,78 @@ def aoa_g_metrics(rows, cols):
     return m, skipped
 
 
+def cfg_params(meta):
+    """Numeric knobs from the '# config' header line as a dict — same regex/shape as
+    aw.fbw_params(), applied to the other header line. Non-numeric values (law=EvolvedLegacy) simply
+    don't match and are absent."""
+    return {m.group(1): float(m.group(2)) for m in re.finditer(r"(\w+)=([-\d.]+)", meta.get("cfg", ""))}
+
+
+def saturation_metrics(rows, cols, cfg, fbw):
+    """Is the LAW at a limit, or the PLANT? (metrics, skipped), same shape as aoa_g_metrics.
+
+    R21 (10 replicates of fixedwing-sweep) needed a forensic dig to establish that the bank clamp
+    was active on 97% of a sustained turn while g sat at 5.4 of 9 — i.e. the law was saturated and
+    the airframe was not. Every saturation question below is answerable from columns already in the
+    CSV, so a run should self-report it:
+      bankClampActivePct    - % samples with |targetBank| at Cfg.MaxBankAngle (the clamp is ON)
+      bankDemandExcessDeg   - mean |bankTR| - MaxBankAngle over those samples (how much demand the
+                              clamp DISCARDED; 0.0 when it never clamps). bankTR is the pre-clamp,
+                              post-achievability-cap bank demand, so this is exactly the throw-away.
+      turnRateCapActivePct  - % samples where the demanded turn rate is at the v0.55 achievability
+                              cap (omegaMax). Distinct from the bank clamp: this one means the LAW
+                              decided the airframe can't do it, the other means a fixed 72 deg wall.
+      turnRateDemandRatio   - mean(demanded omega) / mean(omegaMax). >=1 means the card is asking
+                              for a turn the probed airframe cannot fly and no A/B on it can mean
+                              anything; well under 1 with the clamp active means the reverse.
+
+    AoA-gate occupancy is deliberately NOT re-added here — aoa_g_metrics already reports it as
+    aoaLimiterActivePct on the same segments.
+
+    omegaMax mirrors ChaseController.Apply's fixed-wing branch (gLimit*9.81/max(V, 0.75*corner),
+    q-scaled below corner, times max(0.3, aoaGU), with the raw-law maxPitchAngularVel branch when
+    assist is off and q is low). The demanded omega is recovered EXACTLY from bankTR by inverting
+    its own definition, bankTR = atan(omega*V/g) -- no second copy of the demand chain to drift.
+    # ponytail: BankSpeedFloor (50 m/s) is not on the config line; V is used unfloored. Only matters
+    # below 50 m/s, i.e. a hover/taxi segment, where the turn-rate question is meaningless anyway.
+    """
+    m, skipped = {}, {}
+    n = len(rows)
+    max_bank = cfg.get("maxBank")
+    if max_bank and {"targetBank", "bankTR"} <= cols:
+        clamped = sum(1 for r in rows if abs(r.get("targetBank", 0.0)) >= max_bank - 0.01)
+        over = [abs(r.get("bankTR", 0.0)) - max_bank for r in rows if abs(r.get("bankTR", 0.0)) > max_bank]
+        m["bankClampActivePct"] = 100.0 * clamped / n if n else 0.0
+        m["bankDemandExcessDeg"] = statistics.fmean(over) if over else 0.0
+    else:
+        why = "missing column(s): targetBank/bankTR" if max_bank else "no maxBank= on the '# config' header"
+        skipped["bankClampActivePct"] = skipped["bankDemandExcessDeg"] = why
+
+    corner, glim = fbw.get("cornerSpeed"), fbw.get("gLimit")
+    if corner and glim and {"spd", "bankTR"} <= cols:
+        des, omax = [], []
+        for r in rows:
+            v = max(1.0, r.get("spd", 0.0))
+            rho = r.get("airDensity", 1.225) or 1.225
+            q = v * v * rho / (corner * corner * 1.225)
+            w = glim * G0 / max(v, 0.75 * corner)
+            if q < 1.0:
+                w *= min(1.0, max(0.3, q))
+            if not (r.get("assist", 1.0) > 0.5 or q > 1.2):
+                w = fbw.get("maxPitchAngVel", w)          # raw law: flat rate cap, no g protection
+            omax.append(w * max(0.3, r.get("aoaGU", 1.0)))
+            des.append(abs(math.tan(math.radians(r.get("bankTR", 0.0)))) * G0 / v)
+        capped = sum(1 for d, w in zip(des, omax) if w > 0 and d >= 0.995 * w)
+        mo = statistics.fmean(omax)
+        m["turnRateCapActivePct"] = 100.0 * capped / n if n else 0.0
+        m["turnRateDemandRatio"] = statistics.fmean(des) / mo if mo else None
+    else:
+        why = ("missing column(s): spd/bankTR" if corner and glim
+               else "no cornerSpeed/gLimit on the '# fbw' header (pre-v0.55 capture)")
+        skipped["turnRateCapActivePct"] = skipped["turnRateDemandRatio"] = why
+    return m, skipped
+
+
 def _cap(s):
     return s[0].upper() + s[1:]
 
@@ -427,7 +499,10 @@ def wobble_scan(t, rows, cols, dur):
 
 # --- per-segment dispatch -----------------------------------------------------------------------
 
-def compute_segment(tag, seg_type, rows, cols):
+def compute_segment(tag, seg_type, rows, cols, ctx=None):
+    """ctx = {"cfg": cfg_params(meta), "fbw": aw.fbw_params(meta)} — the header-derived constants the
+    saturation block needs. Optional: without it those metrics land in "skipped", nothing crashes."""
+    ctx = ctx or {}
     n = len(rows)
     t = [r["t"] for r in rows]
     dur = (t[-1] - t[0]) if n >= 2 else 0.0
@@ -436,6 +511,9 @@ def compute_segment(tag, seg_type, rows, cols):
 
     if not excluded:
         m, s = aoa_g_metrics(rows, cols)
+        metrics.update(m)
+        skipped.update(s)
+        m, s = saturation_metrics(rows, cols, ctx.get("cfg", {}), ctx.get("fbw", {}))
         metrics.update(m)
         skipped.update(s)
         m, s = pointing_metrics(t, rows, cols)   # every segment type, not just fine_track
@@ -547,9 +625,10 @@ def score_run(path):
     if not rows:
         return {"provenance": prov, "segments": [], "warnings": [], "note": "no data rows"}
     segments, warnings = [], []
+    ctx = {"cfg": cfg_params(meta), "fbw": aw.fbw_params(meta)}
     for tag, seg_rows in group_segments(rows, cols):
         seg_type = infer_type(tag)
-        segments.append(compute_segment(tag, seg_type, seg_rows, cols))
+        segments.append(compute_segment(tag, seg_type, seg_rows, cols, ctx))
         w = _tag_warning(tag, seg_type)
         if w:
             warnings.append(w)
@@ -712,6 +791,70 @@ def selftest():
     assert skipped == {}, skipped
     m2, skipped2 = aoa_g_metrics(rows, {"aoa"})
     assert "aoaLimiterActivePct" in skipped2 and "gPeak" in skipped2, skipped2
+
+    # cfg_params: numeric knobs off the '# config' line; non-numeric values must be absent, not crash.
+    cp = cfg_params({"cfg": "law=EvolvedLegacy sens=3.0 maxBank=72 leadT=0.65 mrFF=1 trGain=0.92"})
+    assert cp["maxBank"] == 72.0 and cp["trGain"] == 0.92 and "law" not in cp, cp
+    assert cfg_params({}) == {}
+
+    # saturation_metrics — the R21 case, built to exact arithmetic. bankTR = atan(omega*V/g) with
+    # V=266, so omega is recoverable from it: 81.75 deg -> tan=6.856 -> 0.2529 rad/s = 14.49 deg/s.
+    # omegaMax = 9*9.81/max(266, 120) = 0.3319 rad/s = 19.02 deg/s -> ratio 0.762, cap NOT active
+    # while the 72 deg bank clamp IS (that pairing is the whole point of this metric).
+    satcfg, satfbw = {"maxBank": 72.0}, {"cornerSpeed": 160.0, "gLimit": 9.0, "maxPitchAngVel": 0.75}
+    satcols = {"targetBank", "bankTR", "spd", "airDensity", "assist", "aoaGU"}
+    sat_rows = [{"targetBank": 72.0, "bankTR": 81.75, "spd": 266.0, "airDensity": 0.873,
+                 "assist": 1.0, "aoaGU": 1.0}] * 3 + \
+               [{"targetBank": 40.0, "bankTR": 40.0, "spd": 266.0, "airDensity": 0.873,
+                 "assist": 1.0, "aoaGU": 1.0}]
+    sm, sskip = saturation_metrics(sat_rows, satcols, satcfg, satfbw)
+    assert sskip == {}, sskip
+    assert abs(sm["bankClampActivePct"] - 75.0) < 1e-9, sm            # 3 of 4 at the wall
+    assert abs(sm["bankDemandExcessDeg"] - 9.75) < 1e-9, sm           # 81.75-72, only over clamped rows
+    assert abs(sm["turnRateCapActivePct"] - 0.0) < 1e-9, sm           # nowhere near omegaMax
+    want = statistics.fmean([math.tan(math.radians(b)) * G0 / 266.0 for b in (81.75, 81.75, 81.75, 40.0)]) \
+        / (9.0 * G0 / 266.0)
+    assert abs(sm["turnRateDemandRatio"] - want) < 1e-9, (sm, want)
+    # the clamped rows alone: 14.49 / 19.02 = 0.762 -- the R21 pairing, "law saturated, plant is not".
+    assert abs(saturation_metrics(sat_rows[:3], satcols, satcfg, satfbw)[0]["turnRateDemandRatio"]
+               - 0.762) < 0.005, saturation_metrics(sat_rows[:3], satcols, satcfg, satfbw)
+
+    # ...and the mirror case: demand AT the achievability cap reads 100% (this one is the "the card
+    # is asking for something the airframe can't do" alarm, and it is a DIFFERENT limit from the wall).
+    at_cap = math.degrees(math.atan((9.0 * G0 / 266.0) * 266.0 / G0))  # bankTR for omega == omegaMax
+    capped, cskip = saturation_metrics(
+        [{"targetBank": 72.0, "bankTR": at_cap, "spd": 266.0, "airDensity": 0.873, "assist": 1.0,
+          "aoaGU": 1.0}], satcols, satcfg, satfbw)
+    assert cskip == {}, cskip
+    assert abs(capped["turnRateCapActivePct"] - 100.0) < 1e-9, capped
+    assert abs(capped["turnRateDemandRatio"] - 1.0) < 1e-9, capped
+    # never clamped must read 0.0 excess, not None -- "never clamped" has to be distinguishable from
+    # "column missing", which is what the skipped/metrics split is for.
+    unclamped, uskip = saturation_metrics(sat_rows[3:], satcols, satcfg, satfbw)
+    assert uskip == {} and unclamped["bankClampActivePct"] == 0.0, (unclamped, uskip)
+    assert abs(unclamped["bankDemandExcessDeg"] - 0.0) < 1e-9, unclamped
+    # aoaGU shrinks omegaMax, so the SAME demand is then over the cap (the v0.67 AoA-margin cap).
+    low_aoa = [{"targetBank": 60.0, "bankTR": at_cap, "spd": 266.0, "airDensity": 0.873,
+                "assist": 1.0, "aoaGU": 0.5}]
+    assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateCapActivePct"] == 100.0
+    assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateDemandRatio"] > 1.9
+
+    # graceful degradation, both halves independently: no '# config' line, and a pre-v0.55 '# fbw'.
+    _, s_nocfg = saturation_metrics(sat_rows, satcols, {}, satfbw)
+    assert set(s_nocfg) == {"bankClampActivePct", "bankDemandExcessDeg"}, s_nocfg
+    _, s_nofbw = saturation_metrics(sat_rows, satcols, satcfg, {})
+    assert set(s_nofbw) == {"turnRateCapActivePct", "turnRateDemandRatio"}, s_nofbw
+    # compute_segment: with ctx the metrics land in "metrics"; WITHOUT ctx (the old 4-arg call that
+    # every existing caller makes) they land in "skipped" and nothing crashes -- backward compatible.
+    sat_t = [dict(r, t=i * 0.1) for i, r in enumerate(sat_rows)]
+    with_ctx = compute_segment("turn360", "sustained_turn", sat_t, satcols | {"t"},
+                               {"cfg": satcfg, "fbw": satfbw})
+    assert abs(with_ctx["metrics"]["bankClampActivePct"]["value"] - 75.0) < 1e-9, with_ctx
+    noctx = compute_segment("turn360", "sustained_turn", sat_t, satcols | {"t"})
+    assert "bankClampActivePct" in noctx["skipped"], noctx
+    assert "bankClampActivePct" not in noctx["metrics"], noctx
+    # arm stays excluded: no saturation metrics on the post-spawn window either.
+    assert compute_segment("arm", "arm", sat_t, satcols | {"t"}, {"cfg": satcfg, "fbw": satfbw})["metrics"] == {}
 
     # sustained_turn arithmetic wiring: constant turn rate, known deltaTAS/deltaEh.
     rows = [{"t": 0.0, "headingRateFilt": 15.0, "spd": 100.0, "alt": 1000.0},
