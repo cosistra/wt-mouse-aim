@@ -1,0 +1,15 @@
+{
+  "name": "rotor-hover",
+  "cls": "Helo,Tiltwing,VTOL",
+  "step": 0.02,
+  "airframe": "any rotorcraft; a tiltwing/VTOL must already be in the HOVER configuration (a card never writes customAxis1)",
+  "note": "The hover half of rotorcraft-v2 without its 3 min fixed-wing prefix, so it actually gets flown. Exercises the v0.58 hover regime (tilt-angle driven) rather than the wingborne one. UNGATED (startSpeed 0): no placement, no collective ownership and therefore NO per-replicate reset - establish the hover by hand and fly one replicate.",
+  "startSpeed": 0,
+  "startAlt": 0,
+  "segments": [
+    { "tag": "arm",       "dur": 6,  "az": 0,  "el": 0 },
+    { "tag": "hover",     "dur": 25, "az": 0,  "el": 0 },
+    { "tag": "hoveryawR", "dur": 15, "az": 90, "el": 0 },
+    { "tag": "hoveryawL", "dur": 15, "az": 0,  "el": 0 }
+  ]
+}

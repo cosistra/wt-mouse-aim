@@ -1,0 +1,16 @@
+{
+  "name": "oblique-6",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "any jet at the fixedwing-v2 entry condition",
+  "note": "ONE test per card: 6 deg oblique steps, exactly AT the FineAngle=6 knee where the fine servo hands over to the roll-to-align blend. Same diamond geometry as oblique-2/-12, radius 4.24 deg.",
+  "startSpeed": 250,
+  "startAlt": 4000,
+  "segments": [
+    { "tag": "arm",   "dur": 6, "az": 0,     "el": 4.24 },
+    { "tag": "obDR6", "dur": 8, "az": 4.24,  "el": 0 },
+    { "tag": "obDL6", "dur": 8, "az": 0,     "el": -4.24 },
+    { "tag": "obUL6", "dur": 8, "az": -4.24, "el": 0 },
+    { "tag": "obUR6", "dur": 8, "az": 0,     "el": 4.24 }
+  ]
+}

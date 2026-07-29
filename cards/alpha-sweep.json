@@ -1,0 +1,13 @@
+{
+  "name": "alpha-sweep",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "any jet - fly it LOADED (heavy stores) for the loaded-jet case",
+  "note": "THE highest-value card: aoaLimiterActivePct is 0 in every capture ever taken. Same stimulus shape as fixedwing-sweep (deriveAzRate = 0.6 of the airframe's own instantaneous rate, i.e. a fixed fraction of ITS structural g), flown at 8000 m instead of 4000. Thin air means that fraction is no longer available aerodynamically, so the wing rides its alpha ceiling and stays there as energy bleeds. Pass = aoaAboveCeilingPct > 0 on alphaHold; 0 means the card failed to reach the regime, not that the law is clean.",
+  "startSpeed": 250,
+  "startAlt": 8000,
+  "segments": [
+    { "tag": "arm",       "dur": 6,  "az": 0, "el": 0 },
+    { "tag": "alphaHold", "dur": 35, "az": 0, "el": 0, "deriveAzRate": true }
+  ]
+}

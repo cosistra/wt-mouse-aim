@@ -1,0 +1,15 @@
+{
+  "name": "rotor-bob",
+  "cls": "Helo,Tiltwing,VTOL",
+  "step": 0.02,
+  "airframe": "any rotorcraft; a tiltwing/VTOL must already be in the HOVER configuration (a card never writes customAxis1)",
+  "note": "Vertical demand at hover, mirrored: +25 deg then -25 deg about a level datum, so climb and descent are equal-magnitude steps. UNGATED like rotor-hover - no reset between replicates.",
+  "startSpeed": 0,
+  "startAlt": 0,
+  "segments": [
+    { "tag": "arm",   "dur": 6,  "az": 0, "el": 0 },
+    { "tag": "bobup", "dur": 12, "az": 0, "el": 25 },
+    { "tag": "arm",   "dur": 4,  "az": 0, "el": 0 },
+    { "tag": "bobdn", "dur": 12, "az": 0, "el": -25 }
+  ]
+}

@@ -92,6 +92,61 @@ A change ships when it improves `A` without paying for it in `S`.
 `--selftest` for the physics anchors. It reads any recorder CSV — **no segment tags required** —
 which is what lets it score unattended flight and not just scripted cards.
 
+### The lever axis — did the fix FIRE, separately from did it HELP
+
+`A` and `S` say how well the nose was flown. They cannot say *why*, and specifically they cannot
+tell "the fix worked" from "the fix never ran" — both make an error smaller. That is the whole
+reason the mod records `iGate`/`leadDeg` (v0.83) and `bSup`/`bWt`/`phiLead` (v0.85) on **both**
+sides of their config toggles. `flightscore` prints a per-segment lever table under the segment
+scores whenever a capture carries any of them (`--levers` forces it on older captures, for the
+cross-fighting pair, which needs no new column). A capture with none of them prints **nothing**
+new and scores byte-identically to before the columns existed; an absent column reads `-`, which
+means NOT MEASURED and is never rendered as `0.0`.
+
+| column | reads | fired when |
+|---|---|---|
+| `iGate~` / `iStal%` | the wind gate the fine integrator used; % of time it was open **outside the fine cone** | `iStal%` is 0.0 **by construction** with `IntegralStallGate` off (`iGate == fineBlend == 0` there), so any value > 0 is the v0.83 gate firing |
+| `lead` / `floor%` | median `\|leadDeg\|/\|azErr\|`; % of time `predFloor` bound | R21 baseline **0.84 / 100%**. `RelativeTurnLead` working in a matched turn drives `lead` toward 0 |
+| `bSup~` / `r(bSup)` | below-nose suppression applied; its correlation with `\|azErr\|` | `r(bSup)` is the **disarm signature**: the deleted `(1 − lateralHold)` factor made the suppressor shrink as the error it creates grew. Clearly negative ⇒ that factor is back |
+| `bWt~` / `r(bWt)` / `sham` | the roll blend weight after suppression — the loop gain — its correlation with `\|azErr\|`, and the **definitional twin's** correlation | see below |
+| `phiL%` | % of time the `AlignRateLead` bearing lead was non-zero | 0 with the lever off or inside the `phiWrapGate` stand-down |
+| `xf%` / `xfSus%` / `xfWt` | cross-fighting — see below | — |
+
+**The v0.85 loop-gain check** is the headline, printed as one verdict line: pre-fix `elDn` measured
+`corr(bWt, |azErr|) = +0.918`, and the fix's one falsifiable prediction is that it collapses. FAIL
+needs three things at once — a **below-nose** segment (`bSup~ ≥ 0.01`; in the upper hemisphere
+`bWt == lateralHold` by design and is *supposed* to track the error), a **live** channel
+(`bWt~ ≥ 0.20`; a big correlation on a switched-off channel is not a loop gain), and `r ≥ +0.50`
+with a **gap under +0.20** against `sham`. `sham` is `lateralHold` itself, the bare algebraic
+function of `|azErr|` that `bWt` is built from: `bWt` correlates with `|azErr|` *by definition*, so
+`r` at or above `sham` is definitional and is **not** evidence of feedback. Only the gap is. This
+is the §5 sham-gate discipline applied to the number that replaced the hypothesis §5 killed.
+
+**Cross-fighting** — the maintainer's actual complaint, "whether it should roll, whether it should
+yaw" — is `|outR|` and `|outY|` both outside the stick deadband with **opposite signs** (the same
+definition `gatechatter.py` uses, so the two tools cannot disagree about what a fight is).
+`xf%` is raw occupancy; `xfSus%` counts only disagreements lasting ≥ 0.30 s, and **that is the
+control**: a P-loop flips one axis a tick before the other at every zero crossing, so a nonzero
+`xf%` is expected by construction and only a persistent one is an allocation fight. Baseline over
+the 18 `fixedwing-v2` captures at `--cone 0.2` (medians):
+
+| seg | `elDn` | `az10` | `az30` | `az90` | `az150` | `reversal` | `elUp` / `micro*` / `fine` / `turn360` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `xf%` | **46.5** | 20.9 | 12.0 | 10.8 | 6.5 | 0.6 | 0.0 |
+| `xfSus%` | **46.5** | 20.8 | 11.6 | 9.6 | 6.5 | 0.0 | 0.0 |
+
+`elDn` is fully sustained — a fight, not crossings — and independently reproduces
+`GATE-CHATTER-FINDINGS.md` §3 (42.6% there) on a different tick population. `reversal` is the
+opposite: occupancy that the sustain control removes entirely. Note again that the complaint's
+*small* movements (`micro*`, `fine`) score **0.0**; cross-fighting lives in the large oblique and
+below-nose reorientations.
+
+`xfWt` = mean `bWt` while fighting minus mean `bWt` while not — is the roll channel *claiming* the
+azimuth error while opposing yaw? It ships without a sham because its confound runs the other way:
+disagreements cluster at crossings, where `|azErr|` and therefore `bWt` are small, so common cause
+pushes it **negative**. A positive value is the direction the confound cannot produce; a negative
+one is just crossings.
+
 ### The metric's own acceptance test
 
 It must reproduce a defect we already understand. In the R21 sweep captures the marker leads the nose

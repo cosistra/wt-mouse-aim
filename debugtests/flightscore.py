@@ -9,9 +9,11 @@ trainer and a helo produce comparable numbers.  That is the whole point; the mom
 constant is tuned to suit one plane the metric stops being cross-airframe.
 
     python debugtests/flightscore.py <rec.csv> [...] [--tau 0.25] [--cone 1.0] [--json]
+    python debugtests/flightscore.py --levers <rec.csv>      # lever table even on old captures
     python debugtests/flightscore.py --selftest
 
-Reads: t, off, spd, airDensity, velX/Y/Z, outP/outR/outY, segTag (58-col recorder).
+Reads: t, off, spd, airDensity, velX/Y/Z, outP/outR/outY, segTag (58-col recorder), plus the
+optional v0.83/v0.85 lever columns iGate/leadDeg/bSup/bWt/phiLead (see `levers`).
 Never edits anything. Stdlib only.
 """
 
@@ -19,6 +21,7 @@ import csv
 import json
 import math
 import os
+import re
 import statistics as st
 import sys
 
@@ -54,6 +57,27 @@ DEFAULTS = {"aircraftGLimit": 7.0, "cornerSpeed": 180.0, "maxPitchAngularVel": 0
 
 BINS = ("REGRESSING", "STALLED", "WORKING", "NEAR_OPTIMAL")
 CLASSES = ("ON_TARGET", "AIRFRAME_LIMITED") + BINS
+
+# ---- v0.83 / v0.85 lever columns --------------------------------------------------
+# Five columns the mod records on BOTH sides of their config toggle, so a capture can tell
+# "the fix fired and helped" from "the fix never fired" — both of which read as a smaller
+# error. Everything derived from them is None when the column is absent: None means NOT
+# MEASURED and is never rendered as 0.0. 162 captures predate them and must keep scoring
+# byte-identically, which is why the whole lever block is gated on the columns existing.
+OPT = ("azErr", "iGate", "leadDeg", "bSup", "bWt", "phiLead")
+LEVER_COLS = OPT[1:]        # azErr is not new; it is only the x-axis of the correlations
+PRED_FLOOR = 0.30    # ChaseController.cs `const float predFloor` — a const there, not a Cfg
+                     # bind, so it cannot be read off the `# config` line.
+                     # ponytail: mirrored constant. If it ever becomes a Cfg knob, pull it
+                     # from cfg like fineAng/bankDz/alignHold below and delete this.
+XF_SUSTAIN_S = 0.30  # a roll/yaw sign disagreement shorter than this is a zero crossing,
+                     # not a fight. This IS the control on xfightPct — see `levers`.
+BWT_LIVE = 0.20      # below this the roll-to-align channel is off and its correlation with
+                     # |azErr| cannot be a loop gain, however large it looks.
+BSUP_MIN = 0.01      # below this the suppressor applied nothing, i.e. the segment is not
+                     # below-nose — which is the only hemisphere the v0.85 check is about.
+LEVER_KEYS = ("iGate", "iStallPct", "leadFrac", "predFloorPct", "bSup", "bWt", "bWtSd",
+              "rBwt", "rBsup", "rSham", "phiLeadPct", "xfightPct", "xfightSusPct", "xfightWt")
 
 
 # ---- physics ---------------------------------------------------------------------
@@ -93,6 +117,26 @@ def slope(ts, ys):
     return 0.0 if den <= 0 else sum((t - mt) * (y - my) for t, y in zip(ts, ys)) / den
 
 
+def pearson(xs, ys):
+    """r over the pairs where both are present.
+
+    None — not 0.0 — when a series is flat or too short. A correlation on a constant is
+    undefined, and the v0.85 PASS case *is* a constant (`bWt` suppressed to ~0), so
+    rendering it as 0.0 would be a lie in the one place the number matters most.
+    """
+    ps = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+    n = len(ps)
+    if n < 8:
+        return None
+    mx = sum(p[0] for p in ps) / n
+    my = sum(p[1] for p in ps) / n
+    sxx = sum((p[0] - mx) ** 2 for p in ps)
+    syy = sum((p[1] - my) ** 2 for p in ps)
+    if sxx <= 1e-12 or syy <= 1e-12:
+        return None
+    return sum((p[0] - mx) * (p[1] - my) for p in ps) / math.sqrt(sxx * syy)
+
+
 def angle_between(a, b):
     na = math.sqrt(sum(x * x for x in a))
     nb = math.sqrt(sum(x * x for x in b))
@@ -127,6 +171,27 @@ def load_airframe(csv_path):
     return p
 
 
+def load_cfg(path):
+    """The `# config` / `# fbw` scalars the lever metrics need, all fail-soft.
+
+    A missing key is simply absent, and the one metric that needs it degrades to None.
+    ponytail: 4-line regex rather than importing scorecard.py's `cfg_params` — a private
+    regex is a smaller dependency than that module's shape; share them if a third tool
+    ever needs the same parse.
+    """
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                if not line.startswith("#"):
+                    break
+                for k, v in re.findall(r"(\w+)=(-?\d+(?:\.\d+)?)\b", line):
+                    out.setdefault(k, float(v))
+    except Exception:
+        pass
+    return out
+
+
 def load_run(path):
     with open(path) as f:
         lines = [l for l in f if not l.startswith("#")]
@@ -135,7 +200,10 @@ def load_run(path):
     if missing:
         raise SystemExit(f"{path}: missing columns {sorted(missing)}")
     has_rho = "airDensity" in (rd.fieldnames or [])   # optional: pre-v0.69 captures lack it
-    run = {k: [] for k in NEED + ("segTag", "airDensity")}
+    # Optional lever columns: an absent column leaves the key ABSENT from `run` (never a list
+    # of zeros), which is what makes "not measured" distinguishable downstream.
+    opt = [k for k in OPT if k in (rd.fieldnames or [])]
+    run = {k: [] for k in NEED + ("segTag", "airDensity") + tuple(opt)}
     for r in rd:
         try:
             vals = [float(r[k]) for k in NEED]
@@ -149,6 +217,11 @@ def load_run(path):
             rho = RHO0
         run["airDensity"].append(rho if rho > 0.01 else RHO0)
         run["segTag"].append((r.get("segTag") or "").strip())
+        for k in opt:
+            try:
+                run[k].append(float(r[k]))
+            except (ValueError, TypeError):
+                run[k].append(None)   # one torn cell, not a zero
     return run
 
 
@@ -232,6 +305,132 @@ def smoothness(run, ticks):
     return out
 
 
+def levers(run, ticks, cfg):
+    """v0.83/v0.85 lever columns, per segment: did each mechanism FIRE, and is the v0.85
+    below-nose roll loop still open?
+
+    Firing and helping are reported as separate numbers on purpose — the mod records these
+    on both sides of every toggle precisely because "the fix worked" and "the fix never ran"
+    both read as a smaller error. Every field is None when its column (or its `# config`
+    scalar) is missing: NOT MEASURED, never 0.0.
+
+    Two of these carry their own control, because this project already confirmed a
+    correlation-based gate hypothesis and then had sham gates falsify it
+    (GATE-CHATTER-FINDINGS.md §1):
+
+    * `rSham` is the definitional twin of `rBwt`. `bWt` is built from
+      `lateralHold = clamp01((|azErr| - bankDz)/alignHold)`, so it is an explicit algebraic
+      function of |azErr| and correlates with it BY CONSTRUCTION. `rSham` is that bare
+      function's own correlation — the common-cause ceiling. `rBwt` at or above `rSham` is
+      definitional and is NOT evidence of feedback; only a gap below it says the v0.85
+      suppression decoupled the loop.
+    * `xfightSusPct` is the control on `xfightPct`. Roll and yaw disagree in sign for a tick
+      or two at every zero crossing by construction; only a disagreement that persists past
+      XF_SUSTAIN_S is an allocation fight rather than a crossing.
+
+    `xfightWt` has no sham and does not need one: its confound runs the OTHER WAY. Sign
+    disagreement clusters at crossings, where |azErr| is small, where `lateralHold` and
+    therefore `bWt` are small — so common cause pushes `xfightWt` NEGATIVE. A positive value
+    is the direction the confound cannot produce; a negative one is just crossings and the
+    output says so.
+    """
+    out = dict.fromkeys(LEVER_KEYS)
+    idx = [k["i"] for k in ticks]
+    w = [k["w"] for k in ticks]
+    tw = sum(w)
+    if tw <= 0:
+        return out
+    col = lambda n: None if run.get(n) is None else [run[n][i] for i in idx]
+
+    def wpct(mask, over=None):
+        den = sum(x for x, m in zip(w, over) if m) if over is not None else tw
+        return None if den <= 0 else 100.0 * sum(x for x, m in zip(w, mask) if m) / den
+
+    def wmean(vals, mask=None):
+        num = den = 0.0
+        for a, x, m in zip(vals, w, mask if mask is not None else [True] * len(vals)):
+            if a is not None and m:
+                num += a * x
+                den += x
+        return None if den <= 0 else num / den
+
+    off = col("off")
+    azE = col("azErr")
+    aza = None if azE is None else [abs(a) for a in azE]
+    iG, lead, bS, bW, pL = (col(k) for k in ("iGate", "leadDeg", "bSup", "bWt", "phiLead"))
+
+    # v0.83(b) INTEGRAL STALL GATE. With IntegralStallGate OFF, iGate == fineBlend ==
+    # clamp01(1 - off/FineAngle), which is EXACTLY 0 outside the fine cone. So "gate open at
+    # off > FineAngle" is 0.0% by construction on the old path: a zero point, not a threshold.
+    if iG is not None:
+        out["iGate"] = wmean(iG)
+        fa = cfg.get("fineAng")
+        if fa:
+            out["iStallPct"] = wpct([g is not None and g > 0.01 and o > fa
+                                     for g, o in zip(iG, off)])
+
+    # v0.83(a) RELATIVE TURN LEAD, and the predFloor it feeds. R21 settled window: the lead
+    # ate 84% of azErr and the floor bound on 100% of samples. Floor binds (low side) iff
+    # sign(azErr)*leadDeg > (1-predFloor)*|azErr| — exact, straight off the clamp in Apply.
+    if lead is not None and aza is not None:
+        big = [a > 1.0 for a in aza]          # below 1 deg the lead is noise on noise
+        fr = [abs(l) / a for l, a, m in zip(lead, aza, big) if m and l is not None]
+        if fr:
+            out["leadFrac"] = st.median(fr)
+        out["predFloorPct"] = wpct(
+            [m and l is not None and (1.0 if e >= 0 else -1.0) * l > (1.0 - PRED_FLOOR) * a
+             for l, e, a, m in zip(lead, azE, aza, big)], over=big)
+
+    # v0.85 BELOW-NOSE ROLL-TO-ALIGN LOOP. bWt is the loop gain the +0.918 was measured on;
+    # bSup is the suppressor v0.85 rebuilt. rBsup is the DISARM signature: pre-v0.85
+    # belowSuppress carried a (1 - lateralHold) factor, so it SHRANK as the azimuth error its
+    # own output was creating grew. There is no geometric reason for a belowness measure to
+    # anticorrelate with azimuth error, so a clearly negative rBsup means that factor is back.
+    if bS is not None:
+        out["bSup"] = wmean(bS)
+        if aza is not None:
+            out["rBsup"] = pearson(aza, bS)
+    if pL is not None:
+        out["phiLeadPct"] = wpct([p is not None and abs(p) > 1e-4 for p in pL])
+    if bW is not None:
+        out["bWt"] = wmean(bW)
+        vals = [b for b in bW if b is not None]
+        if len(vals) > 1:
+            out["bWtSd"] = st.pstdev(vals)
+        if aza is not None:
+            out["rBwt"] = pearson(aza, bW)
+    dz, hold = cfg.get("bankDz"), cfg.get("alignHold")
+    if aza is not None and dz is not None and hold:
+        out["rSham"] = pearson(aza, [max(0.0, min(1.0, (a - dz) / hold)) for a in aza])
+
+    # CROSS-FIGHTING — roll and yaw commanding OPPOSITE azimuth corrections. Same definition
+    # gatechatter.py uses (`rollYawAnti`), so the two tools cannot disagree about what a fight
+    # is. Needs no new column, hence the --levers flag to get it on the old corpus too.
+    oR, oY = col("outR"), col("outY")
+    anti = [abs(r) > STICK_DEADBAND and abs(y) > STICK_DEADBAND and (r > 0) != (y > 0)
+            for r, y in zip(oR, oY)]
+    out["xfightPct"] = wpct(anti)
+    sus, j = [False] * len(anti), 0
+    while j < len(anti):
+        if not anti[j]:
+            j += 1
+            continue
+        k = j
+        while k < len(anti) and anti[k] and (k == j or idx[k] == idx[k - 1] + 1):
+            k += 1                    # a run must not straddle a gap: on the pooled '= ALL'
+                                      # tick list `i` jumps at every segment boundary.
+        if sum(w[j:k]) >= XF_SUSTAIN_S:
+            sus[j:k] = [True] * (k - j)
+        j = k
+    out["xfightSusPct"] = wpct(sus)
+    if bW is not None:
+        wa = sum(x for x, m in zip(w, anti) if m)
+        hi, lo = wmean(bW, anti), wmean(bW, [not x for x in anti])
+        if hi is not None and lo is not None and wa >= CHURN_MIN_S and tw - wa >= CHURN_MIN_S:
+            out["xfightWt"] = hi - lo
+    return out
+
+
 def summarize(run, ticks):
     if not ticks:
         return None
@@ -258,15 +457,24 @@ def summarize(run, ticks):
             "turn_med": st.median([k["turn"] for k in ticks]), **sm}
 
 
-def score_file(path, tau, cone=ON_TARGET_DEG):
+def score_file(path, tau, cone=ON_TARGET_DEG, force_levers=False):
     run = load_run(path)
     p = load_airframe(path)
     ticks = score_ticks(run, p, tau, cone)
     segs = {}
     for tag in dict.fromkeys(k["tag"] for k in ticks):
         segs[tag] = summarize(run, [k for k in ticks if k["tag"] == tag])
-    return {"file": os.path.basename(path), "airframe": p, "cone_deg": cone,
-            "segments": segs, "all": summarize(run, ticks)}
+    res = {"file": os.path.basename(path), "airframe": p, "cone_deg": cone,
+           "segments": segs, "all": summarize(run, ticks)}
+    # The lever block appears ONLY when the capture actually carries a lever column (or the
+    # user forces it). That is what keeps every pre-v0.83 capture's text AND json output
+    # byte-identical to before this feature existed.
+    if ticks and ([k for k in LEVER_COLS if k in run] or force_levers):
+        cfg = load_cfg(path)
+        res["levers"] = {t: levers(run, [k for k in ticks if k["tag"] == t], cfg)
+                         for t in segs}
+        res["levers"]["= ALL"] = levers(run, ticks, cfg)
+    return res
 
 
 # ---- report ----------------------------------------------------------------------
@@ -287,6 +495,66 @@ def fmt(s, name):
             f"work {c['WORKING']:4.0f}%  opt {c['NEAR_OPTIMAL']:4.0f}%")
 
 
+LEVER_FMT = (("iGate~", "iGate", "{:.3f}"), ("iStal%", "iStallPct", "{:.0f}"),
+             ("lead", "leadFrac", "{:.2f}"), ("floor%", "predFloorPct", "{:.0f}"),
+             ("bSup~", "bSup", "{:.3f}"), ("bWt~", "bWt", "{:.3f}"),
+             ("r(bWt)", "rBwt", "{:+.2f}"), ("r(bSup)", "rBsup", "{:+.2f}"),
+             ("sham", "rSham", "{:+.2f}"), ("phiL%", "phiLeadPct", "{:.0f}"),
+             ("xf%", "xfightPct", "{:.1f}"), ("xfSus%", "xfightSusPct", "{:.1f}"),
+             ("xfWt", "xfightWt", "{:+.3f}"))
+
+
+def loop_verdict(lv):
+    """(tag, lever dict, failed) for the v0.85 below-nose loop-gain check, or None.
+
+    Scoped, because an unscoped version fires on every large-azimuth segment: v0.85's defect
+    is BELOW-NOSE, and in the upper hemisphere `bWt == lateralHold` by design and is SUPPOSED
+    to track |azErr| — that is roll-to-align working, not a loop. So a segment only qualifies
+    when the suppressor has something to suppress (`bSup~ >= BSUP_MIN`) and is live
+    (`bWt~ >= BWT_LIVE`); a large correlation on a switched-off channel is not a loop gain.
+
+    FAIL needs all three: a live below-nose channel, a real correlation, AND a correlation the
+    definitional twin `rSham` does not already account for. `rBwt` on its own is not evidence
+    — that is the lesson GATE-CHATTER-FINDINGS.md paid for.
+    """
+    live = [(t, l) for t, l in lv.items()
+            if t != "= ALL" and l.get("rBwt") is not None
+            and (l.get("bSup") or 0.0) >= BSUP_MIN and (l.get("bWt") or 0.0) >= BWT_LIVE]
+    if not live:
+        return None
+    t, l = max(live, key=lambda kv: kv[1]["rBwt"])
+    sh = l.get("rSham")
+    return t, l, (l["rBwt"] >= 0.50 and (sh is None or l["rBwt"] >= sh - 0.20))
+
+
+def lever_report(res):
+    """The v0.83/v0.85 lever table + the one number the v0.85 fix lives or dies by."""
+    lv = res.get("levers")
+    if not lv:
+        return
+    print("  --- v0.83/v0.85 levers  ('-' = column absent from this capture = NOT MEASURED) ---")
+    print("  " + "{:<14}".format("") + "".join(f"{h:>8}" for h, _, _ in LEVER_FMT))
+    for tag, l in lv.items():
+        cells = "".join(f"{('-' if l.get(k) is None else f.format(l[k])):>8}"
+                        for _, k, f in LEVER_FMT)
+        print(f"  {tag:<14}{cells}")
+    print("  ('= ALL' pools segments — its correlations are Simpson-prone; read them per segment.)")
+    v = loop_verdict(lv)
+    if v:
+        t, l, fail = v
+        r, sh = l["rBwt"], l.get("rSham")
+        print(f"  v0.85 loop-gain check: worst r(bWt,|azErr|)={r:+.3f} [{t}] bWt~{l['bWt']:.3f} "
+              f"sd{l.get('bWtSd') or 0.0:.3f} sham={'-' if sh is None else f'{sh:+.2f}'} "
+              f"gap={'-' if sh is None else f'{sh - r:+.2f}'} -> {'FAIL' if fail else 'pass'}"
+              f"   (pre-fix elDn ref +0.918; FAIL = r>=+0.50 on a live below-nose channel AND "
+              f"gap<+0.20, i.e. the suppression did not decouple it from its definitional twin)")
+    elif any(l.get("bWt") is not None for l in lv.values()):
+        print(f"  v0.85 loop-gain check: no segment is both below-nose (bSup~>={BSUP_MIN:.2f}) "
+              f"and live (bWt~>={BWT_LIVE:.2f}) with a correlatable bWt — either this card never flies "
+              f"below the nose, or the channel is suppressed, which IS the pass case. "
+              f"Read bSup~/bWt~ above; do not read this as a pass on its own.")
+
+
 def report(res):
     p = res["airframe"]
     print(f"\n{res['file']}")
@@ -301,6 +569,7 @@ def report(res):
         jk = "/".join(f"{a['jerk_rms'][x]:.2f}" for x in AXES)
         ch = "n/a" if a["churn"] is None else f"{a['churn']:.2f}"
         print(f"  smoothness: reversals/s P/R/Y {rv}   jerk rms {jk}   churn {ch}")
+    lever_report(res)
 
 
 def spread(results):
@@ -329,10 +598,12 @@ def spread(results):
 
 
 # ---- selftest --------------------------------------------------------------------
-def synth(off_fn, turn, dur=6.0, dt=1 / 15.0, v=250.0, out_fn=None):
+def synth(off_fn, turn, dur=6.0, dt=1 / 15.0, v=250.0, out_fn=None, extra=None):
     """A fake run: `off` from off_fn(t), velocity vector rotated by `turn` (deg/s, or a
-    callable giving cumulative degrees)."""
+    callable giving cumulative degrees). `extra` = {column: fn(t, i)} for the optional lever
+    columns — omit it and the run has NO lever columns, which is the pre-v0.83 case."""
     run = {k: [] for k in NEED + ("segTag", "airDensity")}
+    run.update({k: [] for k in (extra or {})})
     n = int(dur / dt)
     for i in range(n):
         t = i * dt
@@ -344,6 +615,8 @@ def synth(off_fn, turn, dur=6.0, dt=1 / 15.0, v=250.0, out_fn=None):
         for a in AXES:
             run[a].append(out_fn(t, a) if out_fn else 0.0)
         run["segTag"].append("x")
+        for k, fn in (extra or {}).items():
+            run[k].append(fn(t, i))
     return run
 
 
@@ -426,6 +699,125 @@ def selftest():
     thin = {"aircraftGLimit": 9.0, "cornerSpeed": 300.0, "maxPitchAngularVel": 0.75}
     assert omega_avail(250, 0.7, thin)[1] < omega_avail(250, RHO0, thin)[1], "density is inert"
 
+    # ---- v0.83 / v0.85 levers ----------------------------------------------------
+    CFG = {"fineAng": 6.0, "bankDz": 2.5, "alignHold": 5.0}
+
+    def lev(extra, cfg=CFG, off=9.4, out_fn=None, dur=20.0):
+        run = synth((lambda t: off) if not callable(off) else off, 12.0, dur=dur,
+                    out_fn=out_fn, extra=extra)
+        return run, levers(run, score_ticks(run, mr, tau), cfg)
+
+    # 9. COLUMN ABSENT is the case 162 captures are in: every lever field must be None, not
+    # 0.0 — "the gate never opened" and "the gate is not recorded" are different findings.
+    run, L = lev(None)
+    for k in ("iGate", "iStallPct", "leadFrac", "predFloorPct", "bSup", "bWt", "bWtSd",
+              "rBwt", "rBsup", "phiLeadPct", "xfightWt"):
+        assert L[k] is None, (k, L[k])
+    assert L["rSham"] is None, L                     # needs azErr, which is also optional
+    assert L["xfightPct"] == 0.0, L                  # outR/outY exist: measured, and it is 0
+    assert set(L) == set(LEVER_KEYS), set(L) ^ set(LEVER_KEYS)
+    assert "bWt" not in run and "iGate" not in run, "absent column must leave the key absent"
+    # ...and the whole block stays off a pre-v0.83 capture unless --levers forces it.
+    assert [k for k in LEVER_COLS if k in run] == []
+
+    # 10. iStallPct is 0.0 BY CONSTRUCTION on the old path (iGate == fineBlend == 0 outside
+    # the fine cone) and > 0 only if IntegralStallGate actually fired. off = 9.4 > fineAng 6.
+    _, L = lev({"iGate": lambda t, i: 0.0})
+    assert L["iStallPct"] == 0.0 and L["iGate"] == 0.0, L
+    _, L = lev({"iGate": lambda t, i: 0.55})
+    assert abs(L["iStallPct"] - 100.0) < 1e-6 and abs(L["iGate"] - 0.55) < 1e-9, L
+    _, L = lev({"iGate": lambda t, i: 0.55}, cfg={})          # no `# config` line
+    assert L["iStallPct"] is None and L["iGate"] is not None, L
+
+    # 11. leadFrac + predFloorPct, exact arithmetic. Floor binds iff
+    # sign(azErr)*leadDeg > (1-0.30)*|azErr|; 0.8 binds, 0.5 does not, and the sign of azErr
+    # must not change the answer (R21 read 0.84 / 100% on a right-hand sweep).
+    for sgn in (+1.0, -1.0):
+        _, L = lev({"azErr": lambda t, i: sgn * 9.31, "leadDeg": lambda t, i: sgn * 7.85})
+        assert abs(L["leadFrac"] - 7.85 / 9.31) < 1e-9, L
+        assert abs(L["predFloorPct"] - 100.0) < 1e-6, L
+        _, L = lev({"azErr": lambda t, i: sgn * 9.31, "leadDeg": lambda t, i: sgn * 4.6})
+        assert abs(L["predFloorPct"]) < 1e-9, L                # 0.49 < 0.70 -> never binds
+
+    # 12. THE HEADLINE. bWt rising with |azErr| == the open loop; bWt suppressed to a
+    # constant == the v0.85 pass case, and that must read None (flat), never a fake 0.0.
+    ramp = {"azErr": lambda t, i: 2.6 + t / 5.0, "bWt": lambda t, i: t / 20.0}
+    _, L = lev(ramp)
+    assert L["rBwt"] > 0.99, L["rBwt"]
+    assert L["rSham"] is not None and L["rSham"] > 0.99, L["rSham"]  # the definitional twin
+    # ...and it rails: once |azErr| > bankDz + alignHold the twin is CONSTANT, so the sham
+    # goes None and r(bWt,|azErr|) has nothing to be compared against. Say so, don't fake it.
+    _, L = lev({"azErr": lambda t, i: 20.0, "bWt": lambda t, i: t / 20.0})
+    assert L["rSham"] is None and L["rBwt"] is None, L
+    _, L = lev({"azErr": lambda t, i: 1.0 + t, "bWt": lambda t, i: 0.0})
+    assert L["rBwt"] is None and L["bWt"] == 0.0 and L["bWtSd"] == 0.0, L
+
+    # 12b. The verdict, which is the actual pass/fail signal. It must (a) ignore a segment
+    # with no belowness — up-hemisphere bWt tracks |azErr| BY DESIGN — (b) ignore a
+    # switched-off channel, and (c) not call FAIL on a correlation the sham already explains.
+    open_loop = dict(ramp, bSup=lambda t, i: 0.4)
+    _, L = lev(open_loop)
+    assert loop_verdict({"elDn": L})[2] is True, L                    # coupled + below-nose
+    assert loop_verdict({"az90": dict(L, bSup=0.0)}) is None, "up-hemisphere must not qualify"
+    assert loop_verdict({"elDn": dict(L, bWt=0.02)}) is None, "dead channel must not qualify"
+    assert loop_verdict({"elDn": dict(L, rBwt=0.60, rSham=0.95)})[2] is False, "sham must acquit"
+    assert loop_verdict({"= ALL": L}) is None, "the pooled row is never the verdict"
+
+    # 13. rBsup is the DISARM signature: the deleted (1 - lateralHold) factor made the
+    # suppressor shrink as the error it was meant to suppress grew.
+    _, L = lev({"azErr": lambda t, i: 1.0 + t,
+                "bSup": lambda t, i: max(0.0, 1.0 - t / 20.0)})
+    assert L["rBsup"] < -0.99, L["rBsup"]
+    _, L = lev({"azErr": lambda t, i: 1.0 + t, "bSup": lambda t, i: 0.6})
+    assert L["rBsup"] is None and abs(L["bSup"] - 0.6) < 1e-9, L    # flat != uncorrelated
+
+    # 14. phiLead fired / stood down.
+    _, L = lev({"phiLead": lambda t, i: 0.0})
+    assert L["phiLeadPct"] == 0.0, L
+    _, L = lev({"phiLead": lambda t, i: 2.1 if i % 2 else 0.0})
+    assert 40.0 < L["phiLeadPct"] < 60.0, L
+
+    # 15. CROSS-FIGHTING, and its control. A 1-tick alternating disagreement is a zero
+    # crossing: it must show in xfightPct and be REJECTED by xfightSusPct. A sustained one
+    # must survive both. This is the whole reason xfightSusPct exists.
+    flick = lambda t, a: 0.5 if a == "outR" else (-0.5 if (a == "outY" and int(t * 15) % 2) else 0.5)
+    _, L = lev(None, out_fn=flick)
+    assert L["xfightPct"] > 30.0 and L["xfightSusPct"] == 0.0, L
+    hold = lambda t, a: 0.5 if a == "outR" else -0.5
+    _, L = lev(None, out_fn=hold)
+    assert L["xfightPct"] > 99.0 and L["xfightSusPct"] > 99.0, L
+    # ...and the deadband still applies: sub-deadband noise is not a fight.
+    tiny = lambda t, a: 0.5 * STICK_DEADBAND * (1 if a == "outR" else -1)
+    _, L = lev(None, out_fn=tiny)
+    assert L["xfightPct"] == 0.0, L
+
+    # 16. xfightWt: the roll channel claiming the azimuth error while opposing yaw. Positive
+    # is the direction common cause CANNOT produce (crossings sit at small |azErr|, i.e. small
+    # bWt), so the sign is the finding.
+    _, L = lev({"bWt": lambda t, i: 0.9 if int(t * 15) % 2 else 0.1}, out_fn=flick)
+    assert L["xfightWt"] is not None and abs(abs(L["xfightWt"]) - 0.8) < 0.05, L["xfightWt"]
+    _, L = lev({"bWt": lambda t, i: 0.5}, out_fn=hold)
+    assert L["xfightWt"] is None, L        # no non-fighting population to contrast against
+
+    # 17. End to end through a real file: an OLD capture gets no `levers` key at all (this is
+    # the byte-identical guarantee), a NEW one gets it, and --levers forces it on the old one.
+    hdr = ",".join(NEED + ("airDensity", "segTag"))
+    row = lambda i, tail="": (",".join("%g" % v for v in
+                              (i / 15.0, 9.4, 250.0, 250, 0, 0, 0, 0.5, -0.5))
+                              + ",1.225,x" + tail)
+    with tempfile.TemporaryDirectory() as d:
+        old = os.path.join(d, "old.csv")
+        open(old, "w").write(hdr + "\n" + "\n".join(row(i) for i in range(60)) + "\n")
+        assert "levers" not in score_file(old, tau), "old capture must not grow a levers key"
+        assert "levers" in score_file(old, tau, force_levers=True)
+        new = os.path.join(d, "new.csv")
+        open(new, "w").write("# config fineAng=6 bankDz=2.5 alignHold=5.0\n" + hdr + ",bWt\n"
+                             + "\n".join(row(i, ",0.43") for i in range(60)) + "\n")
+        r = score_file(new, tau)
+        L = r["levers"]["x"]
+        assert abs(L["bWt"] - 0.43) < 1e-9 and L["iGate"] is None, L
+        assert load_cfg(new)["fineAng"] == 6.0 and load_cfg(old) == {}, load_cfg(new)
+
     print("flightscore selftest OK")
 
 
@@ -441,10 +833,13 @@ def main(argv):
             del argv[i:i + 2]
     tau, cone = opt["--tau"], opt["--cone"]
     as_json = "--json" in argv
+    force_levers = "--levers" in argv   # xfight*/ needs no new column, so it IS scoreable on
+                                        # the old corpus — just never by default, so old
+                                        # captures keep their exact pre-feature output.
     paths = [a for a in argv if not a.startswith("--")]
     if not paths:
         return print(__doc__.strip())
-    results = [score_file(p, tau, cone) for p in paths]
+    results = [score_file(p, tau, cone, force_levers) for p in paths]
     if as_json:
         print(json.dumps({"tau_feel": tau, "cone_deg": cone, "runs": results}, indent=1, default=str))
         return

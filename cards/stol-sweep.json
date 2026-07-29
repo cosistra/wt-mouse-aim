@@ -1,0 +1,13 @@
+{
+  "name": "stol-sweep",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "low-limit STOL trainer (alphaLimiter ~10 deg). A jet placed at 90 m/s will mush - see cards/README.md",
+  "note": "The sustained shape on the fourth ONE-LAW airframe. deriveAzRate asks for the same FRACTION of structural g on a trainer as on a jet, so this is directly comparable to fixedwing-sweep in normalized terms (turnRateDemandRatio, terminalOffDeg/demand) and to nothing in absolute deg/s. Distinct tag from turn360 on purpose: compare-runs.py pools by tag alone.",
+  "startSpeed": 90,
+  "startAlt": 2500,
+  "segments": [
+    { "tag": "arm",         "dur": 6,  "az": 0, "el": 0 },
+    { "tag": "turn360stol", "dur": 30, "az": 0, "el": 0, "deriveAzRate": true }
+  ]
+}

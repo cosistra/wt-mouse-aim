@@ -70,10 +70,20 @@ the command it gates.
 **The reusable audit question this adds:** for any gate or schedule, do not stop at "is this term
 live/probed rather than a constant". Also ask **"can the command this term gates move this term?"** A
 live signal inside its own feedback path is a loop gain wearing a measurement's clothes, and it passes
-the existing generality test unchanged. Worth a re-read of `_yawWeak` (gated on the closing rate the
-assist itself produces) and `_pitchEff` (measured from the command it scales) with that question in
-hand — both have anti-windup/asymmetry structure that probably covers it, but neither has been checked
-against *this* question rather than the constants question.
+the existing generality test unchanged.
+
+**Status (2026-07-29): that question was run over the whole `Apply` pipeline — see
+[`debugtests/LOOP-AUDIT-FINDINGS.md`](debugtests/LOOP-AUDIT-FINDINGS.md) (tool:
+`debugtests/loopaudit.py`, `--selftest`). NEITHER `_yawWeak` NOR `_pitchEff` cleared** (they are
+findings 14 and 15 below); a third, larger one (16) fell out of the same sweep. Nine other terms were
+cleared with reasons, including `pullGate`, which keys on the *same* body-frame `alignFrac` v0.85 had
+to abandon and is nonetheless correct — which sharpens the rule:
+
+> **Express a gate in the frame in which the GATED COMMAND'S PHYSICAL EFFECT is defined** — not the
+> frame the signal is cheapest to compute in. A pull rotates the nose about body-right, so
+> `pullGate`'s "would pulling help" is a body-frame question by construction. `belowSuppress` gated
+> *roll* on a *horizon-frame* geometric fact (the align law's false below-nose equilibrium), so it
+> had to be roll-invariant. Same signal, opposite verdicts, one criterion.
 
 - **Align-channel rate lead** (v0.85, `Cfg.AlignRateLead`, default ON) — partial, orthogonal relief for
   finding 5 (`eAlign` is fixed-gain because EL has no roll-effectiveness estimator). The `phi/90` map
@@ -224,8 +234,77 @@ v0.65**, so EL keeps the `azErr → bankTR` direction chain and A.2's partial re
 the remaining high-q sub-0.5° residual a different way: a bounded, V-independent micro-bank in the
 sub-gate cone (marker-stationary gated), so EL now settles the last half-degree instead of parking.
 
+### 14. HIGH — `_pitchEff`'s v0.67 self-probe cannot clear its own threshold — OPEN (STRUCTURAL + MEASURED)
+**Answer to finding 13's `_pitchEff` question: the RATIO clears, the GATE around it does not.**
+`Clamp01(ach/cmd)` is scale-invariant, so scaling the command cannot move the measurement — under
+rate saturation it even solves to the stable fixed point `_pitchEff = √(ω_plant/(K·e))`, a convergent
+soft de-rater. The defect is `PEffRevThresh = 0.15f` being used as **both** the self-probe's target
+(L1048) **and** C1's floor threshold, tested `>=` (L1773). The probe is a first-order LPF toward that
+same number, so it approaches from below and asymptotes — in float32 it stalls ~30 ulps short — and
+the floor branch is **unreachable**. The law then multiplies its pitch P term by `0.1499995` instead
+of `Max(0.30, ·)`: **exactly a factor of 2 of pitch authority, lost to a `>=`.** That closes the very
+latch the self-probe exists to break, because a P term at ×0.15 keeps the FBW target rate under the
+0.05 rad/s re-measure gate. Measured (R11-03, `az30`): 3.07 s at `pEff` 0.143→0.150 with
+`|fbwTgtPR|` pinned at 0.045–0.049 and the plant delivering **110%** of commanded; exit was
+exogenous, and arrived as a 2× step in loop gain. Occupancy 6.0% of `az30`, 1.6% of `turn360`.
+**Fix is one comparison and no new constant** (probe to a level strictly above the threshold, e.g.
+`effFloor` — which is what pre-C1 gave for free and what the v0.67 comment says it restores). Highest
+priority once the v0.82–v0.85 batch is flown.
+
+### 15. HIGH — `_yawWeak` measures "the error did not close", not "the rudder is weak" — OPEN (STRUCTURAL + MEASURED)
+**Answer to finding 13's `_yawWeak` question: it does not clear, and the reason is the v0.83 shape.**
+The premise (a heading error that will not close means the rudder failed) is true only against a
+**stationary** marker; against a sweeping one a standing error is what a P loop must hold. Closed
+form on R21's settled turn: closure 0.033 °/s → `weakInst = 1 − 0.033/6 = 0.9945`, recorded
+`yawWeak` max **0.996** — on ticks where the FBW delivers 99.4% of commanded rate and no axis is
+within 20% of a rail. Corpus-wide it is highest in exactly the two segments already known to be law
+defects (`turn360` 0.950, `elDn` 0.743) and lowest in the large errors that close (0.17–0.21).
+Both live consumers move what it measures: `yawWeakFade` removes **57%** of the yaw command in the
+settled turn, and `coordPull *= assist` gates the term `Cfg.cs` itself calls *"the REAL driver of a
+high-speed correction"* on rudder health — so an airframe whose rudder *does* work gets **zero**
+coordinating pull for the same commanded bank, which is a one-law violation on its own. Its
+normalisation `Clamp01(closeRate / 6f)` is also the absolute-deg/s form the v0.83 `_stallFilt`
+comment explicitly forbids as "a per-airframe constant in disguise"; the right denominator
+(`omegaMax`, probed + live) is computed two blocks away.
+
+### 16. HIGH — `lateralHold` rails and disconnects the ENTIRE bank pipeline — OPEN (STRUCTURAL + MEASURED)
+`lateralHold` rails at `FineBankDeadzone + EvolvedAlignHoldDeg` = **7.5°**, and at the rail
+`blendWeight = 1`, so `eFine` — the only carrier of `tBankE` — has weight **exactly zero**. A
+standing lag above 7.5° therefore disconnects the machinery whose job is to reduce it, and the
+escape condition needs that machinery: a latch, closed in one step. Measured `blendWeight` = **1.0000
+on 100.0%** of R21's settled `turn360` (n=1601), 97.6% of the whole segment, 83.6% of `astern`,
+63.4% of `reversal`, 60.9% of `az150` — every large-error segment in the corpus. Consequence for the
+last two releases: the v0.78 marker-rate feed-forward supplies **82.5%** of the turn demand and
+arrives as **0.0000** of roll and **0.0425** of pitch stick (6.9% of `|outP|`), through `coordPull`
+alone — which finding 15 gates on `_yawWeak`. With `YawAssistEnabled = false`, a supported config,
+the v0.78 feed-forward, the v0.83 relative lead, `predFloor`, `omegaMax` and `MaxBankAngle` have
+**no effect on any control output** in a sustained turn. This is R21's finding #1 and GATE-CHATTER
+§5a's +0.918 seen from the loop side; the principled statement is that `blendWeight` is a **hand-off
+between two alternative roll channels**, not a gate, and whatever replaces it must key on which
+channel can close the error rather than on how big the error is. Also flags **dead code**:
+`targetBank`/`linBank`/`azBank`/`bankGain`/`bankBlend` are passed to `ApplyEvolvedLegacy` and never
+read — they reach only the recorder, the `[chase]` trace and the `over-roll` detector.
+
+### 17. MEDIUM — v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` — OPEN (STRUCTURAL, unflown)
+The lead itself is correct (it is the true derivative of the align channel's own error). The side
+effect is not: with `phi` in degrees and `rollRate` in rad/s, against a stationary marker the lead
+adds `rollRate·RollDamping·(180/π)/90` of rate feedback **weighted by `blendWeight`**, so the
+effective roll-rate feedback is `RollDamping·(1 + 0.6366·blendWeight)` — 1.00× at `blendWeight` 0,
+**1.64× at 1** (measured mean multiplier: `turn360` 1.63, `elDn` 1.39). `blendWeight` is the signal
+GATE-CHATTER §5a measured at +0.918 with the `azErr` the roll loop produces, so in `elDn` the roll
+damping is modulated at the frequency of the cycle it damps. Always stabilising in sign (cannot
+diverge), but it breaks the change's own premise that the tuned `RollDamping` is preserved. **Read
+the v0.85 flight test knowing `AlignRateLead` is a 64% damping change, not only a lead.**
+Two smaller siblings are recorded in the findings doc: `belowSuppress`'s residual `bigTurn` loop
+(inert below `off` = 19.3°, live above — so v0.85's `elDn` hang at 6.92° is safe and its *entry* is
+not), and `_pitchEff × _alphaSchedFilt` compounding to **0.09** where each is documented as flooring
+at 0.30 — unfalsifiable on a corpus where `aoaLimiterActivePct` is 0 in every capture ever taken.
+
 ## Suggested order of attack
 
+0. **Finding 14** — one comparison, no new constant, closed-form proof plus a measured 3.07 s
+   episode, and it cannot make anything else worse because the branch it repairs is currently
+   unreachable. Do it first, behind its own checkbox, **after** v0.82–v0.85 have been flown.
 1. Get an **Ifrit recording** (blocks finding 3; the fix is cheap once confirmed).
 2. **Measured pitch effectiveness** (finding 2) — the FBW rate pair is already being read; this
    is the highest-leverage generic signal and feeds findings 1 and 4.

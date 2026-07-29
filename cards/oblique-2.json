@@ -1,0 +1,16 @@
+{
+  "name": "oblique-2",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "any jet at the fixedwing-v2 entry condition",
+  "note": "ONE test per card: 2 deg oblique steps, well INSIDE FineAngle=6 (the fine servo owns it). Diamond of radius 1.41 deg; N->E->S->W->N makes every step a 45-deg oblique of 2.0 deg, one per direction, all from the same energy state. Compare against oblique-6 / oblique-12, and each direction against its mirror.",
+  "startSpeed": 250,
+  "startAlt": 4000,
+  "segments": [
+    { "tag": "arm",   "dur": 6, "az": 0,     "el": 1.41 },
+    { "tag": "obDR2", "dur": 8, "az": 1.41,  "el": 0 },
+    { "tag": "obDL2", "dur": 8, "az": 0,     "el": -1.41 },
+    { "tag": "obUL2", "dur": 8, "az": -1.41, "el": 0 },
+    { "tag": "obUR2", "dur": 8, "az": 0,     "el": 1.41 }
+  ]
+}

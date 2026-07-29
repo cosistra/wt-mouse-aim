@@ -21,8 +21,9 @@ segment's "skipped" dict — never a crash.
 
 SEGMENTATION: consecutive rows sharing the same `segTag` form one segment; a CSV with no segTag
 column at all becomes a single segment named "unsegmented". The segment TYPE is inferred from the
-tag via TAG_TYPE_RULES (az_step, el_step, fine_track, sustained_turn, reversal, astern_wrap,
-micro_step, hover_hold, translate, bobup, transition, arm); anything else — including "unsegmented"
+tag via TAG_TYPE_RULES (az_step, el_step, oblique_step, fine_track, sustained_turn, alpha_step,
+alpha_hold, reversal, astern_wrap, micro_step, hover_hold, translate, bobup, transition, arm);
+anything else — including "unsegmented"
 — gets the generic metric set (the AoA/G discipline block, the only metrics that need no
 segment-type logic). `arm` segments are reported (tag/type/count/duration) but carry no metrics —
 the plan marks the post-spawn arm window excluded from scoring. A tag that matches nothing in
@@ -76,8 +77,21 @@ TAG_TYPE_RULES = [
     (re.compile(r"hoveryaw"),   "hover_hold"),         # MUST precede "hover" below or it's swallowed
     (re.compile(r"hover"),      "hover_hold"),
     (re.compile(r"bobup"),      "bobup"),
+    (re.compile(r"bobdn"),      "bobup"),              # rotor-hover's mirror of bobup: SAME metric (the
+                                                       # vertical response is |alt - alt0|, sign-free), so
+                                                       # this is a second tag on one type, not a new type.
     (re.compile(r"translate"),  "translate"),          # planned (Appendix A) -- no card emits it yet
     (re.compile(r"transition"), "transition"),         # planned (Appendix A) -- no card emits it yet
+    # --- the disk cards in cards/ (installed into <game>/BepInEx/config/wtmouseaim-cards/) ---
+    # Everything above is emitted by a BUILT-IN card in ScenarioPlayer.cs; everything below by a
+    # shipped JSON card. Same rule either way: a tag with no entry here scores as "unknown".
+    # Tags that only ADD a suffix to a built-in tag (az30R/az30L, elUp40/elDn40, turn360lowq,
+    # hoveryawR/hoveryawL) need no rule -- these patterns are prefix matches. The suffixes exist
+    # because compare-runs.py keys segments by TAG ALONE: a 90 m/s `az30` and a 250 m/s `az30`
+    # would be pooled as replicates of each other.
+    (re.compile(r"alphaHold"),          "alpha_hold"),   # alpha-ceiling: sustained turn AT the ceiling
+    (re.compile(r"alpha(Pull|Push)"),   "alpha_step"),   # alpha-ceiling: mirrored +-45 deg pitch steps
+    (re.compile(r"ob(UR|UL|DR|DL)\d+"), "oblique_step"), # oblique-steps: obDR2 .. obUR12
 ]
 
 
@@ -425,6 +439,16 @@ def saturation_metrics(rows, cols, cfg, fbw):
       turnRateDemandRatio   - mean(demanded omega) / mean(omegaMax). >=1 means the card is asking
                               for a turn the probed airframe cannot fly and no A/B on it can mean
                               anything; well under 1 with the clamp active means the reverse.
+      blendRailPct          - % samples with the roll blend weight (bWt) railed at 1. THE THIRD
+                              LIMIT, and the one that decides whether a capture is comparable to
+                              another at all: blendWeight = max(bigTurn, lateralHold) with
+                              lateralHold = clamp01(|azAl| / Cfg.EvolvedAlignHoldDeg), so past that
+                              angle (5.0 deg by default) the weight rails to 1 and eFine — the whole
+                              fine bank pipeline — is multiplied by zero. Measured 100% of the
+                              settled turn360 in R21: the sustained corpus is almost entirely on the
+                              LATCHED side, where roll does not participate. A segment that
+                              straddles it is two regimes averaged together, so read this before
+                              pooling anything. Absent pre-v0.85 (bWt is a v0.85 column).
 
     AoA-gate occupancy is deliberately NOT re-added here — aoa_g_metrics already reports it as
     aoaLimiterActivePct on the same segments.
@@ -470,6 +494,155 @@ def saturation_metrics(rows, cols, cfg, fbw):
         why = ("missing column(s): spd/bankTR" if corner and glim
                else "no cornerSpeed/gLimit on the '# fbw' header (pre-v0.55 capture)")
         skipped["turnRateCapActivePct"] = skipped["turnRateDemandRatio"] = why
+
+    if "bWt" in cols:
+        m["blendRailPct"] = 100.0 * sum(1 for r in rows if r.get("bWt", 0.0) >= BLEND_RAILED) / n if n else 0.0
+    else:
+        skipped["blendRailPct"] = "missing column: bWt (pre-v0.85 capture)"
+    return m, skipped
+
+
+# alpha_metrics / allocation_metrics thresholds. Deliberately literals, not knobs: they are read
+# thresholds on already-recorded signals, so a capture can always be re-scored with a different one.
+# ponytail: sample COUNTING against a fixed 0.5 gate threshold, not an integral of the gate deficit.
+# Ceiling: a segment that hovers either side of 0.5 reads bimodally between runs. Upgrade to
+# mean(1 - aoaGU) over the segment if an A/B ever lands inside that noise.
+GATE_BITING = 0.5      # aoaGU/aoaGD below this = the ceiling gate is at least half shut
+CMD_DEADBAND = 0.05    # |tgtPRaw| below this is noise around zero, not a command (the 0.05
+                       # analyze-wobble's crossings() and wobble_scan use). Fine for the alpha
+                       # segments, where the pitch command is near the rail.
+ALLOC_DEADBAND = 0.02  # ...but NOT fine for roll/yaw allocation on small steps: measured median
+                       # |outR| is 0.006-0.017 on micro segments, so a 0.05 gate reports "no
+                       # cross-fighting" for a segment that never cleared the gate. 0.02 is
+                       # flightscore.py's STICK_DEADBAND — same number, so the two tools' answers
+                       # are comparable — and allocation_metrics reports the occupancy WITH it.
+BLEND_RAILED = 0.999   # bWt at/above this = lateralHold railed, eFine weight 0 (see saturation)
+
+
+def alpha_metrics(rows, cols, fbw):
+    """Did the card reach the AoA ceiling, and what did the law do there? (metrics, skipped).
+
+    This block exists because `aoaLimiterActivePct` was 0 in EVERY segment of every card ever run
+    (INSTRUCTOR-LOOP.md §3) — the "loaded jet mushing near its alpha limit above corner speed" case
+    the ONE-LAW rule demands has never been exercised, so nothing downstream of it has ever been
+    measured either. On an alpha_* segment `aoaLimiterActivePct == 0` is not a good score, it means
+    THE CARD FAILED TO PROVOKE THE REGIME and every number here is about some other flight.
+      aoaCeilDeg            - the ceiling the mod itself uses, mirrored from ChaseController.Apply
+                              (alphaLimiter - min(4, 0.15*alphaLimiter)), so "past the ceiling" here
+                              means the same thing it means in the law. Skipped pre-v0.55 (no header).
+      aoaAboveCeilingPct    - % samples with |aoa| past that ceiling. THE headline: 0 = card failed.
+      aoaPeakOverCeiling    - max|aoa| / ceiling. v0.57 measured the reactive gate relaying at
+                              1.3-2.5x here (Trainer 20.4 deg on an 8.5 ceiling); ~1.0 = the
+                              predictive gate held.
+      gateMinUp / gateMinDn - the deepest either ceiling gate closed (1.0 = never bit). Both sides,
+                              because alphaPull/alphaPush are a mirrored pair and a one-sided guard
+                              is exactly the asymmetry that sustains a relay.
+      qSchedMin             - deepest the v0.59 AoA-utilization demand schedule cut (1.0 = inert).
+      aoaRecoverActivePct /
+      aoaRecoverPeak        - occupancy and peak of the v0.59 recovery bias (past the ceiling, the
+                              gates command nothing and this is all that flies the recovery).
+      commandIntoCeilingPct - % samples where a gate was at least half shut and the RAW law
+                              (tgtPRaw, pre-gate) was still commanding INTO that ceiling. The
+                              question the card is for: does the law back off, or does it keep
+                              asking and leave the gate to do the backing off? Sign convention:
+                              nose-up = NEGATIVE pitch (see CLAUDE.md), so up-gate + tgtPRaw < 0.
+    """
+    m, skipped = {}, {}
+    n = len(rows)
+    lim = fbw.get("alphaLimiter")
+    if lim and "aoa" in cols:
+        ceil = lim - min(4.0, 0.15 * lim)
+        peak = max(abs(r.get("aoa", 0.0)) for r in rows)
+        m["aoaCeilDeg"] = ceil
+        m["aoaAboveCeilingPct"] = 100.0 * sum(1 for r in rows if abs(r.get("aoa", 0.0)) > ceil) / n if n else 0.0
+        m["aoaPeakOverCeiling"] = peak / ceil if ceil > 0 else None
+    else:
+        why = "missing column: aoa" if lim else "no alphaLimiter on the '# fbw' header (pre-v0.55 capture)"
+        skipped["aoaCeilDeg"] = skipped["aoaAboveCeilingPct"] = skipped["aoaPeakOverCeiling"] = why
+    if {"aoaGU", "aoaGD"} <= cols:
+        m["gateMinUp"] = min(r.get("aoaGU", 1.0) for r in rows)
+        m["gateMinDn"] = min(r.get("aoaGD", 1.0) for r in rows)
+    else:
+        skipped["gateMinUp"] = skipped["gateMinDn"] = "missing column(s): aoaGU/aoaGD"
+    if "qSched" in cols:
+        m["qSchedMin"] = min(r.get("qSched", 1.0) for r in rows)
+    else:
+        skipped["qSchedMin"] = "missing column: qSched"
+    if "aoaRec" in cols:
+        recs = [abs(r.get("aoaRec", 0.0)) for r in rows]
+        m["aoaRecoverActivePct"] = 100.0 * sum(1 for v in recs if v > 0.01) / n if n else 0.0
+        m["aoaRecoverPeak"] = max(recs) if recs else 0.0
+    else:
+        skipped["aoaRecoverActivePct"] = skipped["aoaRecoverPeak"] = "missing column: aoaRec"
+    if {"aoaGU", "aoaGD", "tgtPRaw"} <= cols:
+        into = 0
+        for r in rows:
+            p = r.get("tgtPRaw", 0.0)
+            if r.get("aoaGU", 1.0) < GATE_BITING and p < -CMD_DEADBAND:      # nose-up into the + ceiling
+                into += 1
+            elif r.get("aoaGD", 1.0) < GATE_BITING and p > CMD_DEADBAND:     # nose-down into the - ceiling
+                into += 1
+        m["commandIntoCeilingPct"] = 100.0 * into / n if n else 0.0
+    else:
+        skipped["commandIntoCeilingPct"] = "missing column(s): aoaGU/aoaGD/tgtPRaw"
+    return m, skipped
+
+
+def allocation_metrics(rows, cols):
+    """Roll-vs-yaw allocation on an oblique step — the "confused / cross-fighting" case.
+    (metrics, skipped), same shape as aoa_g_metrics.
+
+    An oblique demand is the only one where the allocation is ambiguous: a pure azimuth step is
+    obviously roll-and-pull and a pure elevation step is obviously pitch, but 45 deg off-axis the
+    law has to SPLIT the correction. Terminal error alone cannot see that — a segment can arrive
+    dead on target having fought itself the whole way there.
+
+    THE FLOOR IS REPORTED ALONGSIDE THE METRIC, ON PURPOSE. An opposed-command fraction needs both
+    channels to be commanding at all, and measured over 25 `fixedwing-v2` captures they usually are
+    not: median |outR| on the micro segments is 0.006–0.017 and on `fine` it is 0.005, against this
+    0.02 deadband — so both-active occupancy is 0.0% on `fine` and 11–30% on micro, and the opposed
+    fraction there is ~0 BY CONSTRUCTION. It would read the same whether allocation is perfect or
+    catastrophic. (That is the same shape of blindness as scoring a sub-degree segment against a 1 deg
+    on-target cone.) `bothActivePct` is the denominator that says whether `rollYawOpposedPct` means
+    anything; `rollCmdMedian`/`yawCmdMedian` say why when it doesn't.
+      rollCmdMedian /
+      yawCmdMedian      - median |outR| / |outY|. Compare against ALLOC_DEADBAND before reading
+                          anything below.
+      bothActivePct     - % samples with BOTH channels past the deadband: the fraction of the
+                          segment on which an allocation question was even being asked.
+      rollYawOpposedPct - % of ALL samples where both are past the deadband with OPPOSITE signs.
+                          Positive roll and positive yaw both move the nose right (CLAUDE.md sign
+                          conventions), so opposite signs is the two channels pulling the azimuth
+                          error apart: cross-fighting, stated as a number. Corpus: elDn 42.0%,
+                          az10 20.4%, az30/az90 ~12%, micro*/fine/turn360 ~0.
+      rollYawAllocFrac  - mean|outR| / (mean|outR| + mean|outY|). 1 = all roll, 0 = all yaw. Its
+                          value matters less than its SPREAD across a mirrored pair (obDR vs obUL):
+                          a law that allocates by geometry gives the same fraction to both.
+      rollBlendMean     - mean bWt, the v0.85 post-suppression roll blend weight, i.e. the loop gain
+                          the +0.918 azErr correlation was measured on. Absent pre-v0.85.
+    Stick reversal RATE is not here: wobble_scan's stickFlipRate{P,R,Y} already reports it and is
+    added to this segment type alongside these.
+    """
+    m, skipped = {}, {}
+    n = len(rows)
+    if {"outR", "outY"} <= cols:
+        aR = [abs(r.get("outR", 0.0)) for r in rows]
+        aY = [abs(r.get("outY", 0.0)) for r in rows]
+        mr, my = statistics.fmean(aR), statistics.fmean(aY)
+        m["rollCmdMedian"] = statistics.median(aR)
+        m["yawCmdMedian"] = statistics.median(aY)
+        both = [r for r in rows
+                if abs(r.get("outR", 0.0)) > ALLOC_DEADBAND and abs(r.get("outY", 0.0)) > ALLOC_DEADBAND]
+        m["bothActivePct"] = 100.0 * len(both) / n if n else 0.0
+        m["rollYawOpposedPct"] = 100.0 * sum(1 for r in both if r["outR"] * r["outY"] < 0) / n if n else 0.0
+        m["rollYawAllocFrac"] = mr / (mr + my) if (mr + my) > 1e-9 else None
+    else:
+        for k in ("rollCmdMedian", "yawCmdMedian", "bothActivePct", "rollYawOpposedPct", "rollYawAllocFrac"):
+            skipped[k] = "missing column(s): outR/outY"
+    if "bWt" in cols:
+        m["rollBlendMean"] = statistics.fmean(r.get("bWt", 0.0) for r in rows)
+    else:
+        skipped["rollBlendMean"] = "missing column: bWt (pre-v0.85 capture)"
     return m, skipped
 
 
@@ -520,7 +693,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
         metrics.update(m)
         skipped.update(s)
 
-        if seg_type in ("az_step", "el_step", "micro_step"):
+        if seg_type in ("az_step", "el_step", "micro_step", "oblique_step", "alpha_step"):
             if "off" in cols:
                 sr = step_response_metrics(t, [r.get("off", 0.0) for r in rows], settle_band=None)
                 if sr:
@@ -537,7 +710,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
         elif seg_type == "fine_track":
             metrics.update(wobble_scan(t, rows, cols, dur))   # rmsPointingErrorDeg: pointing_metrics above
 
-        elif seg_type == "sustained_turn":
+        elif seg_type in ("sustained_turn", "alpha_hold"):
             if "headingRateFilt" in cols:
                 metrics["meanTurnRateDegS"] = statistics.fmean(abs(r.get("headingRateFilt", 0.0)) for r in rows)
             else:
@@ -607,6 +780,20 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             else:
                 skipped["altExcursionM"] = "missing column: alt"
         # "unknown" (incl. "unsegmented"): AoA/G discipline above is the whole generic set.
+
+        # Disk-card extras, ON TOP of the step/turn block the chain above already ran for them (an
+        # oblique step is still a step; alphaHold is still a sustained turn). Kept out of that chain
+        # so the shared metric set stays identical and only the card-specific question is added.
+        if seg_type == "oblique_step":
+            m, s = allocation_metrics(rows, cols)
+            metrics.update(m)
+            skipped.update(s)
+            metrics.update(wobble_scan(t, rows, cols, dur))   # the reversal rate, per axis
+        elif seg_type in ("alpha_step", "alpha_hold"):
+            m, s = alpha_metrics(rows, cols, ctx.get("fbw", {}))
+            metrics.update(m)
+            skipped.update(s)
+            metrics.update(wobble_scan(t, rows, cols, dur))   # incl. wobbleEpisodesAoa: the relay
 
     return {
         "tag": tag,
@@ -802,14 +989,18 @@ def selftest():
     # omegaMax = 9*9.81/max(266, 120) = 0.3319 rad/s = 19.02 deg/s -> ratio 0.762, cap NOT active
     # while the 72 deg bank clamp IS (that pairing is the whole point of this metric).
     satcfg, satfbw = {"maxBank": 72.0}, {"cornerSpeed": 160.0, "gLimit": 9.0, "maxPitchAngVel": 0.75}
-    satcols = {"targetBank", "bankTR", "spd", "airDensity", "assist", "aoaGU"}
+    satcols = {"targetBank", "bankTR", "spd", "airDensity", "assist", "aoaGU", "bWt"}
     sat_rows = [{"targetBank": 72.0, "bankTR": 81.75, "spd": 266.0, "airDensity": 0.873,
-                 "assist": 1.0, "aoaGU": 1.0}] * 3 + \
+                 "assist": 1.0, "aoaGU": 1.0, "bWt": 1.0}] * 3 + \
                [{"targetBank": 40.0, "bankTR": 40.0, "spd": 266.0, "airDensity": 0.873,
-                 "assist": 1.0, "aoaGU": 1.0}]
+                 "assist": 1.0, "aoaGU": 1.0, "bWt": 0.4}]
     sm, sskip = saturation_metrics(sat_rows, satcols, satcfg, satfbw)
     assert sskip == {}, sskip
     assert abs(sm["bankClampActivePct"] - 75.0) < 1e-9, sm            # 3 of 4 at the wall
+    # the lateralHold latch, the limit that decides comparability: 3 of 4 samples with eFine
+    # multiplied by zero. 0.999 is a rail test, so 0.4 must NOT count and 1.0 must.
+    assert abs(sm["blendRailPct"] - 75.0) < 1e-9, sm
+    assert "blendRailPct" in saturation_metrics(sat_rows, satcols - {"bWt"}, satcfg, satfbw)[1]
     assert abs(sm["bankDemandExcessDeg"] - 9.75) < 1e-9, sm           # 81.75-72, only over clamped rows
     assert abs(sm["turnRateCapActivePct"] - 0.0) < 1e-9, sm           # nowhere near omegaMax
     want = statistics.fmean([math.tan(math.radians(b)) * G0 / 266.0 for b in (81.75, 81.75, 81.75, 40.0)]) \
@@ -901,6 +1092,24 @@ def selftest():
         "bobup": "bobup",
         "translate": "translate", "transition": "transition",  # planned (Appendix A), not emitted yet
         "not_a_real_card_tag": "unknown",
+        # ...and every tag the shipped DISK cards (cards/*.json) emit. The suffixed ones are the
+        # point of the prefix match: they must land on the built-in's type without a rule of their
+        # own, while staying a DISTINCT tag so compare-runs.py can't pool them as replicates.
+        "alphaPull": "alpha_step", "alphaPush": "alpha_step", "alphaHold": "alpha_hold",
+        "obDR2": "oblique_step", "obDL2": "oblique_step", "obUL2": "oblique_step",
+        "obUR2": "oblique_step", "obUR12": "oblique_step",     # both single- and double-digit
+        "obDR05": "oblique_step", "obUR3": "oblique_step",     # the sub-degree and deadzone rungs
+        "obDL6low": "oblique_step",                            # ...and the below-horizon diamond
+        "az30R": "az_step", "az30L": "az_step",
+        "az6sweepR": "az_step", "az6sweepL": "az_step",       # a step flown ON a moving marker
+        "elUp40": "el_step", "elDn40": "el_step",
+        "turn360loq": "sustained_turn", "turn360stol": "sustained_turn",
+        "turn360slow": "sustained_turn", "turn360base": "sustained_turn",
+        "turn360creep": "sustained_turn",
+        "hoveryawR": "hover_hold", "hoveryawL": "hover_hold",
+        "bobdn": "bobup",
+        "alphabet": "unknown",     # NOT alpha_step: the rules are alphaHold / alpha(Pull|Push)
+        "obscure": "unknown",      # NOT oblique_step: ob must be followed by a direction + digits
     }
     for tag, expected in real_tags.items():
         assert infer_type(tag) == expected, (tag, infer_type(tag), expected)
@@ -934,6 +1143,108 @@ def selftest():
         assert "WARNING" in buf.getvalue() and "1/3" in buf.getvalue(), buf.getvalue()
     finally:
         os.remove(tmp_path)
+
+    # alpha_metrics — exact counting, on the case the alpha-ceiling card exists to produce: a
+    # limiter 20 airframe (ceiling 20 - min(4, 3) = 17), one sample past it, gates biting, and the
+    # law still commanding nose-up (tgtPRaw < 0) while the up-gate is shut = commandIntoCeiling.
+    afbw = {"alphaLimiter": 20.0, "cornerSpeed": 160.0, "gLimit": 9.0}
+    acols = {"aoa", "aoaGU", "aoaGD", "qSched", "aoaRec", "tgtPRaw"}
+    arows = [{"aoa": 5.0,  "aoaGU": 1.0, "aoaGD": 1.0, "qSched": 1.0, "aoaRec": 0.0,  "tgtPRaw": -0.3},
+             {"aoa": 22.1, "aoaGU": 0.2, "aoaGD": 1.0, "qSched": 0.4, "aoaRec": 0.6,  "tgtPRaw": -0.8},
+             {"aoa": 16.0, "aoaGU": 0.6, "aoaGD": 1.0, "qSched": 0.7, "aoaRec": 0.0,  "tgtPRaw": -0.8},
+             {"aoa": -9.0, "aoaGU": 1.0, "aoaGD": 0.3, "qSched": 1.0, "aoaRec": -0.1, "tgtPRaw": 0.5}]
+    am, askip = alpha_metrics(arows, acols, afbw)
+    assert askip == {}, askip
+    assert abs(am["aoaCeilDeg"] - 17.0) < 1e-9, am
+    assert abs(am["aoaAboveCeilingPct"] - 25.0) < 1e-9, am          # only the 22.1 sample is past it
+    assert abs(am["aoaPeakOverCeiling"] - 22.1 / 17.0) < 1e-9, am   # 1.3 = the v0.57 relay signature
+    assert abs(am["gateMinUp"] - 0.2) < 1e-9 and abs(am["gateMinDn"] - 0.3) < 1e-9, am
+    assert abs(am["qSchedMin"] - 0.4) < 1e-9, am
+    assert abs(am["aoaRecoverActivePct"] - 50.0) < 1e-9, am         # 0.6 and -0.1, both past 0.01
+    assert abs(am["aoaRecoverPeak"] - 0.6) < 1e-9, am
+    # rows 1 (gateUp 0.2, nose-up) and 3 (gateDn 0.3, nose-down) count; row 2's gate is 0.6, open.
+    assert abs(am["commandIntoCeilingPct"] - 50.0) < 1e-9, am
+    # ...and "the card never reached the regime" must be 0.0, not missing -- the two are different
+    # answers and only one of them means the run is worthless.
+    calm, _ = alpha_metrics([dict(arows[0])], acols, afbw)
+    assert calm["aoaAboveCeilingPct"] == 0.0 and calm["commandIntoCeilingPct"] == 0.0, calm
+    # pre-v0.55 capture: no alphaLimiter on the header -> the ceiling half skips, the rest computes.
+    _, s_nolim = alpha_metrics(arows, acols, {})
+    assert set(s_nolim) == {"aoaCeilDeg", "aoaAboveCeilingPct", "aoaPeakOverCeiling"}, s_nolim
+
+    # allocation_metrics — mean|outR| = 0.4, mean|outY| = 0.1 -> 0.8 roll; 1 of 4 samples has both
+    # channels live with opposite signs (row 2); the sub-deadband row 4 must NOT count as opposed.
+    ocols = {"outR", "outY", "bWt"}
+    orows = [{"outR": 0.4,  "outY": 0.1,   "bWt": 0.0},
+             {"outR": -0.6, "outY": 0.2,   "bWt": 1.0},
+             {"outR": 0.4,  "outY": 0.09,  "bWt": 0.5},
+             {"outR": 0.2,  "outY": -0.01, "bWt": 0.5}]
+    om, oskip = allocation_metrics(orows, ocols)
+    assert oskip == {}, oskip
+    assert abs(om["rollYawAllocFrac"] - 0.8) < 1e-9, om
+    assert abs(om["rollYawOpposedPct"] - 25.0) < 1e-9, om
+    assert abs(om["bothActivePct"] - 75.0) < 1e-9, om        # row 4's yaw (0.01) is under the deadband
+    assert abs(om["rollCmdMedian"] - 0.4) < 1e-9, om
+    assert abs(om["rollBlendMean"] - 0.5) < 1e-9, om
+    assert allocation_metrics([{"outR": 0.0, "outY": 0.0}], {"outR", "outY"})[0]["rollYawAllocFrac"] is None
+    assert "rollBlendMean" in allocation_metrics(orows, {"outR", "outY"})[1]   # pre-v0.85: skipped
+    # THE FLOOR CASE, the whole reason bothActivePct exists: a micro-step-sized segment (measured
+    # median |outR| ~0.01) scores 0% opposed no matter how badly the two channels are allocated,
+    # because neither ever clears the deadband. The zero must be READABLE as a floor -- i.e. the
+    # medians and bothActivePct must sit right next to it in the same metric set.
+    tiny = [{"outR": 0.010, "outY": -0.012}, {"outR": -0.008, "outY": 0.014}] * 10
+    tm, _ = allocation_metrics(tiny, {"outR", "outY"})
+    assert tm["rollYawOpposedPct"] == 0.0 and tm["bothActivePct"] == 0.0, tm
+    assert tm["rollCmdMedian"] < ALLOC_DEADBAND and tm["yawCmdMedian"] < ALLOC_DEADBAND, tm
+
+    # compute_segment wiring for both new families: the card-specific block lands ON TOP of the
+    # step / sustained-turn metrics, not instead of them.
+    ob_rows = [dict(r, t=i * 0.1, off=max(0.0, 2.0 - 0.2 * i), azErr=1.0, elevErr=1.0)
+               for i, r in enumerate(orows * 8)]
+    ob = compute_segment("obDR2", "oblique_step", ob_rows, ocols | {"t", "off", "azErr", "elevErr"})
+    assert abs(ob["metrics"]["rollYawAllocFrac"]["value"] - 0.8) < 1e-9, ob
+    assert "settleTime" in ob["metrics"] and "stickFlipRateR" in ob["metrics"], ob
+    ah_rows = [dict(r, t=i * 1.0, headingRateFilt=12.0, spd=250.0, alt=8000.0)
+               for i, r in enumerate(arows)]
+    ah = compute_segment("alphaHold", "alpha_hold", ah_rows, acols | {"t", "headingRateFilt", "spd", "alt"},
+                         {"fbw": afbw})
+    assert abs(ah["metrics"]["meanTurnRateDegS"]["value"] - 12.0) < 1e-9, ah
+    assert abs(ah["metrics"]["aoaAboveCeilingPct"]["value"] - 25.0) < 1e-9, ah
+    assert compute_segment("alphaPull", "alpha_step", ah_rows,
+                           acols | {"t"}, {"fbw": afbw})["metrics"]["gateMinUp"]["value"] == 0.2
+
+    # THE SHIPPED CARDS THEMSELVES (cards/*.json). This is the drift check CLAUDE.md warns about --
+    # the card files and this table have no compile-time link, and that pair silently broke once
+    # already (v0.71: 19 of 21 segments scored "unknown"). Mirrors ScenarioPlayer.Validate: name ==
+    # basename, positive durations, first segment 'arm'. Skipped, not failed, when the directory is
+    # absent -- scorecard.py is copied around on its own.
+    card_dir = os.path.join(os.path.dirname(_HERE), "cards")
+    if os.path.isdir(card_dir):
+        names = sorted(f for f in os.listdir(card_dir) if f.endswith(".json"))
+        assert names, card_dir
+        for fn in names:
+            with open(os.path.join(card_dir, fn), encoding="utf-8") as f:
+                card = json.load(f)
+            base = os.path.splitext(fn)[0]
+            assert card.get("name") == base, (fn, card.get("name"))   # the FILE is the card id
+            segs = card.get("segments") or []
+            assert segs and segs[0]["tag"] == "arm", (fn, segs[:1])
+            seen = set()
+            for s in segs:
+                assert s.get("dur", 0) > 0, (fn, s)
+                t = s["tag"]
+                assert infer_type(t) != "unknown", (fn, t)            # the drift this exists to catch
+                # compare-runs.py keys segments by tag alone, so a repeated SCORED tag inside one
+                # card would be read as two replicates of itself. Repeated 'arm' is fine: excluded.
+                assert t == "arm" or t not in seen, (fn, t)
+                seen.add(t)
+                # A track SHORTER than its segment doesn't fail: ScenarioPlayer.Demand clamps the
+                # index, so the demand silently freezes partway through and the tail of the segment
+                # measures a hold that was meant to be a sweep.
+                ta, te = s.get("trackAz") or [], s.get("trackEl") or []
+                if ta:
+                    assert len(te) == len(ta), (fn, t)                 # ScenarioPlayer.Validate's rule
+                    assert len(ta) >= round(s["dur"] / card["step"]), (fn, t, len(ta))
 
     print("selftest OK")
 
