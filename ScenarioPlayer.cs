@@ -119,6 +119,14 @@ namespace NuclearOptionMouseAim
         private Vector3    _anchorPos;
         private Vector3    _anchorFwd;      // horizontal unit heading captured with it
 
+        // --- entry TRIM (v0.88). The AoA the aircraft last settled at while flying the opening `arm`
+        // segment, i.e. its own answer to "what incidence holds this mass up at this speed and
+        // density". PlaceOnCondition writes the velocity that far BELOW the level nose so the entry
+        // starts already trimmed; see the block there for why a placement at AoA = 0 costs a 1 g jolt.
+        // Measured, never assumed: zero until an arm has been flown, which is exactly the pre-v0.88
+        // behaviour, and re-measured per card so a slower or higher card gets its own value.
+        private float      _trimAoA;
+
         // --- A/B arm interleaving (v0.84). STATIC — see ApplyArm for why it cannot be per-aircraft. ---
         private static ConfigEntry<bool> _armEntry;      // the toggle being alternated; null = no schedule
         private static bool              _armSaved;      // its value before the suite, restored by Finish
@@ -1021,6 +1029,28 @@ namespace NuclearOptionMouseAim
             }
             _rec.SegmentTag = s.tag;   // rows self-label; the recorder derives tSeg from the change
             SetDemand(SegDemand(s, _tSeg));
+
+            // MEASURE THE TRIM. The opening segment exists to let the entry settle, so by the end of it
+            // the AoA IS the trim AoA for this card's speed/altitude on this airframe at this mass.
+            // Keeping the last value (rather than averaging) is deliberate: the first ~0.7 s of an arm
+            // is the entry transient itself, and averaging it in would bias the next placement by the
+            // very overshoot this is here to remove.
+            if (_si == 0) _trimAoA = MeasureAoA(ac);
+        }
+
+        // Signed angle of the velocity below the nose, about the body-right axis — the same quantity,
+        // read the same way, as the FlyLevel demand in ChaseController (TargetCalc.GetAngleOnAxis is
+        // what the game's own RelaxedStabilityController uses). Clamped so a stall or a near-stationary
+        // aircraft can never feed a wild attitude into a placement.
+        private static float MeasureAoA(Aircraft ac)
+        {
+            try
+            {
+                var t = ac != null ? ac.transform : null;
+                if (t == null || ac.rb == null || ac.rb.velocity.sqrMagnitude <= 4f) return 0f;
+                return Mathf.Clamp(TargetCalc.GetAngleOnAxis(t.forward, ac.rb.velocity, t.right), -10f, 15f);
+            }
+            catch { return 0f; }   // probe convention: never throw, fall back to the untrimmed entry
         }
 
         // Sustained-turn stimulus, derived from the airframe instead of hardcoded. The INSTANTANEOUS
@@ -1167,9 +1197,28 @@ namespace NuclearOptionMouseAim
                 // having to know whether (or when) the floating origin rebased.
                 Vector3 tgt  = new Vector3(_anchorPos.x, c.startAlt > 0f ? c.startAlt : alt0, _anchorPos.z);
                 Vector3 dPos = tgt - gp0;
+                // TRIM THE ENTRY (v0.88). Writing the velocity exactly along a level nose is AoA = 0,
+                // which is ZERO LIFT for one physics step: the aircraft free-falls, the FBW catches it,
+                // and the catch costs ~1 g (audible in-game as a thump, and the reason a reset "bumps")
+                // plus an AoA overshoot that takes ~0.7 s to bleed off. Measured on the R22 batch: row 0
+                // read aoa=-0.05 g=0.00, peaked at aoa=2.14, settled at 1.41.
+                //
+                // The nose stays LEVEL and the VELOCITY is pitched down instead — not the other way
+                // round — because that is the card's own equilibrium: the arm demand is horizontal, the
+                // law puts the nose on it, and the flight path therefore sits one AoA below. Pitching
+                // the nose up instead would trim the aerodynamics and immediately be corrected back
+                // down by the law, trading one transient for another. This way the placement lands
+                // directly in the steady state the arm segment was going to settle into anyway, and
+                // off0 stays ~0 (the stale-demand signal keeps its meaning).
+                //
+                // No aero solver, no per-airframe constant, nothing to tune: _trimAoA is what THIS
+                // aircraft settled at during the previous arm. Zero on a run's first placement, which
+                // is byte-identical to the pre-v0.88 behaviour.
+                float ta = _trimAoA * Mathf.Deg2Rad;
+                Vector3 velDir = (fwd * Mathf.Cos(ta) - Vector3.up * Mathf.Sin(ta)).normalized;
                 Quaternion rot1 = Quaternion.LookRotation(fwd, Vector3.up);
                 MoveAssembly(ac, rb, rot1 * Quaternion.Inverse(rb.rotation), rb.position, dPos,
-                             rot1, fwd * c.startSpeed);
+                             rot1, velDir * c.startSpeed);
 
                 // NO STALE DEMAND. Apply runs from this same call's POSTfix, so without this the tick
                 // that teleports the aircraft is also a tick chasing the previous card's last marker
@@ -1194,10 +1243,11 @@ namespace NuclearOptionMouseAim
                 _rec.EntryNote =
                     $"v={v0:0.0}->{c.startSpeed:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
-                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
+                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1 aoaTrim={_trimAoA:0.00}";
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[card] entry condition set: {v0:0} -> {c.startSpeed:0} m/s, {alt0:0} -> {c.startAlt:0} m"
-                    + $"{fuelMsg}, wings level, snapped back {snapBack:0} m to the anchor heading, controller reset.");
+                    + $"{fuelMsg}, wings level at {_trimAoA:0.0} deg trim AoA, snapped back {snapBack:0} m"
+                    + " to the anchor heading, controller reset.");
                 Notify($"ON CONDITION  {c.startSpeed:0} m/s  {c.startAlt:0} m"
                     + (fuel0 >= 0f ? $"  fuel {fuelTgt:P0}" : ""));
                 return true;

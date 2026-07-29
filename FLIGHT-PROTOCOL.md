@@ -10,18 +10,19 @@ prediction that misses is a result, not a failure of the test — write down wha
 
 | ver | change | flown |
 |---|---|---|
-| 0.82 | `ChaseController` per-aircraft | no |
-| 0.83 | relative turn lead + stall-gated integrator | no |
-| 0.84 | entry reset + ABBA arms | no |
-| 0.85 | below-nose roll-to-align loop broken | no |
-| 0.86 | `ScenarioPlayer`/`ManeuverRecorder` per-aircraft, `frameMs` | no |
-| 0.87 | drones fly the real control law | no |
+| 0.82 | `ChaseController` per-aircraft | **crewed, Gate A** |
+| 0.83 | relative turn lead + stall-gated integrator | crewed only — never A/B'd |
+| 0.84 | entry reset + ABBA arms | **reset yes; ABBA not yet (Gate B)** |
+| 0.85 | below-nose roll-to-align loop broken | not exercised — `fixedwing-sweep` is above-nose |
+| 0.86 | `ScenarioPlayer`/`ManeuverRecorder` per-aircraft, `frameMs` | **crewed, Gate A** |
+| 0.87 | drones fly the real control law | no — Gate C |
+| 0.88 | trimmed entry placement (from Gate A) | no |
 
 Total for gates A–D: **~25 minutes**. Do not skip to the experiments.
 
 ---
 
-## Gate A — the rig does not drift (no drones)
+## Gate A — the rig does not drift (no drones) — **PASSED 2026-07-29 (R22)**
 
 The most important test in this document. Until it passes, **no A/B result is admissible** — a
 first-half/second-half split of a single *unchanged* arm previously beat its own detection
@@ -30,14 +31,47 @@ threshold, i.e. doing nothing scored as significant.
 **Setup.** `DroneEnabled` **off**. `ScenarioArmToggle` **empty**. `ScenarioForceEntry` on.
 `ScenarioRepeat` 8. Card: `fixedwing-sweep`. Multirole1, clean. Do not touch the stick.
 
-**Pass — all three:**
+**Pass — both:**
 - first-sample `spd` within **±0.3 m/s** across all 8 captures
-- first-sample `|outP|` **< 0.05** (was 0.487 on late runs before v0.84)
-- `terminalOffDeg` vs run index correlation **|r| < 0.4** (was −0.824)
+- **the null split.** Split the batch in half by run index and score both halves. **No metric's
+  between-half difference may reach the batch's own detection threshold** (≈1.4·sd at n=4/arm).
+  Nothing changed between the halves, so anything that clears it is the rig inventing an effect.
 
-**Fail.** The reset is still leaking. Read the `# entry` header line — it records `snapBackM`, the
-pre-placement speed/altitude, the fuel write and `ctrlReset`, i.e. what the reset had to undo.
-**Stop here.** Everything below assumes replicates are exchangeable.
+**Fail.** The reset is leaking. Read the `# entry` header line — it records `snapBackM`, the
+pre-placement speed/altitude, the fuel write, `ctrlReset` and `aoaTrim`, i.e. what the reset had to
+undo. **Stop here.** Everything below assumes replicates are exchangeable.
+
+### R22 result
+
+| criterion | measured | verdict |
+|---|---|---|
+| `spd` spread at row 0 | **0.10 m/s** (250.1–250.2) | pass |
+| null split, worst metric | `overshootElDeg` **1.37 sd** vs 1.40 threshold | pass |
+| null split, `terminalOffDeg` | 0.93 sd | pass |
+
+Noise floor on `turn360`, n=8: `terminalOffDeg` sd **0.046° (0.5%)**, `rmsPointingErrorDeg` 0.093°
+(0.9%), `gSustained` 0.1%, `meanTurnRateDegS` 0.1%. Entry provenance is tight — replicates 2–8 all
+snap back ~1740 m and arrive within **0.1 m/s** of each other. `iPitch`/`iYaw` read exactly 0.0000 on
+every first row, so v0.84's `ctrlReset` does what it claims.
+
+### Two criteria in the original gate were wrong — both replaced above
+
+Written before there was a noise floor to write them against, and both flagged a rig that passes.
+
+- **`|outP| < 0.05` at the first sample** measured the wrong quantity at the wrong tick. It was
+  written to catch a *stale aim demand*; the signal for that is `off` at row 0, which reads
+  **0.02–0.08°** — clean. `|outP|` reads 0.146 on seven of eight runs, identical to three decimals,
+  because it is a **deterministic entry transient**, not drift: the placement wrote AoA = 0 and the
+  FBW is catching the resulting 1-g drop. It is gone by t+0.7 s, well inside the 6 s `arm`. Fixed at
+  source in v0.88 (see CHANGELOG); the criterion is dropped rather than retuned because `off0` already
+  covers what it was for.
+- **`|r| < 0.4` on `terminalOffDeg` vs run index** is the wrong *statistic*. Correlation has no
+  effect-size floor: as noise falls, any residual trend drives |r| → 1, so a perfectly reproducible
+  rig fails it. Measured r = **−0.885** — across a total range of **0.11°** on a 9.4° mean, with
+  sd 0.046°. Real, and ~2% of the smallest effect any experiment here is hunting (E1 predicts 5.4°).
+  The null split replaces it because it compares drift against the batch's own detection threshold
+  instead of against an absolute number. The residual trend is also what ABBA interleaving exists to
+  cancel, and Gate A deliberately runs with **no** arm schedule, so this batch is the worst case.
 
 ---
 
@@ -119,9 +153,20 @@ not only a lead. If E1 moves, arm the two checkboxes separately to attribute it.
 
 ### E2 — the first unlatched sustained capture (`sweep-slow`)
 
+**F2 is now confirmed in flight, not just from the code:** R22 measured `blendRailPct` = **93.0%**
+(sd 0.46) across `turn360`. The bank pipeline's weight is zero for 93% of the scored segment.
+
 `lateralHold` rails at `EvolvedAlignHoldDeg` = **5.0°**, which drives the bank pipeline's weight to
 **exactly zero**. Every sustained capture in the corpus so far was above that rail — measuring a
 disconnected pipeline. `sweep-slow` holds ~3.5° of lag, below it.
+
+**Do not run E1/E2/F1 against `fixedwing-sweep` — R22 shows it is a saturated card.** On `turn360`
+the law is at its ceiling essentially all the time: `bankClampActivePct` **96.9%**,
+`turnRateCapActivePct` **96.9%**, `bankDemandExcessDeg` **11.6°** (the law asks for 11.6° more bank
+than the clamp allows), and the airframe still delivers `turnRateDemandRatio` **0.994** — i.e. 99.4%
+of what was asked, while holding a 9.4° terminal lag. At 12.1 °/s and 5.7 g sustained that lag is
+mostly the *airframe*, not the law, and a saturated actuator cannot show a gain change. This is
+exactly why `sweep-slow` exists; it is now the primary sustained card, not a supplement.
 
 - **Pass:** `blendRailPct ≈ 0` **and** mean `|azErr|` in 2.5–5°. The card is on-condition.
 - If `blendRailPct` is high the card missed its band — the lag constant it was sized with was
@@ -137,6 +182,13 @@ requires "a loaded jet mushing near its alpha limit above corner speed".
 
 - **Gate on `aoaAboveCeilingPct > 0` at all.** If it is 0, **the card failed, not the law** — raise
   `startAlt` and refly. 8000 m is a reasoned choice, not a validated one.
+- **R22 says the gap is bigger than an altitude bump can close.** `alphaLimiter` reads **27°** on the
+  Multirole1 `# fbw` header, and the hardest card in the corpus peaked at `aoaPeakDeg` **7.68°** —
+  28% of the ceiling, at 5.7 g sustained and with the turn rate cap already active 96.9% of the time.
+  The law caps turn rate *before* AoA ever approaches the limiter, so no amount of altitude will get
+  there while that cap holds. Expect `alpha-sweep` to need a demand the cap does not bound (a pull,
+  not a sweep) — and treat "the AoA path is unreachable through the turn-rate cap" as a finding in
+  its own right if it reproduces.
 - Then: `aoaPeakOverCeiling` ≲ 1.1, and low `commandIntoCeilingPct` (the law should stop commanding
   into a ceiling it cannot cross).
 

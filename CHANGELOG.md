@@ -3,6 +3,33 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.88.0
+
+**The entry placement is trimmed — the reset no longer drops the aircraft for a physics step.**
+First finding out of the Gate A batch (R22, 8 replicates of `fixedwing-sweep`, Multirole1). The
+placement wrote the velocity exactly along a level nose, which is **AoA = 0, i.e. zero lift**: row 0
+of every capture read `aoa=-0.05 g=0.00`, the FBW then caught the fall at ~1 g (the audible thump on
+every reset), AoA overshot to 2.14° and took ~0.7 s to settle at its true trim of 1.41°.
+
+- **`_trimAoA`** is sampled every tick of a card's opening `arm` segment, so by the end of it the
+  value IS that airframe's trim AoA at that card's speed, altitude and mass — the aircraft's own
+  answer, not a solver's and not a constant. `PlaceOnCondition` then writes the velocity that far
+  **below** the level nose. Zero until an arm has been flown, so a run's first placement is
+  byte-identical to 0.87.
+- **The nose stays level and the velocity is pitched down**, not the reverse. A card's `arm` demand is
+  horizontal and the law puts the *nose* on it, so the equilibrium already has the flight path one AoA
+  low; pitching the nose up instead would trim the aerodynamics and be corrected straight back down,
+  trading one transient for another. This lands the placement in the steady state the arm was going to
+  reach anyway, and leaves `off` at row 0 near zero so the stale-demand signal keeps its meaning.
+- Recorded, not asserted: the `# entry` header line and the `[card] entry condition set` log line both
+  carry `aoaTrim=`. The check is one row — `g` at row 0 should no longer read 0.00.
+- **No control-law change.** Harness only, and it applies to both arms of any A/B identically, so it
+  cannot confound an experiment.
+
+Also in this release: `FLIGHT-PROTOCOL.md` Gate A criteria A2/A3 corrected — both were written
+before there was a noise floor to write them against, and both flagged a rig that passes. See the
+gate text for the replacements and why bare correlation was the wrong statistic.
+
 ## 0.87.0
 
 **Uncrewed harness, phase 2: a drone flies the mod's real control law.** Everything under the

@@ -205,6 +205,16 @@ Machine-specific paths are written as placeholders:
     rebase can't move it), writes the demand, and calls `ChaseController.Forget(ac)`. Engine spool is
     deliberately not reset (throttle is pinned across the card boundary, so it doesn't drift); damage
     and session age can't be reset and are **recorded** in the `# entry` header line instead.
+    **v0.88 — the placement is TRIMMED.** It wrote the velocity along a level nose, i.e. **AoA = 0 =
+    zero lift** for one physics step; the Gate A batch read `aoa=-0.05 g=0.00` at row 0 of every
+    capture, the FBW caught the drop at ~1 g (this is the audible thump on every reset) and AoA
+    overshot to 2.14° before settling at 1.41°. `_trimAoA` is sampled every tick of a card's opening
+    `arm` segment — the aircraft's own trim incidence at that card's speed/altitude/mass, measured
+    rather than solved — and the velocity is written that far **below** the level nose. The nose stays
+    level and the velocity moves, not the reverse: the arm demand is horizontal and the law puts the
+    *nose* on it, so the equilibrium already has the flight path one AoA low. Zero until an arm has
+    been flown, so a run's first placement matches v0.87 exactly. Logged as `aoaTrim=` on the
+    `# entry` line, so the check is one row: `g` at row 0 should no longer read 0.00.
     `Cfg.ScenarioArmToggle` names a bool knob the runner alternates **ABBA** by queue index
     (`((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns drift into a fake effect —
     restoring it at suite end, and each capture self-identifies via `arm=`/`armKnob=` on its
