@@ -5,10 +5,11 @@ Six changes shipped without a single flight. This is the order to fly them in, a
 fails invalidates everything below it, so stop there rather than collecting data that cannot mean
 anything.
 
-Gates A, B and C have flown (R21/R23/R24) and all three passed; **Gate D onward is still unflown**,
-and every "expected" number from there down is a **prediction**. A prediction that misses is a
-result, not a failure of the test — write down what actually happened. Two of the passed gates
-corrected a claim made above them, so read each `### R__ result` section, not just the verdict.
+Gates A, B, C and D have all flown (R22/R23/R24/R25) and all four passed; **the experiments below
+are still unflown**, and every "expected" number from there down is a **prediction**. A prediction
+that misses is a result, not a failure of the test — write down what actually happened. Two of the
+passed gates corrected a claim made above them, so read each `### R__ result` section, not just the
+verdict.
 
 | ver | change | flown |
 |---|---|---|
@@ -17,9 +18,9 @@ corrected a claim made above them, so read each `### R__ result` section, not ju
 | 0.84 | entry reset + ABBA arms | **ABBA yes, Gate B; reset only PARTLY works — see B result** |
 | 0.85 | below-nose roll-to-align loop broken | not exercised — `fixedwing-sweep` is above-nose |
 | 0.86 | `ScenarioPlayer`/`ManeuverRecorder` per-aircraft, `frameMs` | **crewed, Gate A** |
-| 0.87 | drones fly the real control law | **PASSED Gate C (R24)** |
+| 0.87 | drones fly the real control law | **PASSED Gate C (R24) and Gate D (R25)** |
 | 0.88 | trimmed entry placement (from Gate A) | **flown Gate B — disproved, reverted in 0.89** |
-| 0.89 | 0.88 reverted; placement-tick reset defect measured | **flown Gate C (R24) — the defect reproduces on the drone** |
+| 0.89 | 0.88 reverted; placement-tick reset defect measured | **flown Gate C (R24) + D (R25) — the defect reproduces on the drone** |
 
 Total for gates A–D: **~25 minutes**. Do not skip to the experiments.
 
@@ -41,8 +42,8 @@ threshold, i.e. doing nothing scored as significant.
   Nothing changed between the halves, so anything that clears it is the rig inventing an effect.
 
 **Fail.** The reset is leaking. Read the `# entry` header line — it records `snapBackM`, the
-pre-placement speed/altitude, the fuel write, `ctrlReset` and `aoaTrim`, i.e. what the reset had to
-undo. **Stop here.** Everything below assumes replicates are exchangeable.
+pre-placement speed/altitude, the fuel write and `ctrlReset`, i.e. what the reset had to
+undo. (It carried `aoaTrim` too when this was written; v0.88 added that field and v0.89 removed it.) **Stop here.** Everything below assumes replicates are exchangeable.
 
 ### R22 result
 
@@ -229,7 +230,7 @@ client an aircraft you don't own is simple/remote, and the harness already refus
 
 ---
 
-## Gate D — drones do not touch your aircraft
+## Gate D — drones do not touch your aircraft — **PASSED 2026-07-29 (R25)**
 
 **Non-negotiable.** `DroneCount` **2**, cards running, and **you fly** — a hard reversal, the most
 demanding thing you'd normally do.
@@ -241,12 +242,77 @@ for **your** turn is indistinguishable from a no-drones baseline.
 `_uncrewed` gate, and it would have dragged your marker onto the drone's nose. Or your crosshair
 blanking on a drone's engage.
 
+### R25 result — **PASSED 2026-07-29**
+
+v0.89.0. `DroneCount` **2**, both `Multirole1` (KR-67 Ifrit), each flying `fixedwing-sweep` 4× = **8
+drone captures** (`R25-d1-…-02/04/06/08`, `R25-d2-…-03/05/07/09`) while the human flew his own
+aircraft and recorded (`mouseaim-rec-v0.89.0-R25-01-20260729-222331.csv`, 191.4 s, 3065 samples, no
+card, `reason=toggled off`).
+
+**The human's flight was a genuinely hard test, not a cruise:** peak **8.79 g**, AoA −18.7…+41.5°,
+bank ±88°, **41.7%** of rows over 60° bank, **26.5%** over 5 g, a 135° marker reversal at t≈89 and a
+±180° wrap at t≈54.7.
+
+**Drone side — the human's presence did not change what the drones did** (`turn360`):
+
+| metric | R24 A (solo, n=2) | R25 A (n=2) | R24 B (n=2) | R25 B (n=6) |
+|---|---|---|---|---|
+| `terminalOffDeg` | 6.56, 7.44 | 6.30, 6.31 | 10.04, 10.52 | 9.37–9.43 |
+| `rmsPointingErrorDeg` | 7.99, 9.01 | 7.89, 7.93 | 11.04, 11.42 | 10.50–10.61 |
+| `blendRailPct` | 26.4, 56.3 | 25.0, 26.0 | 94.2, 93.5 | 92.7–94.2 |
+| `turnRateCapActivePct` | 3.53, 6.45 | 3.75, 3.96 | 96.88 | 96.88–96.89 |
+| `aoaPeakDeg` | 7.84, 8.28 | 7.82, 7.84 | 7.76, 7.80 | 7.68–7.76 |
+| `deltaEnergyHeightM` | −922, −896 | −929, −931 | −856, −854 | −851…−859 |
+
+All 8: `reason=card 'fixedwing-sweep' complete`, 36.0 s, 576–578 samples, `thr` flat 0.700, `frameMs`
+flat 16.7 with **0 rows > 25 ms**, entries clean (`snapBackM=0.0` first, 1745–1775 after,
+`ctrlReset=1`). The two **concurrent** arm-A drones agree to **0.008°**; the six arm-B captures span
+0.06°.
+
+One honest caveat: arm-B `terminalOffDeg` is **0.88° below** R24's, against R24's own 0.48° spread —
+but R24's arm A drifts +0.89° across replicates 1→4 while R25 is flat, so this reads equally as R24
+session drift at n=2. **Not attributable either way.**
+
+**Human side — no leak into the marker or the stick.** For each of the 8 drone card-start and 8
+card-stop instants, the max consecutive-row |Δ| of `azErr`/`aimRate`/`outP`/`outR`/`outY` inside a
+±0.5 s window, against the whole-capture p99, plus a permutation test (the real 16 windows vs 400
+random draws):
+
+| metric | worst window | 14 of 16 windows | permutation p |
+|---|---|---|---|
+| `azErr` | 2.0× p99 | ≤ 0.3× | 0.300 |
+| `aimRate` | 2.0× p99 | ≤ 0.4× | 0.145 |
+| `outP` / `outR` / `outY` | 1.8× / 1.4× / 2.6× | ≤ 0.4× | 0.780 / 0.670 / 0.237 |
+
+The one elevated window **starts 0.2 s BEFORE** its drone event and ramps over 8 rows (`aimRate`
+−5→−51) — a mouse sweep, not a one-frame teleport. All four rows in the capture with |ΔazErr| > 25°
+sit 1.8–3.2 s from any drone event; the largest (`azErr` 0→134°, `aimRate` 257 °/s at t≈89.1) is a
+human flick **1.8 s after** d2's start. The anomaly log partitions correctly: 47 `[anomaly]` lines
+name the human capture, exactly **1** names each drone capture, **zero** cross-attribution.
+
+### The one real finding — config, not the marker and not the stick
+
+The drone A/B scheduler writes a **process-global `Cfg` bool**, and it landed in the human's flight:
+`# cfg t=12.400 Control/RelativeTurnLead = False` (17 ms before d1's card start) and `= True` at
+t=48.433 — so the human flew **36 s of a 191 s capture on a different control law**. On the drone
+side the same limitation meant **ABBA did not hold at `DroneCount` 2**: only `d1-02` and `d2-03`
+carry `arm=`/`armKnob=` (d2 inheriting the live global value, truthfully recorded) and the scheduler
+stood itself down loudly for the other six, so R25 is **2×A then 6×B, not ABBA**.
+
+Both are the documented v0.86 `Cfg`-global limitation behaving **as designed** (loud stand-down, not
+silent mislabel), not a defect in the crewed/uncrewed decoupling Gate D tests. Consequence: **any A/B
+experiment must run `DroneCount` = 1** until the swept knob becomes per-aircraft state read through
+the controller. 8 replicates × 36 s serial is under 5 minutes, so this does not block E1–E3.
+
 ---
 
 ## Experiments — only after A–D pass
 
+**A–D have all passed (R22/R23/R24/R25) — these are cleared to fly.**
+
 Replicate counts must be a **multiple of 4** so the ABBA schedule balances on the sum of run
-indices, not just counts.
+indices, not just counts. Run them at **`DroneCount` = 1** (R25: the swept knob is a process-global
+`Cfg` bool, so ABBA cannot hold across concurrent drones — 8 × 36 s serial is under 5 minutes).
 
 ### E1 — the elDn feedback loop (v0.85)
 
