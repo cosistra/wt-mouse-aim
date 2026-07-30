@@ -223,13 +223,19 @@ nothing behaves exactly as it always did.
 
 | field | falls back to | notes |
 |---|---|---|
-| `airframe` | `Drone/DroneAirframe` | the drone harness **spawns** this jsonKey; overrides the whole lane list |
+| `airframe` | `Drone/DroneAirframe` | an Encyclopedia **jsonKey** (`"Multirole1"`) or `""` — the drone harness **spawns** it, overriding the whole lane list. **Never prose**: the human description goes in `note` |
 | `startAlt` / `startSpeed` | `Drone/DroneSpawnAlt` / `DroneSpawnSpeed` | used only when `> 0`; already the placement's target |
 | `repeat` | `Scenario/ScenarioRepeat` | `0` = fall back. The **first selected card** decides for the whole queue |
 | `armToggle` | `Scenario/ScenarioArmToggle` | must name a **bool**; interleaved ABBA. First card decides |
 | `config[]` | — | `"Section/Key"` (bare key ⇒ section `Control`); pinned at card start, **restored** at card end |
 
-Three rules the `scorecard.py --selftest` enforces, because nothing at runtime will:
+Four rules the `scorecard.py --selftest` enforces, because nothing at runtime will:
+
+- **`airframe` holds a jsonKey or nothing.** It was documentation for every card written before v0.90
+  gave it behaviour, so all sixteen shipped cards leave it `""` and describe the airframe in `note`
+  (`"note": "… AIRFRAME: any jet at the fixedwing-v2 entry condition."`). A jsonKey contains no
+  whitespace; one that does is prose, and the mod blanks it at load with a `[card]` warning rather
+  than trying to spawn a sentence.
 
 - **A `config` entry may not pin the knob `armToggle` sweeps.** That flies every replicate on one arm
   while each capture still labels itself `arm=0`/`arm=1` — the A/B reads as "no difference" and

@@ -2,8 +2,8 @@
  "name": "sweep-step",
  "cls": "Plane",
  "step": 0.02,
- "airframe": "any jet at the fixedwing-v2 entry condition",
- "note": "Entry state = FROM AN ESTABLISHED TURN, on the 4.5 deg/s gap-band sweep. The +6 deg step pushes the standing ~3.5 deg lag ACROSS EvolvedAlignHoldDeg=5.0 into the latch; the -6 deg step pulls it back out. That regime asymmetry is the measurement, not a flaw in the pair - read blendRailPct per segment. Generated - see cards/README.md.",
+ "airframe": "",
+ "note": "Entry state = FROM AN ESTABLISHED TURN, on the 4.5 deg/s gap-band sweep. The +6 deg step pushes the standing ~3.5 deg lag ACROSS EvolvedAlignHoldDeg=5.0 into the latch; the -6 deg step pulls it back out. That regime asymmetry is the measurement, not a flaw in the pair - read blendRailPct per segment. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
  "startSpeed": 250,
  "startAlt": 4000,
  "segments": [

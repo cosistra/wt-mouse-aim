@@ -2,8 +2,8 @@
   "name": "oblique-05",
   "cls": "Plane",
   "step": 0.02,
-  "airframe": "any jet at the fixedwing-v2 entry condition",
-  "note": "Rung 0 of the oblique ladder: 0.5 deg steps, onset |azErr| 0.35 deg. Measured on 25 fixedwing-v2 captures, NO bank is commanded at all below 0.5 deg of azErr (targetBank > 0.5 deg on 0.0% of samples), so this card probes the pure fine yaw capture and the v0.65 settle micro-bank - NOT roll/yaw allocation, which does not exist here. Expect both stick channels under the 0.02 analysis deadband: read terminalOffDeg, settleOn and rollCmdMedian, not rollYawOpposedPct.",
+  "airframe": "",
+  "note": "Rung 0 of the oblique ladder: 0.5 deg steps, onset |azErr| 0.35 deg. Measured on 25 fixedwing-v2 captures, NO bank is commanded at all below 0.5 deg of azErr (targetBank > 0.5 deg on 0.0% of samples), so this card probes the pure fine yaw capture and the v0.65 settle micro-bank - NOT roll/yaw allocation, which does not exist here. Expect both stick channels under the 0.02 analysis deadband: read terminalOffDeg, settleOn and rollCmdMedian, not rollYawOpposedPct. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
   "startSpeed": 250,
   "startAlt": 4000,
   "segments": [

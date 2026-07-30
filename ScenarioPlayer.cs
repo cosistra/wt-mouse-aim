@@ -293,6 +293,117 @@ namespace NuclearOptionMouseAim
         }
 
         // =========================================================================================
+        // RUN-BOARD PROGRESS (v0.90). What the plugin's on-screen harness board reads, once per
+        // aircraft per OnGUI — and OnGUI runs TWICE a frame (layout + repaint), so nothing here may
+        // allocate or walk the queue. Everything below is a field read except CardSecondsLeft, which
+        // walks this card's segment durations out of the cache built at each card boundary.
+        //
+        // Read-only by construction: the board is an instrument, and an instrument that can change
+        // what it is measuring is not one.
+        // =========================================================================================
+        public int    AircraftId => _acId;          // TestDrone.DroneIdOf's key: "#3" vs "YOU"
+        public string CardName   => _card != null ? _card.name : "";
+        public int    RunIndex   => _qi + 1;        // the queue IS the replicate expansion (SelectCards)
+        public int    RunCount   => _queue != null ? _queue.Count : 0;
+        public int    SegIndex   => _si + 1;
+        public int    SegCount   => _durs != null ? _durs.Length : 0;
+        public string SegTag     => _card != null && _card.segments != null && _si < _card.segments.Length
+                                  ? _card.segments[_si].tag : "";
+        public int    RecSamples => _rec != null ? _rec.Samples : 0;
+
+        // The airframe's display name, resolved once. Cached rather than read per frame because it is
+        // constant for the life of the aircraft; "" if it cannot be read, which reads as unknown
+        // rather than throwing into OnGUI (same fail-soft contract as the probes).
+        private string _planeName;
+        public string PlaneName
+        {
+            get
+            {
+                if (_planeName != null) return _planeName;
+                _planeName = "";
+                try { if (_ac != null && _ac.definition != null) _planeName = _ac.definition.name; }
+                catch { /* naming is a bonus */ }
+                return _planeName;
+            }
+        }
+
+        // WHICH ARM THIS AIRCRAFT IS FLYING. Derived from the static schedule, so every line of the
+        // board shows the same letter — and that is the truth, not a bug: the swept knob is a
+        // process-global ConfigEntry the law reads globally (see ApplyArm), so N aircraft cannot be on
+        // different arms at the same instant. "-" = nothing is being interleaved.
+        public string ArmLabel => _armEntry == null ? "-" : (_armIdx == 1 ? "B" : "A");
+
+        public float SegSecondsLeft =>
+            _durs != null && _si < _durs.Length ? Mathf.Max(0f, _durs[_si] - _tSeg) : 0f;
+        public float CardSecondsLeft  => _durs != null ? SegsLeft(_durs, _si, _tSeg) : 0f;
+        public float SuiteSecondsLeft => CardSecondsLeft + _laterDur;
+
+        // Cached at each card boundary so the two above cost no allocation and no walk of the queue.
+        // _durs is the current card's segment durations (the pure arithmetic below takes plain floats,
+        // which is what makes it checkable outside Unity); _laterDur is every queue entry after _qi.
+        private float[] _durs;
+        private float   _laterDur;
+
+        private void IndexCard()
+        {
+            var segs = _card != null ? _card.segments : null;
+            if (segs == null) { _durs = null; _laterDur = 0f; return; }
+            _durs = new float[segs.Length];
+            for (int i = 0; i < segs.Length; i++) _durs[i] = segs[i].dur;
+            _laterDur = 0f;
+            if (_queue != null) for (int i = _qi + 1; i < _queue.Count; i++) _laterDur += _queue[i].Duration;
+        }
+
+        // Every aircraft currently flying a card, into a list the CALLER owns and reuses — a returned
+        // IEnumerable would allocate an iterator on a path that runs twice a frame. Keeps _byAc private.
+        //
+        // `Playing`, not `Active`: a card being RECORDED by hand has no queue, no segment schedule and
+        // therefore no ETA, so it has nothing to put in a board row. It is already on screen — the
+        // top-centre card indicator renders HudLine, which handles the recording case.
+        internal static void CollectRunning(List<ScenarioPlayer> into)
+        {
+            into.Clear();
+            foreach (var kv in _byAc)
+                if (kv.Value._card != null) into.Add(kv.Value);
+        }
+
+        // -----------------------------------------------------------------------------------------
+        // BOARD MATH. The two non-trivial pieces of the run board, kept PURE (plain numbers, no Unity
+        // and no game types) for one reason: `debugtests/test-board-math.py` extracts the region
+        // between the markers below, compiles it with the .NET SDK and runs it against its own case
+        // table. So the check exercises THIS code rather than a Python copy of it — which is the only
+        // version of that check worth having. Run it after touching either function:
+        //     python debugtests/test-board-math.py
+        // Keep both inside the markers, and keep them free of anything the SDK alone cannot compile.
+        // --- BOARD-MATH BEGIN ---
+        // Seconds as m:ss above a minute, "0.0s" below — an ETA of "252.4s" is not a number anyone
+        // plans a coffee break around, and a segment countdown of "0:12" hides the tenths that say
+        // whether it is about to change. Negative and NaN both clamp to zero: the board runs while a
+        // card is mid-boundary, and "NaNs left" would look like a mod fault rather than a rounding one.
+        internal static string Clock(float sec)
+        {
+            if (!(sec > 0f)) sec = 0f;                  // written as a NOT so NaN lands here too
+            // 59.95, not 60: the branch below rounds to 0.1 s, so anything that would print as
+            // "60.0s" belongs on the m:ss side instead.
+            if (sec < 59.95f) return $"{sec:0.0}s";
+            int m = (int)(sec / 60f);
+            return $"{m}:{(int)(sec - m * 60f):00}";
+        }
+
+        // Seconds left in a card: the segments from `si` on, less the time already spent in `si`.
+        // Summing FORWARD rather than (Duration - elapsed) keeps it correct when `si` has run off the
+        // end of the array, which it legitimately does for the tick between the last segment expiring
+        // and NextCard being called.
+        internal static float SegsLeft(float[] durs, int si, float tSeg)
+        {
+            float left = 0f;
+            for (int i = si > 0 ? si : 0; i < durs.Length; i++) left += durs[i];
+            left -= tSeg;
+            return left > 0f ? left : 0f;
+        }
+        // --- BOARD-MATH END ---
+
+        // =========================================================================================
         // SELECTION (plan §5.2) — no custom UI. One ConfigEntry<bool> per card, so the F1
         // ConfigurationManager panel IS the enable/disable checklist. Built-ins default ON (they are
         // the designed set); file cards default OFF (a folder of ad-hoc captures must not silently
@@ -389,6 +500,30 @@ namespace NuclearOptionMouseAim
             }
             if (c.segments[0].tag != "arm")
                 return "first segment must be tagged 'arm' (a few seconds of steady demand, excluded from scoring)";
+
+            // AIRFRAME MUST BE A jsonKey, NOT PROSE — healed, never fatal. For sixteen shipped cards
+            // and every hand-written one before v0.90 this field was DOCUMENTATION ("any jet at the
+            // fixedwing-v2 entry condition"), because nothing read it; v0.90 gave it behaviour and
+            // pointed the drone spawn at it. An Encyclopedia jsonKey never contains whitespace, so
+            // whitespace is the one unambiguous marker of the old meaning — blank it and the launch
+            // falls back to Cfg.DroneAirframe, i.e. exactly the pre-v0.90 behaviour. Skipping the card
+            // instead would turn a stale comment into a night of drones that never launch, and passing
+            // it through would refuse the spawn with a prose sentence as the jsonKey. The human
+            // description belongs in `note`, which the C# ignores by construction (Card has no such
+            // field, and JsonUtility drops what it can't map).
+            if (!string.IsNullOrEmpty(c.airframe))
+            {
+                bool prose = false;
+                foreach (char ch in c.airframe) if (char.IsWhiteSpace(ch)) { prose = true; break; }
+                if (prose)
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{c.name}': airframe '{c.airframe}' contains whitespace, so it is not a spawnable "
+                        + "jsonKey — ignoring it (the drone harness will use Drone/DroneAirframe). Put the human "
+                        + "description in 'note' instead.");
+                    c.airframe = "";
+                }
+            }
             return null;
         }
 
@@ -437,7 +572,11 @@ namespace NuclearOptionMouseAim
         // one is set, else every ticked checkbox. Split out of SelectCards (v0.90) because the drone
         // preflight has to answer "what would a run fly?" BEFORE the aircraft exists — it is choosing
         // the airframe to spawn — and the class filter and the replicate expansion below both need one.
-        private static List<Card> SelectRaw()
+        // `quiet` exists for ONE caller: the run board, which previews this on a GUI poll rather than
+        // on an operator action. A misspelled ScenarioCardSet is a real warning when a key press asks
+        // the question and log spam when a repaint does — and an unattended batch's log is the only
+        // artifact anyone reads afterwards.
+        private static List<Card> SelectRaw(bool quiet = false)
         {
             var sel = new List<Card>();
             string ov = Cfg.ScenarioCardSet.Value;
@@ -448,7 +587,10 @@ namespace NuclearOptionMouseAim
                     string n = raw.Trim();
                     if (n.Length == 0) continue;
                     var c = ByName(n);
-                    if (c == null) WTMouseAimPlugin.Log.LogWarning($"[card] ScenarioCardSet names '{n}', which is not a known card.");
+                    if (c == null)
+                    {
+                        if (!quiet) WTMouseAimPlugin.Log.LogWarning($"[card] ScenarioCardSet names '{n}', which is not a known card.");
+                    }
                     else sel.Add(c);
                 }
             }
@@ -480,18 +622,22 @@ namespace NuclearOptionMouseAim
             public float  StartAlt;     // <= 0 = doesn't say
             public float  StartSpeed;   // <= 0 = doesn't say
             public float  Duration;     // seconds, one replicate of the first card
+            // Every selected card summed, i.e. ONE replicate of the whole queue. Duration alone is the
+            // first card's, so a multi-card selection times x Repeat off it under-reports the batch by
+            // the rest of the queue — which on the run board is an ETA the operator plans around.
+            public float  AllDuration;
             public int    Repeat;
             public string RepeatSrc;    // human-readable "who decided", for the launch log
             public string ArmKnob;      // "" = no A/B schedule
             public string ArmSrc;
         }
 
-        internal static Preflight Preview()
+        internal static Preflight Preview(bool quiet = false)
         {
             var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "" };
             try
             {
-                var sel = SelectRaw();
+                var sel = SelectRaw(quiet);
                 p.Cards = sel.Count;
                 if (sel.Count == 0) return p;
                 var c = sel[0];
@@ -500,6 +646,7 @@ namespace NuclearOptionMouseAim
                 p.StartAlt   = c.startAlt;
                 p.StartSpeed = c.startSpeed;
                 p.Duration   = c.Duration;
+                foreach (var x in sel) p.AllDuration += x.Duration;
                 p.Repeat     = ResolveRepeat(c, out string rsrc); p.RepeatSrc = rsrc;
                 // Report the NAME only, resolved through the shared grammar but without touching the
                 // config: SetUpArmSchedule does the real lookup a moment later and owns the warnings.
@@ -923,6 +1070,7 @@ namespace NuclearOptionMouseAim
                 + $"replicates from {repSrc}.");
             _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
+            IndexCard();             // run-board caches; must follow every write to _card/_qi/_queue
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
             _rec.EntryNote = "";     // an UNGATED card must not inherit the last one's note
 
@@ -1224,6 +1372,7 @@ namespace NuclearOptionMouseAim
             }
             _anchorSet = false;
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+            IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
         }
 
         // =========================================================================================
@@ -1580,6 +1729,7 @@ namespace NuclearOptionMouseAim
             // No separate settle gap: the next card opens with its own `arm` segment, which IS the
             // settle (steady demand on the heading the previous card left the aircraft on).
             _card = _queue[_qi]; _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+            IndexCard();
             // A card that declares no entry condition (startSpeed 0 — the hover card) never reaches
             // PlaceOnCondition, so without this its capture would inherit the PREVIOUS card's reset
             // provenance and claim a placement that never happened.

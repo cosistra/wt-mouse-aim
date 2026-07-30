@@ -2,8 +2,8 @@
   "name": "oblique-12",
   "cls": "Plane",
   "step": 0.02,
-  "airframe": "any jet at the fixedwing-v2 entry condition",
-  "note": "ONE test per card: 12 deg oblique steps, ABOVE FineAngle=6 and into the roll-to-align blend (full at AlignAngle=25). Same diamond geometry as oblique-2/-6, radius 8.49 deg. The DR/DL steps end below the horizon - the v0.85 elDn regime, reached obliquely.",
+  "airframe": "",
+  "note": "ONE test per card: 12 deg oblique steps, ABOVE FineAngle=6 and into the roll-to-align blend (full at AlignAngle=25). Same diamond geometry as oblique-2/-6, radius 8.49 deg. The DR/DL steps end below the horizon - the v0.85 elDn regime, reached obliquely. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
   "startSpeed": 250,
   "startAlt": 4000,
   "segments": [

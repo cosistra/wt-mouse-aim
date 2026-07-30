@@ -36,7 +36,17 @@ Machine-specific paths are written as placeholders:
 - **Mod code is split one file per concern** (all at repo root, single namespace
   `NuclearOptionMouseAim`). The `.csproj` (`Microsoft.NET.Sdk`) globs every `*.cs` automatically —
   no project edits when adding/splitting a file. Files:
-  - `WTMouseAimPlugin.cs` — `WTMouseAimPlugin` (Awake/OnGUI overlay). Holds `PluginVersion`, the version SoT.
+  - `WTMouseAimPlugin.cs` — `WTMouseAimPlugin` (Awake/OnGUI overlay + the `FixedUpdate` that drives
+    `TestDrone.FixedTick`). Holds `PluginVersion`, the version SoT. **v0.90 added `DrawRunBoard`**, the
+    harness run board (top-left): drawn in `OnGUI`'s **pre-gate** band — before `ShowOverlay`/`Enabled`
+    and before the local-aircraft resolve — because the operator watching a drone batch is usually in
+    no aircraft at all, which is exactly when every gate below has already returned. Gated on
+    `Cfg.DroneEnabled` alone (one bool read when the harness is idle). Two states, FLYING and
+    PREFLIGHT; every preflight number comes from `ScenarioPlayer.Preview()` and
+    `TestDrone.AirframeOf/AltOf/SpeedOf` — the same pair the launch itself uses, so the board cannot
+    promise something the spawn will not do — and is polled at 2 Hz, since `OnGUI` runs at least twice
+    a frame. The board is read-only by construction: an instrument that can change what it measures
+    is not one.
   - `Cfg.cs` — `Cfg` (all config binds) + `ConfigurationManagerAttributes`.
   - `AimRig.cs` — `AimRig` (world-locked marker + Win32 raw mouse) + `Guards`.
   - `ChaseController.cs` — `ChaseController`. **An instance class, ONE PER AIRCRAFT (v0.82)** —
@@ -158,6 +168,15 @@ Machine-specific paths are written as placeholders:
     diffs. As a column it is per-row evidence, so a batch can drop or covary out the rows that were
     actually stalled. **The header/row lockstep is now checked**: `check-architecture.py` counts both
     and fails on a mismatch (and on CLAUDE.md's documented count drifting from the code).
+    v0.90 added no column either (still **64**): it added the `# override` **header line**
+    (`OverrideNote`, set by `ScenarioPlayer` from the card's `config` list just before `Toggle()`,
+    written directly under `# card` because it only ever exists for one) listing the `Section/Key=value`
+    knobs THAT CARD pinned for itself. Not a column on purpose: the value is constant for the whole
+    capture by construction (pins go on before the recorder opens and come off after it closes), and
+    it is not redundant with `# config` — that shows the live *values*, and what it cannot show is that
+    the **card** chose them rather than the operator, which is what separates "this run was configured
+    by its card" from "someone left a knob set". Sanitised on assignment like `EntryNote`; absent
+    entirely for a hand-flown capture or a card that pins nothing.
   - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). **An instance class, ONE PER
     AIRCRAFT (v0.86)** — `For(aircraft)` / `Forget` / `Sweep` / `Player`, same registry as
     `ChaseController`. All *playback* state is per-instance (queue, segment index, segment clock,
@@ -229,7 +248,8 @@ Machine-specific paths are written as placeholders:
     `headingRateFilt`/`leadDeg` alone, making the symptom look fixed while hiding the cause. Harmless
     to results so far — deterministic to within 0.02 across replicates, and it decays inside the 6 s
     `arm` before the scored segment starts.
-    `Cfg.ScenarioArmToggle` names a bool knob the runner alternates **ABBA** by queue index
+    `Cfg.ScenarioArmToggle` — or, since v0.90, the first selected card's own `armToggle`, which wins
+    over it — names a bool knob the runner alternates **ABBA** by queue index
     (`((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns drift into a fake effect —
     restoring it at suite end, and each capture self-identifies via `arm=`/`armKnob=` on its
     `# config` line (`arm=` parses out of `scorecard.py`'s existing `cfg_params()` regex unchanged).
@@ -246,6 +266,47 @@ Machine-specific paths are written as placeholders:
     a launch stagger. Concurrent A/B needs the swept knob to become per-aircraft state read through
     the controller instead of through `Cfg` — a change to how the law reads config, not to this
     scheduler.
+    **v0.90 — A CARD IS THE WHOLE TEST, not just the stimulus.** `Card` gained `repeat`, `armToggle`
+    and a generic `config` list of `{key, value}` overrides; `Preview()` reports what a run *would*
+    fly. Every one of them falls back to the matching `Cfg` knob when absent, so a card that declares
+    nothing behaves exactly as it did in v0.89 — which is what keeps the shipped grid and every ad-hoc
+    recording valid. What to know before touching this:
+    - **One grammar, one parser.** `SplitSpec` (`"Key"` or `"Section/Key"`, bare keys ⇒ `Control`,
+      both halves non-empty) is shared by `ScenarioArmToggle`, a card's `armToggle` and every
+      `config[].key`. `ResolveEntry` finds an entry of ANY type (a card can pin a float or a KeyCode);
+      `ResolveArm` additionally insists on `ConfigEntry<bool>` and says so *distinctly* from
+      "not found", because until v0.90 pointing the sweep at a real-but-numeric knob read as a typo.
+      Values are parsed by BepInEx's own `TomlTypeConverter` — one call covers bool/int/float/string/
+      KeyCode; do not hand-roll a second definition of what a config value looks like.
+    - **Order in `Tick` is load-bearing twice over**: `ApplyOverrides` → `ApplyArm` → `StartCard`
+      (which is what calls `_rec.Toggle()`), and `RestoreOverrides` **after** `_rec.Stop` in both
+      `Finish` and `NextCard`. Arm-after-overrides makes the swept arm win regardless of the refusal
+      below; both-before-the-recorder is because `ConfigFile.SettingChanged` drives
+      `ManeuverRecorder.NoteConfigChange`, which stamps a `# cfg` line into every OPEN capture — a
+      card's own setup landing in its own CSV would read as the law changing mid-run, which is exactly
+      what those lines exist to flag. `_ovEntries != null` is the re-entry guard (the placement
+      re-enters this path a tick later).
+    - **Pinning the knob the A/B schedule sweeps is REFUSED, loudly**, and the rest of the list still
+      applies. Pinning it flies every replicate on one arm while each capture still labels itself
+      `arm=0`/`arm=1`, so the A/B reads as "no difference" and nothing in the artifacts says why.
+      Everything else is fail-soft: one named warning per bad override, then fly.
+    - **`Validate` heals a prose `airframe`.** The field was documentation until v0.90 gave it
+      behaviour (the drone harness now SPAWNS it), so any `airframe` containing whitespace is blanked
+      with a named warning and the launch falls back to `Cfg.DroneAirframe` — the pre-v0.90 behaviour.
+      Human description goes in `note`, which the C# ignores by construction.
+    - **`Preview()`/`Preflight` answer "what would fly?" with NO AIRCRAFT IN HAND**, because its
+      caller (`TestDrone`) is choosing what metal to spawn. Hence no `cls` filter (that is a
+      per-aircraft, post-spawn test — reading it as a spawn instruction would let `"Plane"` mean an
+      airframe) and no replicate expansion. It **never throws**: it runs on a hotkey path before
+      anything is spawned. `Preview(quiet: true)` exists for the run board's GUI poll — a repaint must
+      not spam the log the way a keypress may.
+    - **Run-board accessors** (`CardName`/`RunIndex`/`SegTag`/`ArmLabel`/`SegSecondsLeft`/… and the
+      static `CollectRunning`) are field reads by design: `OnGUI` runs twice a frame, so nothing there
+      may allocate or walk the queue. `IndexCard()` caches the segment durations and must follow every
+      write to `_card`/`_qi`/`_queue`. The two non-trivial pieces of arithmetic live between the
+      `// --- BOARD-MATH BEGIN/END ---` markers, in plain floats with no Unity types, because
+      `debugtests/test-board-math.py` extracts that region verbatim and compiles it — keep them inside
+      the markers and keep them SDK-compilable.
   - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81 harness, **v0.87 phase 2**).
     Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger. `TestDrone` is the manager (live list + a dictionary keyed by
@@ -286,10 +347,46 @@ Machine-specific paths are written as placeholders:
     key that cancels the launch (the next lane fails identically), with a list only that lane is
     skipped. Each capture self-identifies — the `.airframe.json` sidecar's `jsonKey` is what
     `compare-runs.py` groups on and refuses to pool across, and the CSV filename carries it too.
+    (v0.90: a card that names an `airframe` overrides **the whole list**, not one lane — the card is
+    one test, and a batch flying it on a mix of airframes is not replicates of anything. A
+    heterogeneous batch is still available: leave `airframe` out of the card and use the `Cfg` list.)
     **Loadout is still `null`** at the `Spawn` call: the game's parameter is a `Loadout` object, not a
     name. The lane index is the hook when that API is known; the sidecar already records the resulting
     stations/masses/drag per capture, so nothing on the analysis side changes.
     Also ticks each drone's `ScenarioPlayer` inside `OnPilotStep`, immediately before `Drone.Fly`.
+    **v0.90 — the batch cleans up after itself and the CARD picks the metal.** Four things:
+    - **Auto-despawn.** `PruneDead` despawns any drone that has had no card running for
+      `IdleDespawnSec` (5 s, a `const`; the despawn key covers "now"). ONE rule, which is why it covers
+      suite-complete, aborted, refused *and* never-started — before this the only automatic despawn was
+      the exception path, so a finished drone fell back to the level-hold and circled forever. The
+      grace window is sized by the gap between `NextCard` closing one recorder and `StartCard` opening
+      the next; anything shorter despawns a drone between its own replicates. Not tidiness: a live
+      drone keeps a full complex-physics aero job and all three per-aircraft registries alive — the
+      same frame budget the stagger protects and `frameMs` measures. `Despawn` now takes a reason and
+      logs it.
+    - **A shot-down drone is caught in `OnPilotStep`, not `PruneDead`.** `PruneDead`'s predicate is
+      `Aircraft == null || Aircraft.disabled`, and the game **never self-disables an `Aircraft` on
+      damage**: `Unit.disabled` is written only by `ServerDisableUnit`/`ReturnToInventory`/`OnDestroy`,
+      and `WaitRemoveAircraft` fires *from* the disabled hook — so a shot-down aircraft keeps a live
+      GameObject with `disabled == false` indefinitely (measured in R25: it stayed registered until the
+      mission quit). `OnPilotStep` holds the `Pilot` the damage lands on, so `p.dead || p.ejected` now
+      despawns with the reason instead of early-returning — and that check must stay **ahead of every
+      write below**, since the patched method itself early-returns on both. An airframe destroyed
+      without killing the pilot needs no third case: the card's altitude floor aborts it on the way
+      down and the idle rule then despawns.
+    - **Lanes fall back to `Camera.main`, not `Vector3.zero`.** With no local aircraft (ejected, dead,
+      spectating — what an operator watching a batch usually is) the origin was not merely invisible,
+      it was the SAME point on every press, so a second launch stacked lane *k* on the first launch's
+      lane *k* while each drone's card anchor is its own spawn point. `_slot` also starts at
+      `_live.Count`, so "press it twice" is safe.
+    - **The spawn reads the card first.** `RequestLaunch` keeps one `ScenarioPlayer.Preflight`
+      (`_plan`), resolved ONCE per batch — per lane would let a checkbox ticked mid-stagger change the
+      airframe half way through — and `AirframeOf`/`AltOf`/`SpeedOf` take a `Preflight` as an argument
+      so the run board can ask the same three questions of a fresh preview and get, by construction,
+      what the launch will use. The launch log names **which source won for each value**; that line is
+      the operator's only confirmation, since "4000 m" reads identically whether the card asked for it
+      or a knob was left there. Empty / `<= 0` means "the card doesn't say" and the `Drone*` knob
+      stands, which is what keeps a hand-configured launch working.
   - `CameraPatches.cs` — `CockpitCameraPatch` + `CameraOrbitPatch` + `CameraSwitchStatePatch`.
 - Project: `NuclearOption-MouseAim.csproj`. Target `netstandard2.1`, GUID `com.no.wtmouseaim`.
 - **`cards/`** — the shipped test-card **grid** (JSON, no C#): the oblique small-step set, the
@@ -300,6 +397,14 @@ Machine-specific paths are written as placeholders:
   are easy to break — **one card = one test** (the reset is per CARD, not per segment) and **tags
   must be unique per card** (`compare-runs.py` keys segments by tag alone). Cards are copied into
   `<game>` by hand; the build never touches them.
+  **v0.90 — a card carries its own run configuration** (`repeat`, `armToggle`, a `config` list of
+  pinned knobs, and an `airframe`/`startAlt`/`startSpeed` the drone spawn now obeys), so the operator
+  ticks one checkbox instead of hand-matching five globals. `cards/README.md` has the field table and
+  the four rules `scorecard.py --selftest` enforces offline — nothing at runtime will, since
+  `JsonUtility` ignores what it cannot parse and the apply path is fail-soft by design. **`airframe`
+  is a jsonKey or `""`, never prose**: all 16 shipped cards were migrated to put the description in
+  `note` (the mod blanks a whitespace-bearing `airframe` at load with a warning, so an old card
+  degrades rather than failing).
 
 ## Paths (all under `<game>`)
 - Build reference DLLs: `<game>\NuclearOption_Data\Managed\` and `<game>\BepInEx\core\` — the latter
@@ -343,9 +448,19 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   `# cfg` change / `[anomaly]` from the sibling `mouseaim-anomalies-<session>.log`). **To read a
   recording, run `--digest` first and only open raw rows for a segment it flags** — feeding raw CSV
   to an LLM is expensive and mostly steady-state redundancy. `--selftest` runs the in-memory asserts.
-  Run this on user-reported recordings before theorizing.
+  Run this on user-reported recordings before theorizing. Past **10** captures `--digest` collapses
+  one level further, to one line per file; `--verbose` keeps the full timelines.
+- **Batch-sized output (v0.90).** `scorecard.py`, `flightscore.py` and `analyze-wobble.py --digest`
+  are all O(files) — at the 100-450 captures an unattended batch now writes, that is thousands of
+  lines. All three suppress the per-file detail past **10** files and print only the roll-up /
+  aggregate, with `--verbose` to force the old behaviour; at ≤10 files nothing changed. Read a big
+  batch through `compare-runs.py --summary` (one line per card+segment) and open the full table only
+  for what it points at.
 - **Scoring a test-card run.** `python debugtests/scorecard.py <rec.csv>` segments by `segTag` and
-  emits per-segment metrics (`--json`, `--selftest`). **An unrecognised tag prints a WARNING** —
+  emits per-segment metrics (`--json`, `--selftest`). A segment sitting on a limit for ≥90% of its
+  samples (bank clamp / turn-rate cap / blend rail / past the AoA ceiling) is flagged **RAILED** in
+  `warnings` — its metrics cannot respond to a gain change, so read them as *no signal*, not as a
+  score. **An unrecognised tag prints a WARNING** —
   never ignore it: the tag vocabulary lives in `ScenarioPlayer.cs` **and in `cards/*.json`**, while the
   tag→metric table lives in `scorecard.py`, with no compile-time link between them and no coverage
   from `check-architecture.py`. That pair silently drifted once already (v0.71: 19 of 21 segments
@@ -354,18 +469,42 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   each tag resolves — so for a *disk* card the drift check is automatic; a built-in still isn't.
 - **Comparing runs.** `python debugtests/compare-runs.py <rec1.csv> <rec2.csv> ...` reports
   per-segment spread across N runs — the noise floor, and the A/B of a law change. It **groups by
-  airframe and refuses to pool**, and excludes truncated segments rather than blending them; heed
-  both warnings rather than working around them.
-- **Uncrewed drones (v0.81; flying the real law since v0.87).** Tick `Drone/DroneEnabled` in F1, tick
-  the card(s) you want in `Scenario Cards`, then the spawn key launches `DroneCount` drones
-  `DroneStaggerSec` apart — **each starts that card itself and flies it with the mod's control law**,
-  writing its own CSV (`d<N>-<airframe>` in the filename). Everything it does is one grep: `[drone]` in
-  `LogOutput.log` covers spawn/despawn, every refusal (no server, unknown `DroneAirframe`, no
-  `Spawner`, the instructor declining to engage), a drone the game removed under us, and
-  `[drone] frame hitch` for any rendered frame over 50 ms. A drone's own engage line is tagged
-  `[drone]` too; `[card]` lines carry the card/segment progress for every aircraft flying one. **A refusal is always a log line, never a silent no-op** — the harness runs unattended, so a
-  key that appears to do nothing has to be explainable after the fact. `TestDrone.FrameDt` (the
-  fixed-step `Time.unscaledDeltaTime` sample) is the signal the stagger exists to defend against.
+  (airframe, card, arm) and refuses to pool**, and excludes truncated segments rather than blending
+  them; heed both warnings rather than working around them. The card is in the key because segment
+  tags are unique per card **by convention only** and that already leaks (`hover`/`bobup` are shared
+  by the rotor disk cards and the built-in `rotorcraft-v2`). **`--summary`** prints one line per
+  (card, segment) — n, duration, worst rail, and three headline metrics as `mean +- stdev%` — which
+  is the only readable form at ~40 card/tag pairs; scorecard's per-run warnings (incl. RAILED) are
+  carried through, deduped with a count.
+- **Uncrewed drones (v0.81; flying the real law since v0.87; self-configuring since v0.90).** The
+  whole procedure is now: tick `Drone/DroneEnabled` in F1, tick **one** card in `Scenario Cards`,
+  press the spawn key. Since v0.90 the card supplies the airframe, altitude, speed, replicate count
+  and A/B knob — **do not hand-match the `Drone*`/`Scenario*` globals to it**; they are the fallback
+  for a card that declares nothing, and hand-matching was the mismatch this removes (a mismatch does
+  not refuse, it writes a capture that scores fine and answers a different question). `DroneCount`
+  drones launch `DroneStaggerSec` apart, each starts that card itself, flies it with the mod's control
+  law, writes its own CSV (`d<N>-<airframe>` in the filename) and **despawns itself ~5 s after its
+  card ends** — including if it was aborted, refused or never started. Everything it does is one grep:
+  `[drone]` in `LogOutput.log` covers spawn/despawn (with the reason), every refusal (no server,
+  unknown airframe key, no `Spawner`, the instructor declining to engage), a pilot killed or ejected,
+  a drone the game removed under us, and `[drone] frame hitch` for any rendered frame over 50 ms. The
+  launch line also names, item by item, whether the airframe/alt/speed came from the card or from F1 —
+  read it, it is the only confirmation that the card drove the spawn. `[card]` lines carry the
+  card/segment progress for every aircraft flying one. **A refusal is always a log line, never a
+  silent no-op** — the harness runs unattended, so a key that appears to do nothing has to be
+  explainable after the fact. `TestDrone.FrameDt` (the fixed-step `Time.unscaledDeltaTime` sample) is
+  the signal the stagger exists to defend against.
+- **Harness run board (v0.90).** With `DroneEnabled` on, a panel top-left shows either **PREFLIGHT**
+  (what the spawn key *would* fly: card, replicate count, per-drone total time, and the airframe /
+  altitude / speed each marked `[from card]` or `[from F1]`, plus the A/B knob — and an amber
+  **NO CARD SELECTED** line, which is the commonest setup mistake and used to surface only as a log
+  warning *after* N drones were airborne measuring nothing) or, once anything is flying, one line per
+  aircraft with card, run *x*/*y*, arm, segment and tag, seconds left in the segment and in the card,
+  and the recorder's sample count. It draws through `ShowOverlay` being off and through the operator
+  having no aircraft, because that is the state you watch a batch from. Its two pieces of arithmetic
+  live between the `BOARD-MATH` markers in `ScenarioPlayer.cs` and are checked by
+  `python debugtests/test-board-math.py`, which extracts that region **verbatim**, compiles it with
+  the .NET SDK and runs 23 cases — so it tests the shipped code, not a Python copy that would drift.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
   (hidden by default). Use it to watch the control law react in real time while flying.
 - **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -19,7 +20,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.89.0";
+        public const string PluginVersion = "0.90.0";
 
         internal static ManualLogSource Log;
 
@@ -224,6 +225,8 @@ namespace NuclearOptionMouseAim
                 GUI.color = cc;
             }
 
+            DrawRunBoard();
+
             if (!Cfg.ShowOverlay.Value || !Cfg.Enabled.Value)
                 return;
             if (!AimRig.TryGetContext(out var ac, out var cam))
@@ -352,6 +355,147 @@ namespace NuclearOptionMouseAim
                 GUI.color = pc;
             }
         }
+
+        // =============================================================================================
+        // HARNESS RUN BOARD (v0.90). An unattended drone batch is 20+ minutes of wall clock whose only
+        // progress signal was `[card]` lines in LogOutput.log — so "is it still going?" and "how long
+        // left?" meant alt-tabbing to a text file. This is that answer on screen, plus the PREFLIGHT of
+        // what WILL fly, which is the more valuable half: every setup mistake this harness can make
+        // (no card ticked, the Drone knobs disagreeing with the card) is invisible until after the
+        // launch, and then costs the whole batch.
+        //
+        // DRAWN PRE-GATE, i.e. before ShowOverlay/Enabled and before the local-aircraft resolve. That
+        // is not laziness about where to put it: the operator watching a batch is usually in no
+        // aircraft at all (ejected, spectating, sitting in the map screen), which is exactly when
+        // every gate below would have returned already.
+        //
+        // Top-LEFT, below y=110: the other pre-gate items are top-CENTRE, and 110 clears the
+        // post-gate debug ladder (rows at y=12..84, 22 high) so the two never overlap when the
+        // operator is flying with ShowDebugHud on.
+        private const float BoardX = 12f, BoardTop = 110f, BoardW = 780f, BoardRow = 18f;
+        // DroneCount goes to 16 and a 17-line panel is unreadable; the tail collapses to a count.
+        private const int   BoardMaxRows = 8;
+
+        // Reused, not allocated per call: OnGUI runs at least twice a frame (layout + repaint).
+        private static readonly List<ScenarioPlayer> _board = new List<ScenarioPlayer>();
+
+        private static void DrawRunBoard()
+        {
+            // The whole cost of this feature when the harness is not in use: one bool read. Deliberately
+            // NOT gated on ShowDebugHud as well — the board is the harness's only progress instrument,
+            // and an operator who ticked DroneEnabled has already said he is running a batch.
+            if (!Cfg.DroneEnabled.Value) return;
+
+            ScenarioPlayer.CollectRunning(_board);
+            if (_board.Count > 0) DrawFlying();
+            else                  DrawPreflight();
+        }
+
+        private static readonly Color BoardGreen = new Color(0.5f, 1f, 0.5f, 0.95f);   // running, matches the card indicator
+        private static readonly Color BoardAmber = new Color(1f, 0.75f, 0.2f, 0.95f);  // warning / idle, matches Notice
+        private static readonly Color BoardDim   = new Color(0.72f, 0.72f, 0.72f, 0.9f);
+
+        // Dim backing panel, sized to the row count — IMGUI text over a bright sky is unreadable
+        // otherwise, and this one is read at a glance from across the room.
+        private static void BoardPanel(int rows)
+        {
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.45f);
+            GUI.DrawTexture(new Rect(BoardX - 6f, BoardTop - 4f, BoardW + 12f, rows * BoardRow + 8f), _px);
+            GUI.color = prev;
+        }
+
+        private static void BoardLine(int row, Color col, string text)
+        {
+            var prev = GUI.color;
+            GUI.color = col;
+            GUI.Label(new Rect(BoardX, BoardTop + row * BoardRow, BoardW, BoardRow + 4f), text);
+            GUI.color = prev;
+        }
+
+        private static void DrawFlying()
+        {
+            int n = _board.Count, shown = Mathf.Min(n, BoardMaxRows);
+            BoardPanel(1 + shown + (n > shown ? 1 : 0));
+
+            // Header aggregates over the MAX: the batch is finished when the slowest aircraft is, and
+            // the drones are launched on a stagger, so the leader's ETA would read as "nearly done"
+            // with a full card still to fly on the last lane.
+            int runI = 0, runN = 0; float left = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                var s = _board[i];
+                if (s.RunIndex > runI) runI = s.RunIndex;
+                if (s.RunCount > runN) runN = s.RunCount;
+                if (s.SuiteSecondsLeft > left) left = s.SuiteSecondsLeft;
+            }
+            BoardLine(0, BoardGreen,
+                $"HARNESS  {n} flying   run {runI}/{runN}   {ScenarioPlayer.Clock(left)} left");
+
+            for (int i = 0; i < shown; i++)
+            {
+                var s = _board[i];
+                // The local player's own aircraft can be flying a card too (he presses the run key
+                // while the drones fly theirs); DroneIdOf returns 0 for anything not in the harness.
+                int d = TestDrone.DroneIdOf(s.AircraftId);
+                BoardLine(1 + i, BoardGreen,
+                    $" {(d > 0 ? "#" + d : "YOU")} {s.PlaneName}   {s.CardName}   "
+                  + $"run {s.RunIndex}/{s.RunCount}  arm {s.ArmLabel}   "
+                  + $"seg {s.SegIndex}/{s.SegCount} '{s.SegTag}'  {ScenarioPlayer.Clock(s.SegSecondsLeft)}   "
+                  + $"card {ScenarioPlayer.Clock(s.CardSecondsLeft)}   {s.RecSamples} samples");
+            }
+            if (n > shown) BoardLine(1 + shown, BoardDim, $" ...and {n - shown} more");
+        }
+
+        // WHAT WILL FLY, before the key is pressed. Every value comes from ScenarioPlayer.Preview()
+        // and TestDrone's own three resolvers — the same pair the launch itself uses — so the board
+        // physically cannot promise something different from what spawns.
+        // Polled, not recomputed per draw: Preview() walks the card library and builds its "who
+        // decided" strings, and OnGUI runs at least twice a frame for a panel whose inputs only
+        // change when the operator ticks a checkbox. Half a second is under human reaction time.
+        private static float _preAt = -999f;
+        private static ScenarioPlayer.Preflight _pre;
+
+        private static void DrawPreflight()
+        {
+            if (Time.unscaledTime - _preAt > 0.5f)
+            {
+                _preAt = Time.unscaledTime;
+                _pre = ScenarioPlayer.Preview(true);   // quiet: this is a repaint, not an operator action
+            }
+            var p = _pre;
+            string head = $"HARNESS  ready   [{Cfg.DroneSpawnKey.Value}] to launch {Cfg.DroneCount.Value}";
+
+            if (p.Cards == 0)
+            {
+                // THE #1 SETUP MISTAKE, and until now it only surfaced as a log warning AFTER the
+                // launch — by which point N drones are airborne flying a level-hold that measures
+                // nothing. Amber, and it names the fix.
+                BoardPanel(2);
+                BoardLine(0, BoardAmber, head);
+                BoardLine(1, BoardAmber, "  NO CARD SELECTED — the drones would fly the level-hold and measure nothing. "
+                                       + "Tick one in F1 > 'Scenario Cards'.");
+                return;
+            }
+
+            BoardPanel(4);
+            BoardLine(0, BoardGreen, head);
+            BoardLine(1, BoardDim,
+                $"  card  {p.Name}{(p.Cards > 1 ? $" (+{p.Cards - 1} more)" : "")}  x{p.Repeat} runs   "
+              + $"{p.AllDuration:0}s each   {ScenarioPlayer.Clock(p.AllDuration * p.Repeat)} per drone");
+            // PER VALUE, not one marker for the line: airframe, altitude and speed fall back
+            // independently, and "the card is driving this run" is only true of the ones marked so.
+            // This distinction is the whole reason the panel is worth drawing before a launch.
+            BoardLine(2, BoardDim,
+                $"  plant {TestDrone.AirframeOf(p)} {Src(!string.IsNullOrEmpty(p.Airframe))}   "
+              + $"{TestDrone.AltOf(p):0} m {Src(p.StartAlt > 0f)}   "
+              + $"{TestDrone.SpeedOf(p):0} m/s {Src(p.StartSpeed > 0f)}");
+            BoardLine(3, BoardDim, string.IsNullOrEmpty(p.ArmKnob)
+                ? "  A/B   none — one arm; set a card's armToggle or Scenario/ScenarioArmToggle to interleave"
+                : $"  A/B   {p.ArmKnob}   ABBA by run index   (from {p.ArmSrc})");
+        }
+
+        private static string Src(bool fromCard) => fromCard ? "[from card]" : "[from F1]";
 
         // --- IMGUI primitives (origin top-left, y-down) ---
 

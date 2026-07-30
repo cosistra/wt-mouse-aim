@@ -2,8 +2,8 @@
   "name": "oblique-dz",
   "cls": "Plane",
   "step": 0.02,
-  "airframe": "any jet at the fixedwing-v2 entry condition",
-  "note": "Rung 2: onset |azErr| = 2.50 deg, exactly FineBankDeadzone - the edge where the bank servo switches from zero to fully commanded (measured 43.5% -> 97.8% of samples across that boundary). A servo flickering in and out of its own deadzone is the classic chatter site, so this is the highest-suspicion rung for the 'confused small movement' report. Step magnitude 3.54 deg.",
+  "airframe": "",
+  "note": "Rung 2: onset |azErr| = 2.50 deg, exactly FineBankDeadzone - the edge where the bank servo switches from zero to fully commanded (measured 43.5% -> 97.8% of samples across that boundary). A servo flickering in and out of its own deadzone is the classic chatter site, so this is the highest-suspicion rung for the 'confused small movement' report. Step magnitude 3.54 deg. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
   "startSpeed": 250,
   "startAlt": 4000,
   "segments": [

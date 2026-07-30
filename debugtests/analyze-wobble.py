@@ -4,6 +4,7 @@
 Stdlib only (no pandas). Usage:
     python analyze-wobble.py <recording.csv> [more.csv ...]   # wobble score + PASS/FAIL verdict
     python analyze-wobble.py --digest <recording.csv> [...]   # compact phase-segmented timeline
+    python analyze-wobble.py --digest --verbose <many.csv>    # full timelines past 10 captures
     python analyze-wobble.py --selftest                       # in-memory asserts, no file needed
 
 WOBBLE SCORE (default) — the metrics from the 2026-07 wobble investigation (see WOBBLE-FINDINGS.md):
@@ -37,6 +38,8 @@ moved (start->end, interior peak when it overshoots the endpoints) and per-axis 
 counts. Inline # cfg t=... changes and any [anomaly] lines from the sibling
 mouseaim-anomalies-*.log (matched by rec=<this file>) are slotted at their timestamp.
 The raw CSV stays the ground truth — open raw rows only for a segment the digest flags.
+Past DETAIL_FILE_LIMIT captures --digest collapses one level further, to ONE line per file
+(digest_brief) — the same argument at batch scale; --verbose keeps the full timelines.
 """
 import csv, math, sys, os, re, statistics
 
@@ -603,6 +606,25 @@ def digest(path):
           f"{len(segs)} segments, {len(anoms)} anomalies")
 
 
+# Past this many CSVs --digest prints digest_brief() instead: ~30 lines x 300 captures is 9000 lines
+# of mostly steady state, which is the same unreadability the digest exists to fix, one level up.
+DETAIL_FILE_LIMIT = 10
+
+
+def digest_brief(path):
+    """One line per capture — the digest's own footer, without the timeline. Enough to spot the odd
+    one out in a batch (a short run, a missing anomaly-free run, a wrong sample rate); re-run
+    --digest on just that file, or with --verbose, for the timeline."""
+    _meta, rows = load(path)
+    if not rows:
+        print(f"  {os.path.basename(path):<58} no data rows")
+        return
+    t0, tN = rows[0]["t"], rows[-1]["t"]
+    rate = len(rows) / (tN - t0) if tN > t0 else 0.0
+    print(f"  {os.path.basename(path):<58} {tN - t0:6.1f}s {len(rows):6d} rows (~{rate:2.0f} Hz) "
+          f"{len(segment(rows)):3d} seg {len(load_anomalies(path)):3d} anom")
+
+
 def selftest():
     rows = [{"t": i * 0.2, "phase": "HOLD", "off": 0.1, "outR": 0.0} for i in range(10)]
     rows += [{"t": 2.0 + i * 0.2, "phase": "TURN", "off": i * 3.0,
@@ -714,6 +736,16 @@ def selftest():
         got = load_anomalies(csvp)
         assert len(got) == 1, got                        # the other recording's line stayed out
         assert got[0][0] == 12.5 and got[0][1] == "overshoot", got
+
+        # digest_brief: the >10-capture substitute for a ~30-line timeline. ONE line, and it must
+        # still carry the numbers a batch is scanned for (duration/rows/segments/anomalies) --
+        # a roll-up that drops the anomaly count would hide the one file worth opening.
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            digest_brief(csvp)
+        line = buf2.getvalue().rstrip("\n")
+        assert line.count("\n") == 0, line
+        assert "1 rows" in line and "1 seg" in line and "1 anom" in line, line
     finally:
         import shutil; shutil.rmtree(tmpd)
 
@@ -741,11 +773,20 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    verbose = "--verbose" in args
+    args = [a for a in args if a != "--verbose"]
     if args[0] == "--selftest":
         selftest()
     elif args[0] == "--digest":
-        for p in args[1:]:
-            digest(p)
+        paths = args[1:]
+        if verbose or len(paths) <= DETAIL_FILE_LIMIT:
+            for p in paths:
+                digest(p)
+        else:
+            print(f"{len(paths)} captures (over DETAIL_FILE_LIMIT={DETAIL_FILE_LIMIT}) -- one line "
+                  f"each; re-run with --verbose, or on a subset, for the full timelines.")
+            for p in paths:
+                digest_brief(p)
     else:
         for p in args:
             analyze(p)

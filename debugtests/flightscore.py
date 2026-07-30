@@ -10,7 +10,12 @@ constant is tuned to suit one plane the metric stops being cross-airframe.
 
     python debugtests/flightscore.py <rec.csv> [...] [--tau 0.25] [--cone 1.0] [--json]
     python debugtests/flightscore.py --levers <rec.csv>      # lever table even on old captures
+    python debugtests/flightscore.py --verbose <many.csv>    # per-file reports past 10 files
     python debugtests/flightscore.py --selftest
+
+Past ten files the ~28-line per-file report is suppressed and only the spread block (the aggregate)
+prints — a 300-capture batch is 8400 lines otherwise. `--verbose` restores it; ten or fewer files
+behave exactly as before.
 
 Reads: t, off, spd, airDensity, velX/Y/Z, outP/outR/outY, segTag (58-col recorder), plus the
 optional v0.83/v0.85 lever columns iGate/leadDeg/bSup/bWt/phiLead (see `levers`).
@@ -575,13 +580,26 @@ def report(res):
 def spread(results):
     """Run-to-run band of A = the metric's own noise floor. An effect smaller than the band
     is not an effect. A run that simply lacks a tag is EXCLUDED from that tag, never
-    back-filled with its whole-run value (same discipline as compare-runs.py)."""
-    frames = {r["airframe"]["name"] for r in results}
+    back-filled with its whole-run value (same discipline as compare-runs.py).
+
+    Mixed airframes get one block EACH. This used to print "Not pooling." and then pool anyway —
+    the warning was the whole implementation — so a trainer's `turn360` A landed in the same
+    min/med/max band as a loaded jet's and the "band" read as the metric's noise floor when it was
+    really the airframe difference, i.e. the one mistake the warning names. Same rule as
+    compare-runs.py's grouping: never merged, one block per airframe, in name order.
+    """
+    frames = sorted({r["airframe"]["name"] for r in results})
     if len(frames) > 1:
-        print(f"\nWARNING: mixed airframes {sorted(frames)} — A is comparable across them, "
-              "but a segTag flown by different planes is not the same test. Not pooling.")
+        print(f"\nWARNING: mixed airframes {frames} — A is comparable across them, "
+              "but a segTag flown by different planes is not the same test. Not pooling: "
+              f"{len(frames)} separate blocks below.")
+    for name in frames:
+        _spread_one([r for r in results if r["airframe"]["name"] == name], name)
+
+
+def _spread_one(results, name):
     tags = list(dict.fromkeys(t for r in results for t in r["segments"]))
-    print(f"\n=== spread across {len(results)} runs (the metric's own noise floor) ===")
+    print(f"\n=== spread across {len(results)} runs of {name} (the metric's own noise floor) ===")
     meds = {}
     for tag in tags + ["= ALL"]:
         vals = [r["all"] if tag == "= ALL" else r["segments"].get(tag) for r in results]
@@ -595,6 +613,12 @@ def spread(results):
               f"sd={sd}  (band {max(As)-min(As):.3f}) {n}")
     worst = sorted((a, t) for t, a in meds.items() if t != "= ALL")
     print("  worst-scoring tags: " + ", ".join(f"{t}({a:.3f})" for a, t in worst[:5]))
+
+
+# Past this many CSVs the ~28-line per-file report is suppressed and only spread() — which IS the
+# aggregate, and gets better with n — is printed. 10 is the line between "someone is reading these"
+# and "a batch produced these"; --verbose overrides, and at or below it nothing changes.
+DETAIL_FILE_LIMIT = 10
 
 
 # ---- selftest --------------------------------------------------------------------
@@ -818,6 +842,32 @@ def selftest():
         assert abs(L["bWt"] - 0.43) < 1e-9 and L["iGate"] is None, L
         assert load_cfg(new)["fineAng"] == 6.0 and load_cfg(old) == {}, load_cfg(new)
 
+    # 18. spread() SPLITS BY AIRFRAME. It used to print "Not pooling." and then pool: a trainer's A
+    # and a jet's A landed in one min/med/max band, so the "noise floor" was really the airframe
+    # difference — the exact mistake the warning names. One block each, and neither block's median
+    # may be the pooled one (0.60), which is the only assertion that can tell the two apart.
+    import io, contextlib
+    mk = lambda name, a: {"file": f"{name}-{a}.csv", "airframe": {"name": name},
+                          "segments": {"turn360": {"A": a}}, "all": {"A": a}}
+    mixed = [mk("Multirole1", 0.80), mk("trainer", 0.40), mk("Multirole1", 0.82), mk("trainer", 0.38)]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        spread(mixed)
+    out = buf.getvalue()
+    assert out.count("=== spread across") == 2, out                 # one block per airframe
+    assert "spread across 2 runs of Multirole1" in out, out         # ...each with its OWN n, not 4
+    assert "spread across 2 runs of trainer" in out, out
+    assert "Not pooling" in out, out
+    blocks = out.split("=== spread across")[1:]
+    jet = next(b for b in blocks if b.startswith(" 2 runs of Multirole1"))
+    assert "med=0.810" in jet and "med=0.600" not in out, out       # 0.60 == the pooled median
+    assert "0.400" not in jet and "0.380" not in jet, jet           # the trainer's runs stayed out
+    # ...and the single-airframe case still prints exactly one block (the common case, unchanged).
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        spread([mk("Multirole1", 0.80), mk("Multirole1", 0.82)])
+    assert buf.getvalue().count("=== spread across") == 1 and "Not pooling" not in buf.getvalue()
+
     print("flightscore selftest OK")
 
 
@@ -833,6 +883,7 @@ def main(argv):
             del argv[i:i + 2]
     tau, cone = opt["--tau"], opt["--cone"]
     as_json = "--json" in argv
+    verbose = "--verbose" in argv
     force_levers = "--levers" in argv   # xfight*/ needs no new column, so it IS scoreable on
                                         # the old corpus — just never by default, so old
                                         # captures keep their exact pre-feature output.
@@ -843,8 +894,12 @@ def main(argv):
     if as_json:
         print(json.dumps({"tau_feel": tau, "cone_deg": cone, "runs": results}, indent=1, default=str))
         return
-    for r in results:
-        report(r)
+    if verbose or len(paths) <= DETAIL_FILE_LIMIT:
+        for r in results:
+            report(r)
+    else:
+        print(f"{len(paths)} file(s) scored; per-file report suppressed (over DETAIL_FILE_LIMIT="
+              f"{DETAIL_FILE_LIMIT}) -- re-run with --verbose, or on a subset, to see it.")
     if len(results) > 1:
         spread(results)
 

@@ -3,6 +3,111 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.90.0
+
+**The harness runs itself: the sky empties when a batch finishes, and a card now carries the whole
+test rather than half of it.** Four changes, all in the uncrewed rig. **No control-law change
+whatsoever** — no gain, gate or schedule moved, so every capture taken since 0.87 stays comparable.
+The through-line is the same in each: an unattended batch is only worth flying if a setup mistake is
+visible *before* the launch and nothing is left circling *after* it.
+
+**1. A drone that has finished its card despawns itself.** The only automatic despawn was the
+exception path, so a drone whose suite completed fell back to the built-in level-hold and orbited
+until the despawn key or the mission end. `PruneDead` now also despawns any drone that has had **no
+card running** for `IdleDespawnSec` (5 s, a const) — ONE rule, which is why it covers suite-complete,
+aborted, refused *and* never-started with no path left over. The grace window is sized by what it has
+to clear, not by taste: the gap between `NextCard` closing one recorder and `StartCard` opening the
+next is a placement tick plus a frame, and anything shorter would despawn a drone between its own
+replicates. This is not tidiness — a live drone keeps a full complex-physics aero job and all three
+of its per-aircraft registries alive, which is the same frame budget the launch stagger exists to
+protect and that `frameMs` was added to measure. Every despawn line now carries its reason.
+
+**2. A shot-down drone is noticed.** Measured in R25: the operator destroyed a drone that had
+finished its card and it stayed registered until the mission quit. `PruneDead`'s predicate is
+`Aircraft == null || Aircraft.disabled`, and the game **never self-disables an `Aircraft` on damage** —
+`Unit.disabled` is written only by `ServerDisableUnit` / `ReturnToInventory` / `OnDestroy`, and
+`WaitRemoveAircraft` is fired *from* the disabled hook, so a shot-down aircraft keeps a live
+GameObject reading `disabled == false` indefinitely. The check therefore moved to
+`TestDrone.OnPilotStep`, the one place holding the `Pilot` the damage actually lands on: `p.dead ||
+p.ejected` now despawns with the reason instead of early-returning. An airframe destroyed *without*
+killing the pilot is covered one layer out — the card's own altitude floor aborts it on the way down
+and the idle rule then despawns it — so there is no third case to add.
+
+**3. Lanes key off the camera, not the scene origin.** With no local aircraft (ejected, dead,
+spectating — which is what an operator watching a batch usually is) the lane fallback was
+`Vector3.zero`. That is not merely invisible: it is the **same point on every press**, so a second
+launch put lane *k* exactly where the first one did, while each drone's card anchor is its own spawn
+point. `Camera.main` is both visible and observer-dependent. `_slot` also starts at `_live.Count`
+rather than 0, so "press it twice" is safe even when nothing has moved.
+
+**4. Cards are self-describing — the operator ticks ONE checkbox and presses the spawn key.** A card
+already knew the airframe it was designed on and the speed and altitude it intends; `DroneAirframe`,
+`DroneSpawnAlt`, `DroneSpawnSpeed`, `ScenarioRepeat` and `ScenarioArmToggle` had to be matched to it
+by hand, five per batch, and a mismatch does not refuse — it produces a capture that scores fine and
+answers a different question (R18's "energy failure" was exactly that). So:
+
+- **`repeat`, `armToggle` and a generic `config` override list** are now card fields. `config` is a
+  list of `{key, value}` pairs in the `"Section/Key"` grammar (bare key ⇒ section `Control`), with the
+  value parsed by BepInEx's own `TomlTypeConverter` — one path covers bool/int/float/string/KeyCode,
+  instead of a hand-rolled parser that would be a second, subtly different definition of what a config
+  value is. That grammar now has **one** implementation (`SplitSpec`), shared by `ScenarioArmToggle`,
+  a card's `armToggle` and every `config[].key`, so the three cannot drift into three spellings.
+- **The drone spawn reads the card's `airframe`/`startAlt`/`startSpeed` in preference to the `Drone*`
+  knobs**, resolved once per batch (not per lane — a checkbox ticked mid-stagger would otherwise change
+  the airframe half way through), and the launch log names **which source won for each value**. That
+  line is the operator's only confirmation: "4000 m" reads identically whether the card asked for it or
+  a knob was just left there, and telling those apart is the whole point of the feature.
+- **Every field falls back to its global when absent**, so a card that declares nothing behaves exactly
+  as it did in 0.89 — which is what keeps the shipped grid and every ad-hoc recording valid.
+- **Overrides apply BEFORE `ApplyArm` and BEFORE the recorder opens, and restore AFTER it closes.**
+  Both halves are load-bearing. `ConfigFile.SettingChanged` drives `ManeuverRecorder.NoteConfigChange`,
+  which stamps a `# cfg` line into every OPEN capture — so writing a card's own setup after its own
+  recorder opened would record the card configuring itself as a mid-run config *change*, which is
+  precisely the signal those lines exist to flag. Arm-after-overrides guarantees the swept arm wins
+  even if the refusal below were ever bypassed.
+- **A card that pins the very knob the A/B schedule is sweeping is REFUSED, loudly.** Pinning it flies
+  every replicate on one arm while each capture still carries an honest-looking `arm=0`/`arm=1` label,
+  so the A/B reads as "no measurable difference" and nothing in the artifacts says why. That is worse
+  than a run that refuses and worse than one that visibly breaks, so it is the one override failure
+  that is named and skipped rather than silently won by either side.
+- **New `# override Section/Key=value …` header line** in the CSV, written directly under `# card`.
+  It is a **header line, not a column** — the CSV stays at **64 columns** — because the value is
+  constant for the whole capture by construction, and because `# config` already shows the *values*
+  but cannot say the **card** chose them, which is the distinction a batch needs.
+- **All 16 shipped cards migrated.** `airframe` held PROSE in every one of them ("any jet at the
+  fixedwing-v2 entry condition") because nothing read it before this release gave it behaviour; the
+  prose moved into `note` and `airframe` is now `""`. A jsonKey never contains whitespace, so
+  `Validate` **blanks** any `airframe` that does, with a named warning — a hand-written card degrades
+  to the pre-0.90 behaviour instead of failing a launch or trying to spawn a sentence.
+- **`scorecard.py --selftest` enforces four card-setup rules offline**, because nothing at runtime
+  will: `JsonUtility` ignores what it cannot parse and the apply path is fail-soft by design. It checks
+  the jsonKey rule, the swept-knob conflict (compared *after* the grammar split, so `Knob` and
+  `Control/Knob` are recognised as the same entry — a raw string compare is exactly how this would
+  sneak through), the key grammar and non-empty values, and `repeat` in 0..20 (the mod clamps, so `40`
+  would silently fly 20).
+
+**5. An on-screen harness run board.** An unattended batch is 20+ minutes of wall clock whose only
+progress signal was `[card]` lines in a text file. Top-left, drawn in `OnGUI`'s **pre-gate** band —
+before `ShowOverlay`/`Enabled` and before the local-aircraft resolve, because the operator watching a
+batch is usually in no aircraft at all, which is exactly when every gate below has already returned.
+Two states: **FLYING** (one line per aircraft — drone number or `YOU`, card, run *x*/*y*, arm, segment
+*x*/*y* and tag, seconds left in the segment, time left in the card, recorder sample count; the header
+aggregates over the **max**, since the batch ends when the slowest lane does and the leader's ETA would
+read as nearly-done with a full card still to fly) and **PREFLIGHT** (what WILL fly: card, replicate
+count, per-drone total, and airframe/altitude/speed each marked `[from card]` or `[from F1]`), plus an
+amber **NO CARD SELECTED** line for the commonest setup mistake — until now it surfaced only as a log
+warning *after* the launch, by which point N drones are airborne measuring nothing. The preflight
+values come from `ScenarioPlayer.Preview()` and `TestDrone`'s own three resolvers — the same pair the
+launch itself uses — so the board physically cannot promise something the spawn will not do. It draws
+nothing at all when `Drone/DroneEnabled` is off, and the preview is polled at 2 Hz because `OnGUI`
+runs at least twice a frame and a repaint must not spam the log the way an operator keypress may.
+
+**New offline check: `debugtests/test-board-math.py`.** The board's two non-trivial pieces — the
+m:ss / "0.0s" formatter and the seconds-left-in-this-card sum — live between `BOARD-MATH` markers in
+`ScenarioPlayer.cs`, written in plain numbers with no Unity types. The tool extracts that region
+**verbatim**, compiles it with the .NET SDK and runs it against 23 cases, so it exercises the shipped
+code rather than a Python copy of it that would drift and then agree with itself forever.
+
 ## 0.89.0
 
 **The 0.88 entry trim is reverted — it was aimed at a phantom — and the real cause of the entry

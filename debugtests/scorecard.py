@@ -6,7 +6,14 @@ Stdlib only (no pandas/numpy), reuses analyze-wobble.py's CSV/header parsing, ep
 
     python scorecard.py <recording.csv> [more.csv ...]        # human-readable table to stdout
     python scorecard.py --json score.json <recording.csv>     # write score.json (exactly 1 CSV)
+    python scorecard.py --verbose <many.csv ...>              # per-file tables even past 10 files
     python scorecard.py --selftest                             # in-memory asserts, no file needed
+
+OUTPUT VOLUME: the per-file table is ~15 lines, which is right for the 1-12 captures this was built
+for and unreadable for the 100-450 an unattended batch now produces. Past DETAIL_FILE_LIMIT files the
+per-file tables (and their stderr warning copies) are replaced by ONE roll-up — file/segment/card
+counts plus every distinct warning with the number of files it fired on. `--verbose` forces the old
+behaviour; at or below the limit nothing changes at all, because that is the interactive case.
 
 SCOPE (v1 / M0, see plans/instructor-feedback-loop.md #4 and #8): RAW metrics only — no grading
 against an airframe's theoretical bound (that's M3). Every metric is still stored as
@@ -126,6 +133,16 @@ def split_spec(spec):
 def card_setup_problems(card):
     """List of human-readable problems with one card's run configuration; empty == fine."""
     out = []
+    # `airframe` is what the drone harness SPAWNS since v0.90; before that nothing read it and all
+    # sixteen shipped cards used it as prose ("any jet at the fixedwing-v2 entry condition"). An
+    # Encyclopedia jsonKey never contains whitespace, so whitespace means the field is still being
+    # written as documentation -- which the mod now heals at load, but silently enough that a night of
+    # unattended runs would fly the wrong airframe. Human descriptions go in `note`.
+    af = card.get("airframe", "")
+    if not isinstance(af, str) or af != af.strip() or any(ch.isspace() for ch in af):
+        out.append("airframe %r is not a spawnable jsonKey (no whitespace) or \"\" -- "
+                   "put the description in 'note'" % (af,))
+
     rep = card.get("repeat", 0)
     # 0 means "fall back to Cfg.ScenarioRepeat", so it is legal; the C# side CLAMPS to 1..20, which
     # means a card asking for 40 would silently fly 20 replicates and no artifact would say so.
@@ -563,6 +580,55 @@ def saturation_metrics(rows, cols, cfg, fbw):
     return m, skipped
 
 
+# --- railed-segment flag ------------------------------------------------------------------------
+# Occupancy at/above this = the segment spent essentially all of itself on that limit.
+RAILED_PCT = 90.0
+
+# The four occupancy metrics that mean "a limit, not the law, is doing the flying" — three from
+# saturation_metrics, one from alpha_metrics. They are ALTERNATIVES, not additives: any ONE of them
+# near 100% is already enough to make the segment's other numbers unresponsive.
+RAIL_METRICS = ("bankClampActivePct", "turnRateCapActivePct", "blendRailPct", "aoaAboveCeilingPct")
+
+
+def rail_warning(seg):
+    """None, or the RAILED warning for one scored segment (compute_segment()'s dict).
+
+    All four numbers below have been computed for a while and NOTHING thresholded them, so a segment
+    pinned against the bank clamp for 100% of its samples printed exactly like a healthy one — same
+    columns, same plausible terminalOffDeg — and a batch of them reads as "the change did nothing"
+    rather than "nothing could have shown". At 100-450 captures nobody re-derives that per segment
+    from a metrics dump, so the reason has to be ON THE PAGE: name the rail, quote its value, and say
+    what it does to the other metrics. Surfaced through result["warnings"], which is the channel
+    print_table, the roll-up, the JSON and compare-runs.py all already carry.
+
+    Threshold is deliberately blunt (>= 90%, a literal like the rest of this file's read thresholds):
+    it separates "on the stop" from "worked hard", and a capture can always be re-read with another.
+    """
+    hits = [f"{k}={seg['metrics'][k]['value']:.1f}%" for k in RAIL_METRICS
+            if seg["metrics"].get(k) and seg["metrics"][k]["value"] is not None
+            and seg["metrics"][k]["value"] >= RAILED_PCT]
+    if not hits:
+        return None
+    # An alpha_* card exists to PUT the airframe past the ceiling — there, aoaAboveCeilingPct near
+    # 100 is the card succeeding, and reading it as a defect would be the mirror of the mistake this
+    # warning exists to prevent. Only say so when the AoA ceiling is the ONLY thing railed.
+    note = ""
+    if len(hits) == 1 and hits[0].startswith("aoaAboveCeilingPct") and seg.get("type") in ("alpha_step", "alpha_hold"):
+        note = (" NOTE: on an alpha_* segment this is the card doing its job (the ceiling IS the "
+                "stimulus) -- read the gate/recovery metrics, not the pointing ones.")
+    # ASCII "--", like every other printed string in this file: these land in a Windows console.
+    return (f"segment '{seg['tag']}' is RAILED: {', '.join(hits)} (>= {RAILED_PCT:.0f}% of samples). "
+            f"A limit, not the control law, is flying that segment -- a gain change physically cannot "
+            f"move its metrics, so read them as NO SIGNAL rather than as a score.{note}")
+
+
+def norm_warning(w):
+    """A warning's dedup key: every number replaced by '#'. Ten replicates of one card produce ten
+    warnings that differ only in "blendRailPct=100.0%" vs "=97.3%", so a plain set() dedup would list
+    all ten. compare-runs.py's group roll-up and this module's own roll-up both key on this."""
+    return re.sub(r"[-\d.]+", "#", w)
+
+
 # alpha_metrics / allocation_metrics thresholds. Deliberately literals, not knobs: they are read
 # thresholds on already-recorded signals, so a capture can always be re-scored with a different one.
 # ponytail: sample COUNTING against a fixed 0.5 gate threshold, not an integral of the gate deficit.
@@ -876,10 +942,11 @@ def score_run(path):
     ctx = {"cfg": cfg_params(meta), "fbw": aw.fbw_params(meta)}
     for tag, seg_rows in group_segments(rows, cols):
         seg_type = infer_type(tag)
-        segments.append(compute_segment(tag, seg_type, seg_rows, cols, ctx))
-        w = _tag_warning(tag, seg_type)
-        if w:
-            warnings.append(w)
+        seg = compute_segment(tag, seg_type, seg_rows, cols, ctx)
+        segments.append(seg)
+        for w in (_tag_warning(tag, seg_type), rail_warning(seg)):
+            if w:
+                warnings.append(w)
     return {"provenance": prov, "segments": segments, "warnings": warnings}
 
 
@@ -912,6 +979,28 @@ def print_table(path, result):
             print("      " + "  ".join(parts))
         if seg["skipped"]:
             print("      skipped: " + "; ".join(f"{k} ({v})" for k, v in seg["skipped"].items()))
+
+
+# Past this many CSVs the per-file table is replaced by print_rollup(). 10 is the boundary between
+# "a person is reading these" and "a batch produced these": a dozen fits a screen, 300 x 15 lines
+# does not, and the per-file detail is on disk either way (re-run with --verbose or fewer files).
+DETAIL_FILE_LIMIT = 10
+
+
+def print_rollup(n_files, n_segments, cards, warnings):
+    """The >10-file substitute for N per-file tables: what the batch contained, and every distinct
+    warning with the number of FILES it fired on. Warnings are deduped by norm_warning() (numbers
+    masked) and shown with one real example, so "96 files have a railed turn360" is one line instead
+    of 96 — which is the whole point, since the railed flag is at its most useful exactly when a
+    batch is too big to read."""
+    bits = ", ".join(f"{c} x{n}" for c, n in sorted(cards.items(), key=lambda kv: -kv[1]))
+    print(f"scored {n_files} file(s), {n_segments} segment(s), {len(cards)} card(s)"
+          + (f": {bits}" if cards else ""))
+    for key in sorted(warnings, key=lambda k: -warnings[k][0]):
+        cnt, example = warnings[key]
+        print(f"  WARNING [{cnt}/{n_files} file(s), e.g.]: {example}")
+    print(f"  per-file detail for {n_files} file(s) suppressed (over DETAIL_FILE_LIMIT="
+          f"{DETAIL_FILE_LIMIT}) -- re-run with --verbose, or on a subset, to see it.")
 
 
 # --- selftest ---------------------------------------------------------------------------------
@@ -1090,6 +1179,63 @@ def selftest():
                 "assist": 1.0, "aoaGU": 0.5}]
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateCapActivePct"] == 100.0
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateDemandRatio"] > 1.9
+
+    import tempfile, io, contextlib
+    # rail_warning — the flag on top of those same numbers. A segment at the wall must SAY so, and
+    # must name WHICH wall with its value; a hard-working but unsaturated one must stay silent (a
+    # warning that fires on everything is the same as no warning).
+    railed_seg = compute_segment("turn360", "sustained_turn",
+                                 [dict(r, t=i * 0.1) for i, r in enumerate(sat_rows[:3])],
+                                 satcols | {"t"}, {"cfg": satcfg, "fbw": satfbw})
+    rw = rail_warning(railed_seg)
+    assert rw is not None and "RAILED" in rw and "turn360" in rw, rw
+    assert "bankClampActivePct=100.0%" in rw and "blendRailPct=100.0%" in rw, rw   # both rails named
+    assert "turnRateCapActivePct" not in rw, rw          # 76% of the cap: NOT railed, must not appear
+    assert rail_warning(compute_segment("turn360", "sustained_turn",
+                                        [dict(r, t=i * 0.1) for i, r in enumerate(sat_rows[3:])],
+                                        satcols | {"t"}, {"cfg": satcfg, "fbw": satfbw})) is None
+    # exactly at the threshold counts (>=), just under does not.
+    edge = lambda pct: {"tag": "x", "type": "az_step",
+                        "metrics": {"blendRailPct": {"value": pct, "grade": None}}}
+    assert rail_warning(edge(RAILED_PCT)) is not None and rail_warning(edge(RAILED_PCT - 0.1)) is None
+    # ...and a None-valued metric is "not measured", never a rail.
+    assert rail_warning({"tag": "x", "type": "az_step",
+                         "metrics": {"blendRailPct": {"value": None, "grade": None}}}) is None
+    # the alpha_* exemption note: an alpha card PUTS the airframe past the ceiling, so that alone is
+    # the stimulus working. Still warned (the pointing metrics really are unresponsive), but said so.
+    alpha_railed = {"tag": "alphaHold", "type": "alpha_hold",
+                    "metrics": {"aoaAboveCeilingPct": {"value": 99.0, "grade": None}}}
+    assert "doing its job" in rail_warning(alpha_railed), rail_warning(alpha_railed)
+    assert "doing its job" not in rail_warning(dict(alpha_railed, type="sustained_turn"))
+    assert "doing its job" not in rail_warning(          # not the ONLY rail -> no exemption
+        dict(alpha_railed, metrics=dict(alpha_railed["metrics"],
+                                        blendRailPct={"value": 100.0, "grade": None})))
+    # score_run's channel: the warning has to reach result["warnings"], where print_table, the
+    # roll-up, the JSON and compare-runs.py all read from -- not just exist as a function.
+    fd_r, rail_csv = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd_r, "w", newline="") as f:
+            f.write("# mouseaim recording v0.90.0 run=R1 rec=1 session=t\n"
+                    "# card fixedwing-sweep\n# config maxBank=72.0\n"
+                    "t,off,segTag,targetBank,bankTR,bWt\n"
+                    + "".join(f"{i * 0.1:.1f},3.0,turn360,72.0,81.75,1.0\n" for i in range(20)))
+        rr = score_run(rail_csv)
+        assert any("RAILED" in w for w in rr["warnings"]), rr["warnings"]
+        assert rr["provenance"]["card"] == "fixedwing-sweep", rr["provenance"]
+        # norm_warning: ten replicates differ only in the quoted percentages, so the roll-up must
+        # collapse them to one line -- the masked key is what makes that possible.
+        a = "segment 'turn360' is RAILED: blendRailPct=100.0% (>= 90% of samples)."
+        b = "segment 'turn360' is RAILED: blendRailPct=97.3% (>= 90% of samples)."
+        assert norm_warning(a) == norm_warning(b), (norm_warning(a), norm_warning(b))
+        assert norm_warning(a) != norm_warning(a.replace("turn360", "az30"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_rollup(11, 44, {"fixedwing-sweep": 11}, {norm_warning(a): (9, a)})
+        out = buf.getvalue()
+        assert "11 file(s)" in out and "fixedwing-sweep x11" in out, out
+        assert "[9/11 file(s)" in out and "RAILED" in out and "--verbose" in out, out
+    finally:
+        os.remove(rail_csv)
 
     # graceful degradation, both halves independently: no '# config' line, and a pre-v0.55 '# fbw'.
     _, s_nocfg = saturation_metrics(sat_rows, satcols, {}, satfbw)
@@ -1322,6 +1468,9 @@ def selftest():
     assert card_setup_problems({"name": "x", "config": [{"key": "A", "value": ""}]})
     assert card_setup_problems({"name": "x", "repeat": 21})
     assert card_setup_problems({"name": "x", "repeat": -1})
+    assert not card_setup_problems({"name": "x", "airframe": "Multirole1"})
+    assert card_setup_problems({"name": "x", "airframe": "any jet at the fixedwing-v2 entry"})
+    assert card_setup_problems({"name": "x", "airframe": "Multirole1 "})
 
     print("selftest OK")
 
@@ -1333,6 +1482,8 @@ def main(argv):
         selftest()
         return
     json_path, files, i = None, [], 0
+    verbose = "--verbose" in argv
+    argv = [a for a in argv if a != "--verbose"]
     while i < len(argv):
         if argv[i] == "--json":
             if i + 1 >= len(argv):
@@ -1343,20 +1494,34 @@ def main(argv):
             files.append(argv[i])
             i += 1
     if not files:
-        sys.exit("usage: scorecard.py [--json out.json] <recording.csv> [more.csv ...]\n"
+        sys.exit("usage: scorecard.py [--json out.json] [--verbose] <recording.csv> [more.csv ...]\n"
                   "       scorecard.py --selftest")
     if json_path and len(files) != 1:
         sys.exit("--json writes one run's score.json — pass exactly one CSV alongside --json")
+    # --json always writes the full result, so the roll-up is a stdout question only.
+    detail = verbose or len(files) <= DETAIL_FILE_LIMIT
+    n_segments, cards, warnings = 0, {}, {}
     for f in files:
         result = score_run(f)
-        for w in result.get("warnings", []):    # stderr too: visible even when stdout is a --json file
-            print(f"WARNING: {f}: {w}", file=sys.stderr)
+        if detail:
+            for w in result.get("warnings", []):  # stderr too: visible even when stdout is a --json file
+                print(f"WARNING: {f}: {w}", file=sys.stderr)
+        else:
+            n_segments += len(result["segments"])
+            card = result["provenance"].get("card") or "<no card>"
+            cards[card] = cards.get(card, 0) + 1
+            for w in result.get("warnings", []):
+                key = norm_warning(w)
+                cnt, example = warnings.get(key, (0, w))
+                warnings[key] = (cnt + 1, example)
         if json_path:
             with open(json_path, "w", encoding="utf-8") as out:
                 json.dump(result, out, indent=2)
             print(f"wrote {json_path}")
-        else:
+        elif detail:
             print_table(f, result)
+    if not detail:
+        print_rollup(len(files), n_segments, cards, warnings)
 
 
 if __name__ == "__main__":

@@ -7,22 +7,33 @@ the score noise floor and A/B-ing a control-law change both need, and hand-compa
 batches now being generated is not viable.
 
     python debugtests/compare-runs.py <rec1.csv> <rec2.csv> [more.csv ...]   # table to stdout
+    python debugtests/compare-runs.py --summary <rec1.csv> [...]            # one line per (card, tag)
     python debugtests/compare-runs.py --json out.json <rec1.csv> [...]      # write out.json
     python debugtests/compare-runs.py --selftest                            # in-memory asserts
 
 Reuses scorecard.score_run() for the actual per-run scoring (imported, not reimplemented) -- this
 file only aggregates already-scored results.
 
-GROUPING: runs are grouped by airframe (the .airframe.json sidecar's "jsonKey", e.g. "Multirole1" /
-"trainer" -- falling back to the CSV's "# aircraft" header when the sidecar is missing or that key
-is absent, and to a per-file singleton group when neither is available). The comparison key is for
-by-airframe grouping only. Pooling two different airframes into one spread is meaningless (a
-heavier jet's turn rate is not noise around a trainer's) -- exactly the mistake that wasted a prior
-test session -- so groups are NEVER merged; each is scored and printed separately, and a mixed
-input warns loudly on stderr (and in the table) about the split rather than silently averaging
-across it. Note: the sidecar's jsonKey and the CSV header's aircraft name can differ only in case
-for the SAME airframe (observed on real captures: jsonKey "trainer" vs header "Trainer") -- the key
-is lowercased before grouping so that difference alone can never fragment one airframe into two.
+GROUPING: runs are grouped by (airframe, CARD, arm).
+
+  * airframe -- the .airframe.json sidecar's "jsonKey", e.g. "Multirole1" / "trainer", falling back
+    to the CSV's "# aircraft" header when the sidecar is missing or that key is absent, and to a
+    per-file singleton group when neither is available. Pooling two different airframes into one
+    spread is meaningless (a heavier jet's turn rate is not noise around a trainer's) -- exactly the
+    mistake that wasted a prior test session -- so groups are NEVER merged; each is scored and
+    printed separately, and a mixed input warns loudly on stderr (and in the table) about the split
+    rather than silently averaging across it. Note: the sidecar's jsonKey and the CSV header's
+    aircraft name can differ only in case for the SAME airframe (observed on real captures: jsonKey
+    "trainer" vs header "Trainer") -- the key is lowercased before grouping so that difference alone
+    can never fragment one airframe into two.
+  * card -- the capture's `# card` header line. Segments are keyed by TAG ALONE below, and tags are
+    unique per card BY CONVENTION ONLY (cards/README.md's rule). That convention already leaks:
+    `hover` and `bobup` are emitted both by the rotor disk cards and by the built-in rotorcraft-v2,
+    so a batch flying both pooled two different stimuli into one spread and inflated the noise floor
+    it exists to measure. Grouping on the card makes the convention unnecessary rather than merely
+    documented. A hand-recorded free flight has no `# card` line -> None, shared by every such
+    capture, so those still group by airframe exactly as before (a constant cannot fragment a group).
+  * arm -- see A/B ARMS below.
 
 TRUNCATION: a card segment has a fixed scripted duration, so if two runs share a segTag but one
 CSV's copy is materially shorter, that run was aborted or cut off mid-segment (manual stick input,
@@ -36,15 +47,22 @@ run). `arm` (already excluded from scoring by scorecard.py) carries no metrics a
 too. No confidence intervals or hypothesis tests: with n=2..6 runs those would be misleading --
 plain spread numbers only.
 
+SUMMARY (--summary): the full table prints every metric of every segment of every group, which is
+right for the 2-12 captures this was built for and is thousands of lines for the 100-450 an
+unattended batch now produces. --summary collapses each segment to ONE line -- n, duration, the
+worst rail, and three headline metrics as `mean +- stdev%` -- so ~40 (card, tag) pairs fit on a
+screen and the question "which regime does the law fly worst" is answerable by reading down a
+column. Nothing is recomputed for it: it is the same spread(), printed narrow.
+
 A/B ARMS (v0.84): a capture's `# config` header may carry `arm=0|1` (which side of an ABBA-
-interleaved batch this run flew) and `armKnob=<name>` (which Cfg toggle was being swept). Groups now
-key on (airframe, arm) -- an arm split is never pooled into its sibling any more than one airframe is
+interleaved batch this run flew) and `armKnob=<name>` (which Cfg toggle was being swept). Arm is part
+of the group key -- an arm split is never pooled into its sibling any more than one airframe is
 pooled into another, for the mirror-image reason: averaging arm 0 into arm 1 erases the exact effect
 the interleaving exists to measure. A capture with no `arm=` at all (every one of the ~162 captures
-predating v0.84) parses as arm `None` and groups exactly as before -- one group per airframe, not
-per (airframe, None), since every legacy run shares that same None. When an airframe has both arms
-present, an ARM COMPARISON section reports the A-vs-B mean difference per segment per metric next to
-each arm's own within-group spread (the noise floor the difference has to clear to mean anything).
+predating v0.84) parses as arm `None` and groups exactly as before -- one group per airframe+card,
+not per (airframe, card, None), since every legacy run shares that same None. When an (airframe,
+card) has both arms present, an ARM COMPARISON section reports the A-vs-B mean difference per segment
+per metric next to each arm's own within-group spread (the noise floor the difference must clear).
 Runs that disagree about `armKnob` -- two different experiments wearing the same arm numbers -- are
 warned about loudly rather than silently diffed, and so is an arm schedule unbalanced by SUM OF RUN
 INDEX (equal per-arm COUNTS are not enough -- see ScenarioPlayer.cs's own ArmOf()/ToggleSuite
@@ -85,6 +103,15 @@ def airframe_key(result, path):
     return f"<unknown airframe: {os.path.basename(path)}>"
 
 
+def card_key(result):
+    """The card this capture flew, off the `# card` header line (scorecard.provenance parses it), or
+    None for a hand-recorded free flight. Part of the group key because compare_group() keys segments
+    by TAG ALONE and tags are only unique per card by convention -- `hover`/`bobup` are shared between
+    the rotor disk cards and the built-in rotorcraft-v2, so a mixed batch pooled two stimuli into one
+    spread. `or None` normalises an empty `# card ` line onto the same key as no line at all."""
+    return result["provenance"].get("card") or None
+
+
 def arm_key(result):
     """(arm, armKnob) parsed off this run's raw '# config' header line. arm comes from scorecard's
     own cfg_params() -- the same numeric-knob regex every other '# config' value already goes
@@ -99,14 +126,15 @@ def arm_key(result):
 
 def group_runs(results):
     """results: [(path, score_result), ...] (already scored -- via score_files, or fabricated by a
-    test). -> [((airframe_key, arm), [(path, score_result), ...]), ...], insertion-ordered by first
-    appearance of each key so output order is stable and matches input order. arm is None for every
-    pre-v0.84 capture, so a legacy batch groups by airframe alone exactly as before -- every run in
-    it shares that same None, and a constant never fragments a group."""
+    test). -> [((airframe_key, card, arm), [(path, score_result), ...]), ...], insertion-ordered by
+    first appearance of each key so output order is stable and matches input order. card and arm are
+    both None for a pre-v0.71 / pre-v0.84 capture respectively, so a legacy batch groups by airframe
+    alone exactly as before -- every run in it shares those same Nones, and a constant never
+    fragments a group."""
     groups, order = {}, []
     for path, result in results:
         arm, _ = arm_key(result)
-        key = (airframe_key(result, path), arm)
+        key = (airframe_key(result, path), card_key(result), arm)
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -162,8 +190,10 @@ def spread(values):
 
 
 def compare_group(runs):
-    """[{"tag", "fullDurationS", "truncatedRuns": {basename: durationS}, "metrics": {name: spread()}}]
-    for one airframe group's segments shared by >=2 of its runs."""
+    """[{"tag", "fullDurationS", "nFull", "truncatedRuns": {basename: durationS}, "metrics":
+    {name: spread()}}] for one group's segments shared by >=2 of its runs. nFull is how many runs
+    contributed (the full-duration ones) -- the row's own n, which --summary prints once instead of
+    repeating each metric's."""
     out = []
     for tag, entries in _segments_by_tag(runs).items():
         if len(entries) < 2:
@@ -172,7 +202,8 @@ def compare_group(runs):
         ok = [(p, seg) for p, seg in entries if seg["durationS"] >= FULL_FRAC * full]
         truncated = {os.path.basename(p): seg["durationS"] for p, seg in entries
                      if seg["durationS"] < FULL_FRAC * full}
-        row = {"tag": tag, "fullDurationS": full, "truncatedRuns": truncated, "metrics": {}}
+        row = {"tag": tag, "fullDurationS": full, "nFull": len(ok), "truncatedRuns": truncated,
+               "metrics": {}}
         if len(ok) >= 2:
             names = set()
             for _, seg in ok:
@@ -281,27 +312,30 @@ def arm_diff(runs_a, runs_b):
 
 
 def _arm_comparisons(raw_groups):
-    """[{"airframe", "armA", "armB", "armKnob", "nA", "nB", "armKnobWarning", "balanceWarning",
-    "segments"}] -- one entry per airframe that has BOTH arm 0 and arm 1 present in the input
-    (nothing to compare with only one side; more than two is outside what ArmOf()/the F1 toggle can
-    even produce, so it's left unhandled rather than guessed at). "segments" is None -- not diffed --
-    when armKnobWarning fires, since arm 0 vs arm 1 would then be comparing two different toggles."""
+    """[{"airframe", "card", "armA", "armB", "armKnob", "nA", "nB", "armKnobWarning",
+    "balanceWarning", "segments"}] -- one entry per (airframe, CARD) that has BOTH arm 0 and arm 1
+    present in the input (nothing to compare with only one side; more than two is outside what
+    ArmOf()/the F1 toggle can even produce, so it's left unhandled rather than guessed at). Pairing
+    on the card as well as the airframe for the same reason grouping does: arm 0 of one card against
+    arm 1 of another is not an A/B of the knob, it is an A/B of the two cards. "segments" is None --
+    not diffed -- when armKnobWarning fires, since arm 0 vs arm 1 would then be two different
+    toggles."""
     by_af, order = {}, []
-    for (af, arm), runs in raw_groups:
-        if af not in by_af:
-            by_af[af] = {}
-            order.append(af)
-        by_af[af][arm] = runs
+    for (af, card, arm), runs in raw_groups:
+        if (af, card) not in by_af:
+            by_af[(af, card)] = {}
+            order.append((af, card))
+        by_af[(af, card)][arm] = runs
     out = []
-    for af in order:
-        arms = by_af[af]
+    for af, card in order:
+        arms = by_af[(af, card)]
         if 0 not in arms or 1 not in arms:
             continue
         armed_runs = arms[0] + arms[1]
         knob, knob_warning = _group_knob(armed_runs)
         bal_warning = _arm_balance_warning(armed_runs)
         out.append({
-            "airframe": af, "armA": 0, "armB": 1, "armKnob": knob,
+            "airframe": af, "card": card, "armA": 0, "armB": 1, "armKnob": knob,
             "nA": len(arms[0]), "nB": len(arms[1]),
             "armKnobWarning": knob_warning, "balanceWarning": bal_warning,
             "segments": None if knob_warning else arm_diff(arms[0], arms[1]),
@@ -309,18 +343,34 @@ def _arm_comparisons(raw_groups):
     return out
 
 
+def _run_warnings(runs):
+    """{norm_warning key: (count, one real example)} over a group's runs -- scorecard's own per-run
+    warnings (unknown segment tag, RAILED segment) carried through so they reach the page a batch is
+    actually read on. Deduped by scorecard.norm_warning (every number masked) with a count, because 8
+    replicates of one card emit 8 copies of the same finding differing only in "blendRailPct=100.0%"
+    vs "=97.3%" -- and 8 copies of a warning is how a warning stops being read."""
+    counts = {}
+    for _, result in runs:
+        for w in result.get("warnings", []):
+            key = sc.norm_warning(w)
+            n, example = counts.get(key, (0, w))
+            counts[key] = (n + 1, example)
+    return counts
+
+
 def compare_all(paths):
-    """(groups, armComparisons). groups: [{"airframe", "arm", "armKnob", "armKnobWarning", "runs":
-    [basename...], "segments": compare_group(...)}, ...], one per (airframe, arm) group -- arm/
-    armKnob are None for a pre-v0.84 capture (the single-unnamed-arm backward-compatible case).
-    armComparisons: see _arm_comparisons() -- the A-vs-B report for any airframe with both arms
-    present, [] when nothing in the input is armed."""
+    """(groups, armComparisons). groups: [{"airframe", "card", "arm", "armKnob", "armKnobWarning",
+    "runWarnings", "runs": [basename...], "segments": compare_group(...)}, ...], one per (airframe,
+    card, arm) group -- card is None for a hand-recorded capture, arm/armKnob None for a pre-v0.84
+    one (the backward-compatible cases). armComparisons: see _arm_comparisons() -- the A-vs-B report
+    for any (airframe, card) with both arms present, [] when nothing in the input is armed."""
     raw_groups = group_runs(score_files(paths))
     groups = []
-    for (af, arm), runs in raw_groups:
+    for (af, card, arm), runs in raw_groups:
         knob, knob_warning = _group_knob(runs)
         groups.append({
-            "airframe": af, "arm": arm, "armKnob": knob, "armKnobWarning": knob_warning,
+            "airframe": af, "card": card, "arm": arm, "armKnob": knob,
+            "armKnobWarning": knob_warning, "runWarnings": _run_warnings(runs),
             "runs": [os.path.basename(p) for p, _ in runs], "segments": compare_group(runs),
         })
     # No printing here — print_table() emits warnings in table mode and main() does it on stderr for
@@ -340,17 +390,39 @@ def _noise_label(above):
     return "n/a (n=1 on at least one side)" if above is None else "ABOVE noise floor" if above else "within noise floor"
 
 
+def _runs_label(runs):
+    """"a.csv, b.csv, c.csv (+9 more)" -- the filenames of a group, truncated. A batch replicate
+    count of 8-12 is now normal and the full list wrapped the heading off the screen; 4 or fewer
+    still print in full, since that is where naming every file is genuinely useful."""
+    if len(runs) <= 4:
+        return ", ".join(runs)
+    return ", ".join(runs[:3]) + f" (+{len(runs) - 3} more)"
+
+
+def _group_label(g):
+    label = f"airframe: {g['airframe']}"
+    if g.get("card"):
+        label += f"  card: {g['card']}"
+    if g.get("arm") is not None:
+        label += f"  arm {g['arm']}" + (f" ({g['armKnob']})" if g.get("armKnob") else "")
+    return label
+
+
+def _print_group_warnings(g):
+    if g.get("armKnobWarning"):
+        print(f"  WARNING: {g['armKnobWarning']}")
+    n = len(g["runs"])
+    for cnt, example in sorted(g.get("runWarnings", {}).values(), key=lambda v: -v[0]):
+        print(f"  WARNING [{cnt}/{n} runs, e.g.]: {example}")
+
+
 def print_table(groups, arm_comparisons=()):
     w = _pool_warning([(g["airframe"], g["runs"]) for g in groups])
     if w:
         print(f"WARNING: {w}")
     for g in groups:
-        label = f"airframe: {g['airframe']}"
-        if g.get("arm") is not None:
-            label += f"  arm {g['arm']}" + (f" ({g['armKnob']})" if g.get("armKnob") else "")
-        print(f"\n=== {label}  ({len(g['runs'])} runs: {', '.join(g['runs'])})")
-        if g.get("armKnobWarning"):
-            print(f"  WARNING: {g['armKnobWarning']}")
+        print(f"\n=== {_group_label(g)}  ({len(g['runs'])} runs: {_runs_label(g['runs'])})")
+        _print_group_warnings(g)
         if len(g["runs"]) < 2:
             print("  only 1 run -- nothing to compare.")
             continue
@@ -370,7 +442,8 @@ def print_table(groups, arm_comparisons=()):
 
     for ac in arm_comparisons:
         knob = f" on {ac['armKnob']}" if ac["armKnob"] else ""
-        print(f"\n=== airframe: {ac['airframe']}  ARM COMPARISON{knob}  "
+        card = f"  card: {ac['card']}" if ac.get("card") else ""
+        print(f"\n=== airframe: {ac['airframe']}{card}  ARM COMPARISON{knob}  "
               f"(A=arm{ac['armA']} n={ac['nA']}, B=arm{ac['armB']} n={ac['nB']})")
         if ac["armKnobWarning"]:
             print(f"  WARNING: {ac['armKnobWarning']}")
@@ -389,6 +462,93 @@ def print_table(groups, arm_comparisons=()):
                       f"[{_noise_label(d['aboveNoise'])}]")
 
 
+# --- summary output --------------------------------------------------------------------------
+# THREE metric columns, fixed width, chosen so every row has the same shape whatever the segment
+# type: two that pointing_metrics computes for EVERY type, then the first present of the three
+# type-specific headliners (a turn row shows its turn rate, a step row its settle time or its
+# overshoot). More columns would not fit a terminal at ~40 rows, and the full table is one flag away
+# for anything this points at.
+SUMMARY_ALWAYS = (("term", "terminalOffDeg"), ("rms", "rmsPointingErrorDeg"))
+SUMMARY_EITHER = (("turn", "meanTurnRateDegS"), ("settle", "settleTime"), ("oversh", "overshootDeg"))
+# The rails, in one column: scorecard.RAIL_METRICS with short labels. Printed on every row, not only
+# past scorecard's RAILED threshold, because "this card sits at 40% clamp" is the context that says
+# whether the NEXT batch on it can move at all -- a threshold flag alone can't show that trend.
+SUMMARY_RAILS = (("bank", "bankClampActivePct"), ("cap", "turnRateCapActivePct"),
+                 ("blend", "blendRailPct"), ("aoa", "aoaAboveCeilingPct"))
+
+
+def _cell(sp):
+    """`mean+-stdev%` for one metric, or '-' when the metric is absent. stdev% (not absolute stdev)
+    because the point of a summary row is comparing REGIMES against each other, and 8% spread means
+    the same thing on a 3 deg terminal error as on a 19 deg/s turn rate."""
+    if sp is None:
+        return "-"
+    # "n/a", not "0%", when there is no stdev: n=1, or a mean of 0 to divide by. A printed "+-0%"
+    # must only ever mean "measured, and every run agreed".
+    pct = f"{sp['stdevPctOfMean']:.0f}%" if sp["stdevPctOfMean"] is not None else "n/a"
+    return f"{sp['mean']:.3g}+-{pct}"
+
+
+def _sat_cell(metrics):
+    """The WORST rail on this segment as `<name><pct>%`, or 'none' / '-'. One column: the four are
+    alternatives, not additives -- any single one near 100% already means a gain change cannot move
+    this segment (see scorecard.rail_warning, which thresholds the same numbers). The three cases are
+    kept distinct on purpose: a named rail, 'none' (rails measured, all idle) and '-' (not measured
+    at all, e.g. a pre-v0.85 capture with no bWt column) are three different findings, and naming
+    whichever rail happens to sort last when they are all 0.0% would read as the first."""
+    live = [(metrics[k]["mean"], lbl) for lbl, k in SUMMARY_RAILS if k in metrics]
+    if not live:
+        return "-"
+    v, lbl = max(live)
+    return f"{lbl}{v:.0f}%" if v >= 0.5 else "none"
+
+
+def _trunc(s, w):
+    return s if len(s) <= w else s[:w - 1] + "~"
+
+
+def print_summary(groups):
+    """One line per (card, segment tag) -- the mode that makes a 300-capture batch readable. Group
+    order and within-group segment order are preserved (i.e. the order the card flies its segments),
+    NOT sorted: a card read out of order stops being a story about a flight."""
+    w = _pool_warning([(g["airframe"], g["runs"]) for g in groups])
+    if w:
+        print(f"WARNING: {w}")
+    hdr = (f"{'airframe':<11} {'card':<20} {'tag':<10} {'arm':>3} {'n':>3} {'dur':>6} "
+           f"{'worstRail':>9}  " + "".join(f"{lbl:<16}" for lbl, _ in SUMMARY_ALWAYS) + "type-specific")
+    print(hdr)
+    print("-" * len(hdr))
+    for g in groups:
+        if not g["segments"]:
+            # A group with nothing shared by >=2 runs produces no rows at all -- and in a 300-file
+            # batch it would then simply not appear, which reads as "that card wasn't flown" instead
+            # of "it was flown once". One line, so the absence is visible.
+            print(f"{_trunc(g['airframe'], 11):<11} {_trunc(g.get('card') or '-', 20):<20} "
+                  f"{'--':<10} {'-' if g.get('arm') is None else g['arm']:>3} "
+                  f"{len(g['runs']):>3}  (no segment shared by >=2 of its runs)")
+            continue
+        for seg in g["segments"]:
+            met = seg["metrics"]
+            cells = [f"{lbl} {_cell(met.get(k))}" for lbl, k in SUMMARY_ALWAYS]
+            pick = next(((lbl, k) for lbl, k in SUMMARY_EITHER if k in met), None)
+            cells.append(f"{pick[0]} {_cell(met[pick[1]])}" if pick else "-")
+            trunc = f" [{len(seg['truncatedRuns'])} TRUNC]" if seg["truncatedRuns"] else ""
+            print(f"{_trunc(g['airframe'], 11):<11} {_trunc(g.get('card') or '-', 20):<20} "
+                  f"{_trunc(seg['tag'], 10):<10} {'-' if g.get('arm') is None else g['arm']:>3} "
+                  f"{seg.get('nFull', 0):>3} {seg['fullDurationS']:>5.1f}s {_sat_cell(met):>9}  "
+                  + "".join(f"{c:<16}" for c in cells[:-1]) + cells[-1] + trunc)
+    # Warnings AFTER the table and deduped across the whole batch: the railed segments are already
+    # visible in the worstRail column, so what these add is the ones no column can carry (an
+    # unrecognised tag = a metric set silently not computed).
+    seen = {}
+    for g in groups:
+        for key, (cnt, example) in g.get("runWarnings", {}).items():
+            n, ex = seen.get(key, (0, example))
+            seen[key] = (n + cnt, ex)
+    for cnt, example in sorted(seen.values(), key=lambda v: -v[0]):
+        print(f"WARNING [{cnt} run(s), e.g.]: {example}")
+
+
 # --- selftest ---------------------------------------------------------------------------------
 
 def _fake_seg(tag, duration, **metrics):
@@ -396,7 +556,7 @@ def _fake_seg(tag, duration, **metrics):
             "metrics": {k: {"value": v, "grade": None} for k, v in metrics.items()}, "skipped": {}}
 
 
-def _fake_result(aircraft, json_key, segs, config="", rec=None):
+def _fake_result(aircraft, json_key, segs, config="", rec=None, card=None, warnings=()):
     prov = {}
     if aircraft:
         prov["aircraft"] = aircraft
@@ -406,15 +566,17 @@ def _fake_result(aircraft, json_key, segs, config="", rec=None):
         prov["config"] = config
     if rec is not None:
         prov["rec"] = str(rec)
-    return {"provenance": prov, "segments": segs, "warnings": []}
+    if card:
+        prov["card"] = card
+    return {"provenance": prov, "segments": segs, "warnings": list(warnings)}
 
 
-def _armed(rec, arm, tag="az10", val=2.0, knob="Lead", airframe=("X", "X")):
+def _armed(rec, arm, tag="az10", val=2.0, knob="Lead", airframe=("X", "X"), card=None):
     """One fake (path, result) run carrying a v0.84 arm=/armKnob= header + rec= -- the shape the new
     arm-comparison/balance-check tests below build batches out of."""
     cfg = f"arm={arm} armKnob={knob}"
     return (f"r{rec}.csv", _fake_result(airframe[0], airframe[1], [_fake_seg(tag, 15.0, gPeak=val)],
-                                         cfg, rec=rec))
+                                         cfg, rec=rec, card=card))
 
 
 def selftest():
@@ -431,13 +593,43 @@ def selftest():
     r2 = ("r2.csv", _fake_result("Trainer", "trainer", [_fake_seg("az10", 15.0, gPeak=1.0)]))
     r3 = ("r3.csv", _fake_result("KR-67 Ifrit", "Multirole1", [_fake_seg("az10", 15.0, gPeak=2.4)]))
     groups = group_runs([r1, r2, r3])
-    assert [k for k, _ in groups] == [("multirole1", None), ("trainer", None)], groups
+    assert [k for k, _ in groups] == [("multirole1", None, None), ("trainer", None, None)], groups
     gd = dict(groups)
-    assert len(gd[("multirole1", None)]) == 2 and len(gd[("trainer", None)]) == 1, groups
-    as_af_pairs = lambda gs: [(af, runs) for (af, _arm), runs in gs]          # group_runs -> _pool_warning shape
+    assert len(gd[("multirole1", None, None)]) == 2 and len(gd[("trainer", None, None)]) == 1, groups
+    as_af_pairs = lambda gs: [(af, runs) for (af, _c, _arm), runs in gs]     # group_runs -> _pool_warning shape
     pw = _pool_warning(as_af_pairs(groups))
     assert pw is not None and "2 airframes" in pw, pw
     assert _pool_warning(as_af_pairs(group_runs([r1, r3]))) is None    # a single airframe: nothing to warn about
+
+    # --- CARD in the group key ------------------------------------------------------------------
+    # The leak this closes, in its real shape: `hover` is emitted by BOTH the rotor disk card and the
+    # built-in rotorcraft-v2, so one airframe flying both used to pool two different stimuli into one
+    # spread -- inflating the very noise floor the tool exists to measure. Two cards, same airframe,
+    # same tag: two groups, and neither one's spread contains the other's value.
+    c1 = ("c1.csv", _fake_result("Helo", "helo1", [_fake_seg("hover", 20.0, positionRMSM=1.0)],
+                                 card="rotorcraft-v2"))
+    c2 = ("c2.csv", _fake_result("Helo", "helo1", [_fake_seg("hover", 20.0, positionRMSM=1.2)],
+                                 card="rotorcraft-v2"))
+    c3 = ("c3.csv", _fake_result("Helo", "helo1", [_fake_seg("hover", 20.0, positionRMSM=9.0)],
+                                 card="rotor-hover"))
+    c4 = ("c4.csv", _fake_result("Helo", "helo1", [_fake_seg("hover", 20.0, positionRMSM=9.4)],
+                                 card="rotor-hover"))
+    cg = group_runs([c1, c3, c2, c4])                     # interleaved, as a real batch folder is
+    assert [k for k, _ in cg] == [("helo1", "rotorcraft-v2", None), ("helo1", "rotor-hover", None)], cg
+    spreads = {k[1]: compare_group(runs)[0]["metrics"]["positionRMSM"] for k, runs in cg}
+    assert abs(spreads["rotorcraft-v2"]["mean"] - 1.1) < 1e-9, spreads     # 9.0/9.4 never leaked in
+    assert abs(spreads["rotor-hover"]["mean"] - 9.2) < 1e-9, spreads
+    assert spreads["rotorcraft-v2"]["n"] == 2 and spreads["rotor-hover"]["n"] == 2, spreads
+    # ...and a capture with NO card at all (a hand-recorded free flight) groups sanely: card None is
+    # shared by every such run, so they land in ONE group, exactly as before this key existed.
+    assert card_key(_fake_result("X", "X", [])) is None
+    assert card_key(_fake_result("X", "X", [], card="fixedwing-v2")) == "fixedwing-v2"
+    nocard = group_runs([("f1.csv", _fake_result("Trainer", "trainer", [_fake_seg("fine", 20.0, gPeak=1.0)])),
+                         ("f2.csv", _fake_result("Trainer", "trainer", [_fake_seg("fine", 20.0, gPeak=1.4)]))])
+    assert [k for k, _ in nocard] == [("trainer", None, None)], nocard
+    assert len(nocard[0][1]) == 2 and compare_group(nocard[0][1])[0]["metrics"]["gPeak"]["n"] == 2, nocard
+    # A card is not an airframe: two cards on one airframe must NOT trip the don't-pool warning.
+    assert _pool_warning(as_af_pairs(cg)) is None, _pool_warning(as_af_pairs(cg))
 
     # --- v0.84 A/B arm interleaving -----------------------------------------------------------
     # Two-arm grouping: same airframe, arm=0 and arm=1 split into two distinct groups, in
@@ -446,7 +638,7 @@ def selftest():
     a1, a2 = _armed(1, 0, val=2.0), _armed(4, 0, val=2.2)
     b1, b2 = _armed(2, 1, val=3.0), _armed(3, 1, val=3.4)
     armed_groups = group_runs([a1, b1, b2, a2])
-    assert [k for k, _ in armed_groups] == [("x", 0), ("x", 1)], armed_groups
+    assert [k for k, _ in armed_groups] == [("x", None, 0), ("x", None, 1)], armed_groups
     assert _pool_warning(as_af_pairs(armed_groups)) is None, _pool_warning(as_af_pairs(armed_groups))
 
     # arm_key: numeric arm via cfg_params (unchanged, reused), armKnob via its own regex, and
@@ -461,7 +653,7 @@ def selftest():
     legacy = [("l1.csv", _fake_result("Trainer", "trainer", [_fake_seg("az10", 15.0, gPeak=1.0)])),
               ("l2.csv", _fake_result("Trainer", "trainer", [_fake_seg("az10", 15.0, gPeak=1.2)]))]
     lg = group_runs(legacy)
-    assert [k for k, _ in lg] == [("trainer", None)], lg
+    assert [k for k, _ in lg] == [("trainer", None, None)], lg
     assert len(lg[0][1]) == 2, lg
     legacy_spread = compare_group(lg[0][1])
     assert abs(legacy_spread[0]["metrics"]["gPeak"]["mean"] - 1.1) < 1e-9, legacy_spread   # unaffected by arm work
@@ -510,6 +702,14 @@ def selftest():
         print_table([{"airframe": "x", "runs": ["l1.csv"], "segments": []}], clean_acs)
     out = buf.getvalue()
     assert "ARM COMPARISON" in out and "gPeak" in out and "diff(B-A)" in out, out
+
+    # ...and an A/B is paired per CARD too: arm 0 of one card against arm 1 of another is an A/B of
+    # the two cards, not of the knob. Two cards x two arms = TWO comparisons, never one crossed pair.
+    two_cards = [_armed(1, 0, card="cardA"), _armed(2, 1, card="cardA"),
+                 _armed(3, 0, card="cardB"), _armed(4, 1, card="cardB")]
+    tc = _arm_comparisons(group_runs(two_cards))
+    assert [x["card"] for x in tc] == ["cardA", "cardB"], tc
+    assert _arm_comparisons(group_runs([_armed(1, 0, card="cardA"), _armed(2, 1, card="cardB")])) == []
 
     # spread(): known mean/stdev, and n=1/n=0 don't fake a number.
     sp = spread([2.0, 4.0, 6.0])
@@ -573,6 +773,64 @@ def selftest():
         print_table([{"airframe": "x", "runs": ["n1.csv", "n2.csv", "n3.csv"], "segments": rows5}])
     assert "entryAzSign" in buf.getvalue() and "overshootAzDeg" in buf.getvalue(), buf.getvalue()
 
+    # --- run-list truncation ---------------------------------------------------------------------
+    # 4 files still print in full; the 5th is where a 12-replicate heading stops fitting a terminal.
+    assert _runs_label(["a", "b", "c", "d"]) == "a, b, c, d"
+    assert _runs_label(["a", "b", "c", "d", "e"]) == "a, b, c (+2 more)"
+    assert _runs_label([f"r{i}.csv" for i in range(12)]).endswith("(+9 more)")
+
+    # --- --summary ---------------------------------------------------------------------------
+    # The mode that has to make 300 captures readable: ONE line per (card, tag), the headline metrics
+    # as mean+-stdev%, the worst rail in its own column, and every line inside a terminal width.
+    sum_runs = [(f"s{i}.csv", _fake_result("KR-67", "Multirole1", [
+        _fake_seg("turn360", 30.0, terminalOffDeg=3.5 + 0.4 * i, rmsPointingErrorDeg=9.4,
+                  meanTurnRateDegS=19.1, blendRailPct=100.0, bankClampActivePct=96.0),
+        _fake_seg("az30", 8.0, terminalOffDeg=0.4, rmsPointingErrorDeg=6.0, settleTime=2.1),
+    ], card="fixedwing-sweep")) for i in range(8)]
+    sgroups = [{"airframe": "multirole1", "card": "fixedwing-sweep", "arm": None,
+                "runs": [p for p, _ in sum_runs], "segments": compare_group(sum_runs),
+                "runWarnings": _run_warnings(sum_runs)}]
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        print_summary(sgroups)
+    lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+    body = [l for l in lines if l.startswith("multirole1")]
+    assert len(body) == 2, lines                                  # ONE row per segment, no metric list
+    assert all(len(l) <= 130 for l in lines), max(lines, key=len)  # fits a terminal
+    turn, az = body
+    assert " 8 " in turn and "30.0s" in turn, turn                 # n and duration
+    assert "blend100%" in turn, turn                               # the WORST rail, named, not 96% bank
+    assert "term 4.9+-20%" in turn, turn        # mean of 3.5..6.3 with its spread as a % of the mean
+    assert "rms 9.4+-0%" in turn, turn          # ...and a constant metric reads 0%, never "-"
+    assert "turn 19.1" in turn and "settle" not in turn, turn      # type-specific pick: the turn rate
+    assert "settle 2.1" in az and "turn " not in az, az            # ...and the step gets settleTime
+    assert az.split()[6] == "-", az        # no rail column on that segment: NOT MEASURED...
+    # ...which _sat_cell keeps distinct from "measured, all idle". Naming whichever rail sorts last
+    # when every one of them reads 0.0% would look exactly like a rail that is actually active.
+    assert _sat_cell({"blendRailPct": {"mean": 0.0}, "bankClampActivePct": {"mean": 0.0}}) == "none"
+    assert _sat_cell({"blendRailPct": {"mean": 100.0}, "bankClampActivePct": {"mean": 96.0}}) == "blend100%"
+    assert _sat_cell({}) == "-"
+    # a lone run still gets a line: in a 300-file batch a group that prints nothing reads as "that
+    # card was never flown", which is a different (and wrong) finding from "it was flown once".
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        print_summary([{"airframe": "x", "card": "lonely-card", "arm": None, "runs": ["one.csv"],
+                        "segments": [], "runWarnings": {}}])
+    assert "lonely-card" in buf.getvalue() and "no segment shared" in buf.getvalue(), buf.getvalue()
+    # scorecard's per-run warnings reach this page, deduped by norm_warning with a count -- otherwise
+    # a railed batch is 8 copies of one line per card, which is how a warning stops being read.
+    warned = [(f"w{i}.csv", _fake_result("X", "X", [_fake_seg("turn360", 30.0, gPeak=2.0)],
+                                         warnings=[f"segment 'turn360' is RAILED: blendRailPct={99.0 + i * 0.1:.1f}%"]))
+              for i in range(8)]
+    rw = _run_warnings(warned)
+    assert len(rw) == 1 and list(rw.values())[0][0] == 8, rw       # 8 near-identical texts -> one line
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        print_summary([{"airframe": "x", "card": "c", "arm": None, "runs": [p for p, _ in warned],
+                        "segments": compare_group(warned), "runWarnings": rw}])
+        print_table([{"airframe": "x", "card": "c", "arm": None, "runs": [p for p, _ in warned],
+                      "segments": compare_group(warned), "runWarnings": rw}])
+    out = buf.getvalue()
+    assert out.count("is RAILED") == 2, out                        # once per mode, not 8x per mode
+    assert "[8 run(s), e.g.]" in out and "[8/8 runs, e.g.]" in out, out
+
     print("selftest OK")
 
 
@@ -583,6 +841,8 @@ def main(argv):
         selftest()
         return
     json_path, files, i = None, [], 0
+    summary = "--summary" in argv
+    argv = [a for a in argv if a != "--summary"]
     while i < len(argv):
         if argv[i] == "--json":
             if i + 1 >= len(argv):
@@ -593,7 +853,7 @@ def main(argv):
             files.append(argv[i])
             i += 1
     if len(files) < 2:
-        sys.exit("usage: compare-runs.py [--json out.json] <recording.csv> <recording2.csv> [more.csv ...]\n"
+        sys.exit("usage: compare-runs.py [--json out.json] [--summary] <recording.csv> <recording2.csv> [more.csv ...]\n"
                   "       compare-runs.py --selftest")
     groups, arm_comparisons = compare_all(files)
     if json_path:
@@ -603,6 +863,8 @@ def main(argv):
         with open(json_path, "w", encoding="utf-8") as out:
             json.dump({"groups": groups, "armComparisons": arm_comparisons}, out, indent=2)
         print(f"wrote {json_path}")
+    elif summary:
+        print_summary(groups)
     else:
         print_table(groups, arm_comparisons)
 

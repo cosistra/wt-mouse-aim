@@ -2,8 +2,8 @@
   "name": "rotor-bob",
   "cls": "Helo,Tiltwing,VTOL",
   "step": 0.02,
-  "airframe": "any rotorcraft; a tiltwing/VTOL must already be in the HOVER configuration (a card never writes customAxis1)",
-  "note": "Vertical demand at hover, mirrored: +25 deg then -25 deg about a level datum, so climb and descent are equal-magnitude steps. UNGATED like rotor-hover - no reset between replicates.",
+  "airframe": "",
+  "note": "Vertical demand at hover, mirrored: +25 deg then -25 deg about a level datum, so climb and descent are equal-magnitude steps. UNGATED like rotor-hover - no reset between replicates. AIRFRAME: any rotorcraft; a tiltwing/VTOL must already be in the HOVER configuration (a card never writes customAxis1).",
   "startSpeed": 0,
   "startAlt": 0,
   "segments": [

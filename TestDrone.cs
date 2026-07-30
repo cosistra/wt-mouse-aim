@@ -78,9 +78,12 @@ namespace NuclearOptionMouseAim
         //
         // Empty / <= 0 means "the card doesn't say", and then the Drone knob stands exactly as it
         // did before this existed. That fallback is what keeps a hand-configured launch working.
-        private static string     _cardFrame = "";  // card's airframe jsonKey; "" = the Cfg list stands
-        private static float      _cardAlt;         // card's startAlt, m MSL; <= 0 = Cfg.DroneSpawnAlt stands
-        private static float      _cardSpeed;       // card's startSpeed, m/s; <= 0 = Cfg.DroneSpawnSpeed stands
+        //
+        // v0.90b: the whole preflight is kept rather than three fields copied out of it, so the run
+        // board can call the SAME three resolvers below against a FRESH preview and be guaranteed to
+        // agree with what a launch would do. It must not refresh this one — a batch mid-stagger would
+        // change airframe half way through.
+        private static ScenarioPlayer.Preflight _plan;
 
         public static IReadOnlyList<Drone> Live => _live;
 
@@ -167,10 +170,9 @@ namespace NuclearOptionMouseAim
             // The `cls` field is deliberately NOT consulted here: it is a PILOT-TYPE filter applied per
             // aircraft after spawn (does this card suit what I'm flying?), not a statement about what
             // to spawn. Reading it as one would let "Plane" mean an airframe.
-            var pre = ScenarioPlayer.Preview();
-            _cardFrame = pre.Cards > 0 ? (pre.Airframe ?? "") : "";
-            _cardAlt   = pre.Cards > 0 ? pre.StartAlt   : 0f;
-            _cardSpeed = pre.Cards > 0 ? pre.StartSpeed : 0f;
+            // Preview() already reports "" / 0 for every field when nothing is selected, so there is
+            // no Cards>0 guard to write here: the fallbacks below ARE the no-card case.
+            var pre = _plan = ScenarioPlayer.Preview();
 
             WTMouseAimPlugin.Log.LogInfo(
                 $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
@@ -196,17 +198,24 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[drone] card '{pre.Name}' ({pre.Cards} selected, {pre.Duration:0}s each, x{pre.Repeat} "
                     + $"from {pre.RepeatSrc}{armPart}): "
-                    + $"airframe '{string.Join(",", AirframeList())}' [{(string.IsNullOrEmpty(_cardFrame) ? "DroneAirframe" : "card")}], "
-                    + $"{SpawnAlt():0} m [{(_cardAlt > 0f ? "card" : "DroneSpawnAlt")}], "
-                    + $"{SpawnSpeed():0} m/s [{(_cardSpeed > 0f ? "card" : "DroneSpawnSpeed")}].");
+                    + $"airframe '{AirframeOf(pre)}' [{(string.IsNullOrEmpty(pre.Airframe) ? "DroneAirframe" : "card")}], "
+                    + $"{AltOf(pre):0} m [{(pre.StartAlt > 0f ? "card" : "DroneSpawnAlt")}], "
+                    + $"{SpeedOf(pre):0} m/s [{(pre.StartSpeed > 0f ? "card" : "DroneSpawnSpeed")}].");
             }
         }
 
-        // The spawn state, card-first. Two one-liners rather than inlined ternaries because they are
-        // read from both the launch log and the launch itself, and those two must never disagree —
-        // the log IS the operator's confirmation of what the spawn did.
-        private static float SpawnAlt()   => _cardAlt   > 0f ? _cardAlt   : Cfg.DroneSpawnAlt.Value;
-        private static float SpawnSpeed() => _cardSpeed > 0f ? _cardSpeed : Cfg.DroneSpawnSpeed.Value;
+        // THE SPAWN STATE, CARD-FIRST. Taken as arguments rather than read off `_plan` so the run
+        // board can ask the same three questions of a FRESH preview before the key is pressed — and
+        // get, by construction, the answers the launch will use. Three functions with one caller each
+        // would be indirection; three with two callers that must never disagree are the point (the
+        // launch log and the board are both the operator's confirmation of what will fly).
+        internal static string AirframeOf(ScenarioPlayer.Preflight p) =>
+            string.IsNullOrEmpty(p.Airframe) ? (Cfg.DroneAirframe.Value ?? "") : p.Airframe;
+        internal static float  AltOf(ScenarioPlayer.Preflight p)   => p.StartAlt   > 0f ? p.StartAlt   : Cfg.DroneSpawnAlt.Value;
+        internal static float  SpeedOf(ScenarioPlayer.Preflight p) => p.StartSpeed > 0f ? p.StartSpeed : Cfg.DroneSpawnSpeed.Value;
+
+        private static float SpawnAlt()   => AltOf(_plan);
+        private static float SpawnSpeed() => SpeedOf(_plan);
 
         // =========================================================================================
         // THE FIXED STEP. Called from WTMouseAimPlugin.FixedUpdate — a real fixed-step hook that
@@ -287,8 +296,9 @@ namespace NuclearOptionMouseAim
         // batch is still available: leave `airframe` out of the card and use the Cfg list.
         private static string[] AirframeList()
         {
-            if (!string.IsNullOrEmpty(_cardFrame)) return new[] { _cardFrame };
-            var parts = (Cfg.DroneAirframe.Value ?? "").Split(',');
+            // One path, not two: AirframeOf already picks the card's key over the list, and a jsonKey
+            // never contains a comma — so splitting a card's single key just yields that key.
+            var parts = AirframeOf(_plan).Split(',');
             int n = 0;
             for (int i = 0; i < parts.Length; i++)
             {
