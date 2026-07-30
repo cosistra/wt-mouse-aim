@@ -11,6 +11,14 @@ at-a-glance map of every subsystem, then per-subsystem zoom-ins (frame timeline,
 explicitly. This file tells you where code *lives*; that one tells you how it *works* and why.
 **You are required to keep it current — see [Keeping the diagram current](#keeping-the-diagram-current).**
 
+**What to fly, and why that:** [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md) is the standing
+test plan — the state of what has actually been measured (one card, one airframe, saturated), the
+batches to run in order, and the airframe roster with the entry conditions each one can survive. It
+supersedes the Experiments section of [`FLIGHT-PROTOCOL.md`](FLIGHT-PROTOCOL.md), which remains the
+record of how the *instrument* was validated (gates A–D, all passed). Read the characterization plan
+before proposing an experiment; most of the obvious ones are already scheduled, and several would
+currently measure a railed actuator rather than the control law.
+
 Machine-specific paths are written as placeholders:
 - `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`). The build
   **auto-discovers** it (Steam scan) — no path is committed anywhere. To **run** the mod you also

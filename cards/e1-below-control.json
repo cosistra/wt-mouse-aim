@@ -1,0 +1,18 @@
+{
+  "name": "e1-below-control",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "",
+  "note": "THE CONTROL FOR E1: oblique-6's geometry, unchanged - the same 6 deg diamond centred ON the horizon - with the same Control/BelowAlignSuppress swept ABBA. The v0.85 suppression keys on alignFracH, horizon-referenced belowness, which is ~0 here, so this knob must have NO effect on this card. PASS: the two arms are indistinguishable - terminalOffDeg, rollYawOpposedPct and stickFlipRateR separate by less than the mirror-pair spread compare-runs.py reports for this card. FAIL: any arm separation at all; that is a regression, the suppression reaching a geometry it was never supposed to touch, and it also invalidates whatever e1-below-suppress measured. Fly it in the same session and on the same airframes as e1-below-suppress, DroneCount 1. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+  "startSpeed": 250,
+  "startAlt": 4000,
+  "repeat": 8,
+  "armToggle": "Control/BelowAlignSuppress",
+  "segments": [
+    { "tag": "arm",     "dur": 6, "az": 0,     "el": 4.24 },
+    { "tag": "obDR6bc", "dur": 8, "az": 4.24,  "el": 0 },
+    { "tag": "obDL6bc", "dur": 8, "az": 0,     "el": -4.24 },
+    { "tag": "obUL6bc", "dur": 8, "az": -4.24, "el": 0 },
+    { "tag": "obUR6bc", "dur": 8, "az": 0,     "el": 4.24 }
+  ]
+}

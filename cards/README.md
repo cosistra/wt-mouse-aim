@@ -14,8 +14,10 @@ Copy-Item cards\*.json $dest -Force        # then restart the game: cards bind a
 ```
 
 Built-in cards (`fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) are **not** here — they live in
-`ScenarioPlayer.cs`. This grid is additive: 16 cards, ~11 min of flying, sized against the law's own
-thresholds (below) to cover the regimes the built-ins leave open.
+`ScenarioPlayer.cs`. This grid is additive: 16 baseline cards, ~11 min of flying, sized against the
+law's own thresholds (below) to cover the regimes the built-ins leave open — plus **5 `e*`
+attribution cards**, each one A/B experiment wired into its own file (see
+[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-5-cards)).
 
 ## The three thresholds every card is sized against
 
@@ -112,6 +114,30 @@ run key is pressed; the pilot only has to be *in* the right aircraft. What the d
 `rotor-hover`/`rotor-bob`, the two that still need a human, because an ungated card gets no placement
 and the hover has to exist before the card starts.
 
+### Attribution A/B — one checkbox per experiment (5 cards)
+
+[`LAW-CHARACTERIZATION.md`](../LAW-CHARACTERIZATION.md) → *Batch 4* is the spec. Each card is an
+**existing** card's geometry copied verbatim with the knob wired in via `armToggle` and `repeat: 8`
+— a new stimulus and a new knob moving at once would be unattributable — so running an experiment is
+one checkbox and the spawn key, and the capture says which arm it flew. Only the segment tags are
+renamed (suffix `bs`/`bc`/`al`/`rtl`/`mff`), because `compare-runs.py` keys segments by tag alone.
+
+**`DroneCount 1` on all five.** With more, the arm scheduler stands down and the whole batch flies
+one arm while every capture still labels itself A or B. `blendRailPct` first on the two sweeps: a
+railed segment cannot show a gain change, which is what made every previous A/B measure the clamp.
+
+| card | knob swept | geometry from | pass / fail |
+|---|---|---|---|
+| `e1-below-suppress` | `Control/BelowAlignSuppress` | `oblique-below` | on-arm `terminalOffDeg`/`rollYawOpposedPct` below the off arm and the mirror pairs closer together. No separation = the v0.85 fix does nothing where it was aimed |
+| `e1-below-control` | `Control/BelowAlignSuppress` | `oblique-6` | **the control — the arms must be indistinguishable.** `alignFracH` is ~0 on the horizon-centred diamond, so any arm separation beyond this card's own mirror-pair spread is a regression *and* invalidates `e1-below-suppress` |
+| `e1b-align-lead` | `Control/AlignRateLead` | `oblique-below` | on-arm `overshootAzDeg`/`stickFlipRateR` down at no cost in `terminalOffDeg`. Up = finding 17's 64% roll-damping side effect is what the knob actually does |
+| `e2-rel-turn-lead` | `Control/RelativeTurnLead` | `sweep-slow` | gate on `blendRailPct` ≈ 0 (the v0.83 A/B ran at 96.9% clamped and measured the clamp), then on-arm `terminalOffDeg` down. `leadDeg` moving while `terminalOffDeg` does not = correct and worthless |
+| `e3-marker-ff` | `Control/MarkerRateFeedForward` | `sweep-slow` | same rail gate, then on-arm mean \|azErr\| down. Arms matching *while unrailed* extends finding 16 (0.0000 of roll stick above the rail) rather than closing it; `aimRate` on both arms is what separates a null from "never fired" |
+
+`e1b` is a separate card rather than a second arm on `e1-below-suppress` for the reason Batch 4
+gives: armed together, a below-suppression change and a 64% roll-damping change are unattributable.
+Each is 8 replicates — 5.1 min for an oblique card, 6.1 for a sweep, ~28 min for all five.
+
 ## What the measurements say about the "confused small movements" report
 
 The oblique family was originally justified as "isolate the roll/yaw allocation decision". Measuring
@@ -159,7 +185,9 @@ magnitude. Three deliberate exceptions:
 **Tags are distinct per card, even when the metric is the same.** `compare-runs.py` keys segments by
 tag alone (`_segments_by_tag`), so a 90 m/s `az30` and a 250 m/s `az30` would be pooled as replicates
 of each other. Hence `az30R`/`az30L`, `turn360creep`/`slow`/`base`/`loq`/`stol`,
-`hoveryawR`/`hoveryawL`. They still resolve to the right metric type because `TAG_TYPE_RULES` matches
+`hoveryawR`/`hoveryawL`, and the attribution set's `obDR6bs`/`obDR6bc`/`obDR6al` and
+`turn360rtl`/`turn360mff` — same geometry as the card they copy, deliberately not the same tag.
+They still resolve to the right metric type because `TAG_TYPE_RULES` matches
 by prefix — adding a suffix costs nothing, reusing a name costs a silent pooling bug.
 
 **Every tag is in `scorecard.py`'s `TAG_TYPE_RULES`, and its selftest checks it.**
@@ -232,7 +260,7 @@ nothing behaves exactly as it always did.
 Four rules the `scorecard.py --selftest` enforces, because nothing at runtime will:
 
 - **`airframe` holds a jsonKey or nothing.** It was documentation for every card written before v0.90
-  gave it behaviour, so all sixteen shipped cards leave it `""` and describe the airframe in `note`
+  gave it behaviour, so every shipped card leaves it `""` and describes the airframe in `note`
   (`"note": "… AIRFRAME: any jet at the fixedwing-v2 entry condition."`). A jsonKey contains no
   whitespace; one that does is prose, and the mod blanks it at load with a `[card]` warning rather
   than trying to spawn a sentence.

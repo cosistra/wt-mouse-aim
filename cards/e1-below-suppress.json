@@ -1,0 +1,18 @@
+{
+  "name": "e1-below-suppress",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "",
+  "note": "E1 of the ATTRIBUTION batch: oblique-below's geometry, unchanged, with Control/BelowAlignSuppress swept ABBA so one checkbox flies both arms. It asks whether the v0.85 roll-invariant below-nose suppression buys anything where the elDn defect lives - the regime that stands 6.92 deg of error at +-43 deg of bank while its LARGER upper mirror stands 0.03. PASS: with the suppression on, terminalOffDeg and rollYawOpposedPct on the below-nose segments come down against the off arm and the mirror pairs move closer together. FAIL: no separation between arms (the fix does nothing where it was aimed), or the on arm is worse. Read blendRailPct first - a railed segment is no signal, not a good score. Fly with DroneCount 1: the arm scheduler stands down when a second aircraft is mid-card. Its control is e1-below-control, same knob on the above-nose diamond. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+  "startSpeed": 250,
+  "startAlt": 6000,
+  "repeat": 8,
+  "armToggle": "Control/BelowAlignSuppress",
+  "segments": [
+    { "tag": "arm",     "dur": 6, "az": 0,     "el": -15.76 },
+    { "tag": "obDR6bs", "dur": 8, "az": 4.24,  "el": -20 },
+    { "tag": "obDL6bs", "dur": 8, "az": 0,     "el": -24.24 },
+    { "tag": "obUL6bs", "dur": 8, "az": -4.24, "el": -20 },
+    { "tag": "obUR6bs", "dur": 8, "az": 0,     "el": -15.76 }
+  ]
+}

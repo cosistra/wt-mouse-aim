@@ -1,0 +1,18 @@
+{
+  "name": "e1b-align-lead",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "",
+  "note": "E1b: oblique-below's geometry, unchanged, with Control/AlignRateLead swept ABBA. Its own card and not an extra arm on e1-below-suppress because GENERALITY-REVIEW finding 17 shows the lead is also a roll-DAMPING change (effective roll-rate feedback x1.00 at blendWeight 0 rising to x1.64 at 1, measured mean x1.39 on elDn) - armed together with the below-suppression the two are unattributable. PASS: the on arm lowers the roll-axis transient - overshootAzDeg and stickFlipRateR on the below-nose segments - without paying for it in terminalOffDeg. FAIL: the on arm raises stickFlipRateR or wobbleEpisodes, i.e. the damping side effect is what the knob actually does, in the one segment where blendWeight is modulated at the frequency of the cycle it damps. DroneCount 1. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+  "startSpeed": 250,
+  "startAlt": 6000,
+  "repeat": 8,
+  "armToggle": "Control/AlignRateLead",
+  "segments": [
+    { "tag": "arm",     "dur": 6, "az": 0,     "el": -15.76 },
+    { "tag": "obDR6al", "dur": 8, "az": 4.24,  "el": -20 },
+    { "tag": "obDL6al", "dur": 8, "az": 0,     "el": -24.24 },
+    { "tag": "obUL6al", "dur": 8, "az": -4.24, "el": -20 },
+    { "tag": "obUR6al", "dur": 8, "az": 0,     "el": -15.76 }
+  ]
+}
