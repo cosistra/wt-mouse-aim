@@ -5,19 +5,21 @@ Six changes shipped without a single flight. This is the order to fly them in, a
 fails invalidates everything below it, so stop there rather than collecting data that cannot mean
 anything.
 
-Nothing in v0.82–v0.87 has been flown. Every "expected" number below is a **prediction**. A
-prediction that misses is a result, not a failure of the test — write down what actually happened.
+Gates A, B and C have flown (R21/R23/R24) and all three passed; **Gate D onward is still unflown**,
+and every "expected" number from there down is a **prediction**. A prediction that misses is a
+result, not a failure of the test — write down what actually happened. Two of the passed gates
+corrected a claim made above them, so read each `### R__ result` section, not just the verdict.
 
 | ver | change | flown |
 |---|---|---|
 | 0.82 | `ChaseController` per-aircraft | **crewed, Gate A** |
-| 0.83 | relative turn lead + stall-gated integrator | crewed only — never A/B'd |
+| 0.83 | relative turn lead + stall-gated integrator | **A/B'd crewed (R23) and on the drone (R24) — same sign, same size** |
 | 0.84 | entry reset + ABBA arms | **ABBA yes, Gate B; reset only PARTLY works — see B result** |
 | 0.85 | below-nose roll-to-align loop broken | not exercised — `fixedwing-sweep` is above-nose |
 | 0.86 | `ScenarioPlayer`/`ManeuverRecorder` per-aircraft, `frameMs` | **crewed, Gate A** |
-| 0.87 | drones fly the real control law | no — Gate C |
+| 0.87 | drones fly the real control law | **PASSED Gate C (R24)** |
 | 0.88 | trimmed entry placement (from Gate A) | **flown Gate B — disproved, reverted in 0.89** |
-| 0.89 | 0.88 reverted; placement-tick reset defect measured | harness-only revert |
+| 0.89 | 0.88 reverted; placement-tick reset defect measured | **flown Gate C (R24) — the defect reproduces on the drone** |
 
 Total for gates A–D: **~25 minutes**. Do not skip to the experiments.
 
@@ -143,7 +145,7 @@ observation stands as a fact; the inference drawn from it does not. Gate A's own
 
 ---
 
-## Gate C — one drone flies the law
+## Gate C — one drone flies the law — **PASSED 2026-07-29 (R24)**
 
 **Setup.** `DroneEnabled` **on**, `DroneCount` **1**, `DroneAirframe` `Multirole1`,
 `DroneSpawnAlt` 4000, `DroneSpawnSpeed` 250 (matched to the card's entry condition). Tick one
@@ -163,6 +165,67 @@ same card.
 | `thr` ≠ `ScenarioThrottle` | `OwnInputs` not landing before `FilterInputs`. **This is the R18 signature** and it reads as an energy failure, not a throttle bug |
 | `reason=abort: no aim demand written` / `abort: the instructor is not flying` | the new refusals fired — real, not noise |
 | `the placement injected velocity`, or G damage at spawn | the first-pilot-step deferral wasn't late enough; move the start behind a fixed-step count |
+
+### R24 result — **PASSED 2026-07-29**
+
+v0.89.0, session `20260729-220059`. **One F2 press** launched drone #1 (`Multirole1` = KR-67 Ifrit),
+which flew `fixedwing-sweep` **4× unattended**.
+
+| criterion | measured |
+|---|---|
+| log sequence | `[drone] #1 'Multirole1' spawned at (8000, -32, 719) local / 4000 m MSL, 250 m/s, hdg 0deg. 1 live.` → `[card] entry condition set` → `WT Mouse Aim: ON (fixed-wing) — chase control engaged [drone].` ×4 |
+| CSV name | `d1-Multirole1` present on all 4; every one `reason=card 'fixedwing-sweep' complete`, dur 36.0 s, 576–578 samples |
+| scorecard tags | `arm` (EXCLUDED) + `turn360` only — **no `unknown` warnings** |
+| `thr` | **0.700 constant** = `ScenarioThrottle` exactly. Not the R18 signature |
+| `outR` | first 0.000, range −0.034…0.705, mean −0.005 — the control law, **not** the `2.0·t.right.y` level-hold |
+| `frameMs` | **16.7 constant** across all four; zero `[drone] frame hitch` during the runs (the 617/767/1048 ms hitches in the log are all *after* run 04, around the quit) |
+| ABBA | `arm=` **0, 1, 1, 0** on `armKnob=RelativeTurnLead`, restored to True at suite end |
+| entry audits | run 01 `snapBackM=0.0` (anchor capture), runs 02–04 `snapBackM=1763.2 / 1730.3 / 1719.6`, all `v=…->250.0 alt=…->4000.0 fuel=…->1.000 ctrlReset=1`. No damage |
+
+A fifth capture (`d2-…-05`) from a second F2 press aborted at 8.4 s with `reason=abort: aircraft
+gone` when the mission was quit (`QuitMissionButton.QuitGame` in the log) — a clean, correctly-
+reasoned abort, not a failure.
+
+`terminalOffDeg` on `turn360`, drone against the crewed R23 reference band for the same card and the
+same airframe:
+
+| arm | crewed R23 | drone R24 |
+|---|---|---|
+| A (`RelativeTurnLead` OFF) | 6.21–6.28 | 6.56 / 7.44 (mean **7.00**) |
+| B (ON) | 9.32–9.35 | 10.0 / 10.5 (mean **10.3**) |
+
+Same band, same ordering, drone ~0.6–1.0° wider. The **uncrewed spread is coarser than crewed** —
+arm A sd 0.63 against ~0.04 crewed — so the drone rig has its own, larger noise floor on this card.
+n=2/arm, so that is an observation to size the next batch with, not yet a result.
+
+The drone arm comparison also **reproduced the crewed R23 `RelativeTurnLead` finding**, same sign and
+similar magnitude on every metric: `terminalOffDeg` **+3.28**, `rmsPointingErrorDeg` +2.73,
+`blendRailPct` +52.5 (41.4 → 93.9), `turnRateCapActivePct` +91.9 (4.99 → 96.9),
+`turnRateDemandRatio` 0.755 → 0.994, `bankDemandExcessDeg` +2.03. `bankClampActivePct` is 96.9% in
+**both** arms.
+
+### Two findings out of the same batch
+
+**1. The drone path is the crewed path, and defect #23 is the proof.** The placement-tick artifact
+from Gate B reproduces on the drone with numbers indistinguishable from the crewed batch — at
+`tSeg=0.000`, run 01 (no preceding card) reads `rollRate` 0.00 / `leadDeg` 0.00, while runs 02–04
+read `rollRate` **−58.99 / −58.56 / −58.49** (crewed: −58.99 / −58.66 / −58.65) and `leadDeg`
+**7.01 / 13.58 / 14.37** against a <0.04° error. Same defect, same magnitude, same run-index
+progression. That is stronger evidence for Gate C than any metric in the table above: the drone is
+**not** running a parallel implementation of the law. #23 stays open and is **not** a Gate C failure.
+
+**2. Distance and uncrewed-ness do not degrade the flight model** — verified in the decompiled source
+(0.34), not inferred. The only live simple/complex-physics switch is `Aircraft.SetLocalSim`, fed by
+`CheckIfLocalSim()`: `Player != null ? Player.IsLocalPlayer : (Editor ? false : Server.Active)`. An
+uncrewed aircraft has `Player == null`, so on a host or in SP it falls through to
+`Server.Active == true` and gets **complex** physics. There *is* a distance LOD —
+`Aircraft.CheckPhysicsLod()`, 10 km off the camera with a `gForce < 2` hysteresis — but it is dead
+code: `private`, **zero callers** in the whole assembly, and 8 km is inside its keep-complex radius
+anyway. No other distance gate touches dynamics: `displayDetail` drives only particles/audio/
+animation, the aero job has no culling, `Time.fixedDeltaTime` is never rewritten per-unit, and
+`Aircraft.FilterInputs` / `ControlsFilter` / `RelaxedStabilityController` contain no
+`Player`/`LocalSim`/distance branch. **Caveat:** this holds only while `Server.Active` — as an MP
+client an aircraft you don't own is simple/remote, and the harness already refuses to spawn there.
 
 ---
 
