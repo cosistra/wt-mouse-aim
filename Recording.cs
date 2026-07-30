@@ -216,6 +216,27 @@ namespace NuclearOptionMouseAim
             set => _cardTag = FileSafe(value);
         }
 
+        // v0.90. The config knobs THIS CARD pinned for itself, as "Section/Key=value" pairs — written
+        // as one '# override' header line and nothing else.
+        //
+        // NOT A COLUMN, deliberately, and not merely to keep the count at 64: the value is constant for
+        // the whole capture by construction (a card pins its knobs before the recorder opens and hands
+        // them back after it closes), and a constant belongs in the header, not repeated on 9000 rows.
+        //
+        // It is also NOT redundant with '# config', which reports the live value of every knob and so
+        // already shows the pinned ones — what it cannot show is that the CARD chose them rather than
+        // the operator. That distinction is the whole point: it is what lets a batch tell "this run was
+        // configured by its card" from "someone left a knob set". Empty for a hand-flown capture and
+        // for a card that pins nothing, in which case no line is written at all. Sanitised on
+        // assignment, same as EntryNote: a newline here would corrupt the header block.
+        private string _overrideNote = "";
+        public string OverrideNote
+        {
+            get => _overrideNote;
+            set => _overrideNote = string.IsNullOrEmpty(value) ? ""
+                                 : value.Replace('\r', ' ').Replace('\n', ' ');
+        }
+
         // Everything that lands in a filename goes through this.
         private static string FileSafe(string s)
         {
@@ -328,6 +349,9 @@ namespace NuclearOptionMouseAim
                 // `'(.*)'` and a header line is a contract. Absent entirely for a crewed capture.
                 if (drone > 0) _w.WriteLine($"# drone {drone}");
                 if (!string.IsNullOrEmpty(_cardTag)) _w.WriteLine($"# card {_cardTag}"); // M1: scripted run
+                // Directly under '# card' because it only ever exists for one: it says what that card
+                // set, so reading it apart from the card name is meaningless.
+                if (!string.IsNullOrEmpty(_overrideNote)) _w.WriteLine($"# override {_overrideNote}"); // v0.90: what the CARD pinned
                 if (!string.IsNullOrEmpty(_entryNote)) _w.WriteLine($"# entry {_entryNote}"); // v0.84: reset provenance
                 _w.WriteLine($"# config {Cfg.SnapshotString()}");
                 _w.WriteLine($"# fbw {fbwLine}");

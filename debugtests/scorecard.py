@@ -95,6 +95,67 @@ TAG_TYPE_RULES = [
 ]
 
 
+# --- card SETUP validation (v0.90) ----------------------------------------------------------------
+# A card now carries its own run configuration -- `repeat`, `armToggle`, and a `config` list of knobs
+# pinned for its duration -- so that the operator ticks one checkbox and presses the spawn key. That
+# moves three ways to misconfigure a batch out of the operator's hands and INTO the card file, where
+# nothing at runtime rejects them: JsonUtility ignores what it can't parse, and ScenarioPlayer's
+# apply path is fail-soft by design (one warning per bad override, then it flies anyway). A card that
+# is quietly wrong still produces a capture that scores fine and answers a different question, which
+# is the failure this whole release exists to remove -- so the check has to be here, offline, where
+# it fails loudly before anything flies.
+
+
+def split_spec(spec):
+    """('Section', 'Key') for a config spec, or None if it's malformed. Mirrors
+    ScenarioPlayer.SplitSpec exactly: bare keys default to section 'Control', at most one slash, and
+    neither half may be empty ('/Foo' and 'Foo/' are typos, not bare keys)."""
+    if not isinstance(spec, str):
+        return None
+    spec = spec.strip()
+    if not spec:
+        return None
+    if "/" not in spec:
+        return ("Control", spec)
+    if spec.count("/") > 1:
+        return None
+    sec, key = (p.strip() for p in spec.split("/"))
+    return (sec, key) if sec and key else None
+
+
+def card_setup_problems(card):
+    """List of human-readable problems with one card's run configuration; empty == fine."""
+    out = []
+    rep = card.get("repeat", 0)
+    # 0 means "fall back to Cfg.ScenarioRepeat", so it is legal; the C# side CLAMPS to 1..20, which
+    # means a card asking for 40 would silently fly 20 replicates and no artifact would say so.
+    if not isinstance(rep, int) or isinstance(rep, bool) or not 0 <= rep <= 20:
+        out.append("repeat %r is not an integer in 0..20 (0 = use Cfg.ScenarioRepeat)" % (rep,))
+
+    arm = split_spec(card.get("armToggle") or "")
+    for i, o in enumerate(card.get("config") or []):
+        where = "config[%d]" % i
+        parsed = split_spec((o or {}).get("key") or "")
+        if parsed is None:
+            out.append("%s key %r is not 'Key' or 'Section/Key'" % (where, (o or {}).get("key")))
+            continue
+        # Empty values are rejected rather than treated as "leave it alone": TomlTypeConverter would
+        # throw on most types and the override would be skipped with a warning, i.e. the card would
+        # silently fly with the knob unset -- indistinguishable in the capture from not asking.
+        if not str((o or {}).get("value") or "").strip():
+            out.append("%s ('%s/%s') has an empty value" % ((where,) + parsed))
+        # THE ONE THAT MATTERS. Pinning the knob the card's own A/B schedule sweeps flies every
+        # replicate on ONE arm while every capture still carries an honest-looking `arm=0`/`arm=1`
+        # label -- so the A/B reads as "no difference" and nothing in the artifacts says why.
+        # Compared AFTER the grammar split so 'Knob' and 'Control/Knob' are recognised as the same
+        # entry; a raw string compare is exactly how this would sneak through.
+        if arm is not None and parsed == arm:
+            out.append("%s pins '%s/%s', which is the knob armToggle sweeps -- that collapses the "
+                       "A/B onto one arm while the captures still label themselves A and B"
+                       % ((where,) + parsed))
+    return out
+
+
 # --- CSV loading ---------------------------------------------------------------------------------
 
 def load_csv(path):
@@ -1245,6 +1306,22 @@ def selftest():
                 if ta:
                     assert len(te) == len(ta), (fn, t)                 # ScenarioPlayer.Validate's rule
                     assert len(ta) >= round(s["dur"] / card["step"]), (fn, t, len(ta))
+            for problem in card_setup_problems(card):
+                raise AssertionError("%s: %s" % (fn, problem))
+
+    # ...and that the check above can actually FAIL. No shipped card has a swept-knob conflict, so
+    # without a synthetic one the loop would pass just as happily with a broken checker.
+    assert not card_setup_problems({"name": "ok", "repeat": 4, "armToggle": "Control/Knob",
+                                    "config": [{"key": "Other", "value": "1"}]})
+    assert card_setup_problems({"name": "x", "armToggle": "Knob",
+                                "config": [{"key": "Control/Knob", "value": "true"}]})  # same entry, spelled long
+    assert card_setup_problems({"name": "x", "config": [{"key": "", "value": "1"}]})
+    assert card_setup_problems({"name": "x", "config": [{"key": "A/B/C", "value": "1"}]})
+    assert card_setup_problems({"name": "x", "config": [{"key": "/B", "value": "1"}]})
+    assert card_setup_problems({"name": "x", "config": [{"key": "A/", "value": "1"}]})
+    assert card_setup_problems({"name": "x", "config": [{"key": "A", "value": ""}]})
+    assert card_setup_problems({"name": "x", "repeat": 21})
+    assert card_setup_problems({"name": "x", "repeat": -1})
 
     print("selftest OK")
 

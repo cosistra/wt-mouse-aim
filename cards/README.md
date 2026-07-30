@@ -203,6 +203,45 @@ mass shows up as more α for the same commanded n, i.e. directly in `aoaAboveCei
 and `qSchedMin`. The oblique cards will barely move (mass reaches them only as a slower `pEff`), so
 they are not worth a loadout sweep.
 
+## Self-describing cards — `repeat`, `armToggle`, `config`
+
+A card carries its own run configuration, so the operator ticks **one** checkbox and presses the
+spawn key. Every field falls back to the matching global when absent, so a card that declares
+nothing behaves exactly as it always did.
+
+```json
+{
+  "name": "sweep-slow", "cls": "Plane",
+  "airframe": "Multirole1", "startSpeed": 250.0, "startAlt": 4000.0,
+  "repeat": 8,
+  "armToggle": "Control/MarkerRateFeedForward",
+  "config": [ { "key": "Control/TurnLeadTime", "value": "0.35" },
+              { "key": "Scenario/ScenarioThrottle", "value": "0.8" } ],
+  "segments": [ … ]
+}
+```
+
+| field | falls back to | notes |
+|---|---|---|
+| `airframe` | `Drone/DroneAirframe` | the drone harness **spawns** this jsonKey; overrides the whole lane list |
+| `startAlt` / `startSpeed` | `Drone/DroneSpawnAlt` / `DroneSpawnSpeed` | used only when `> 0`; already the placement's target |
+| `repeat` | `Scenario/ScenarioRepeat` | `0` = fall back. The **first selected card** decides for the whole queue |
+| `armToggle` | `Scenario/ScenarioArmToggle` | must name a **bool**; interleaved ABBA. First card decides |
+| `config[]` | — | `"Section/Key"` (bare key ⇒ section `Control`); pinned at card start, **restored** at card end |
+
+Three rules the `scorecard.py --selftest` enforces, because nothing at runtime will:
+
+- **A `config` entry may not pin the knob `armToggle` sweeps.** That flies every replicate on one arm
+  while each capture still labels itself `arm=0`/`arm=1` — the A/B reads as "no difference" and
+  nothing in the artifacts says why. Runtime refuses it too, loudly, and flies the rest.
+- **`config[].key` is `Key` or `Section/Key`**, both halves non-empty; `value` is the TOML text form
+  of whatever type that entry is (`true`, `0.35`, `F2`) and may not be empty.
+- **`repeat` is 0..20.** The mod clamps, so `40` would silently fly 20.
+
+What a card pinned is written into its own capture as a `# override Section/Key=value …` header
+line — `# config` shows the values but cannot say the *card* chose them. Both the launch log and
+`[card] suite start` name which source won for every field, so a batch is auditable before it flies.
+
 ## Regenerating the track cards
 
 `sweep-creep.json`, `sweep-slow.json` and `sweep-step.json` carry per-step track arrays — a flat

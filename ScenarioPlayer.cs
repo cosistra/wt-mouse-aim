@@ -60,16 +60,45 @@ namespace NuclearOptionMouseAim
             public float[] trackEl;
         }
 
+        // One config knob a card pins for its own duration. `key` uses the SAME "Section/Key" grammar
+        // as Cfg.ScenarioArmToggle (bare key => section "Control", where every control-law lever
+        // lives), and `value` is the TOML text form of whatever type that entry actually is — parsed
+        // by BepInEx's own TomlTypeConverter, so bool/int/float/string/KeyCode all work with no
+        // per-type code here. A string pair rather than a typed union because JsonUtility has no
+        // union: it deserializes public fields of a fixed shape and silently ignores everything else.
+        [System.Serializable]
+        internal class CfgOverride
+        {
+            public string key   = "";
+            public string value = "";
+        }
+
         [System.Serializable]
         internal class Card
         {
             public string name = "";      // card id; for a file card this is always the file basename
             public string cls = "";       // comma list of Pilot.PilotType names ("" = any airframe class)
             public float  step = 0.02f;   // seconds between track samples (the fixed step at record time)
-            public string airframe = "";  // jsonKey it was recorded on (informational)
+            public string airframe = "";  // jsonKey it was recorded on — and, since v0.90, what the drone harness SPAWNS
             public float  startSpeed;     // m/s at record start — the condition the card intends
             public float  startAlt;       // m MSL at record start
             public Seg[]  segments;
+
+            // --- SELF-DESCRIPTION (v0.90). A card is the whole test, not just the stimulus.
+            //
+            // Everything below used to be an operator-set global that had to be matched to the card by
+            // hand — DroneAirframe / DroneSpawnAlt / DroneSpawnSpeed / ScenarioRepeat /
+            // ScenarioArmToggle — and a mismatch does not refuse, it produces a capture that scores
+            // fine and answers a different question. (R18's "energy failure" was one such: a global
+            // left at a value the card was quietly ignoring.) Making them card fields means the
+            // operator ticks ONE checkbox and presses the spawn key.
+            //
+            // Every one of them falls back to the corresponding Cfg knob, so a card that declares
+            // nothing behaves exactly as it did before this field existed — which is what keeps the
+            // shipped grid and every ad-hoc recording valid.
+            public int    repeat;         // replicate count; 0 = fall back to Cfg.ScenarioRepeat
+            public string armToggle = ""; // A/B knob to interleave; "" = fall back to Cfg.ScenarioArmToggle
+            public CfgOverride[] config;  // knobs pinned for this card's duration; null/empty = none
 
             public float Duration
             {
@@ -404,13 +433,12 @@ namespace NuclearOptionMouseAim
         // HOTKEY ENTRY POINTS (called from the plugin's Update — key edges are a per-frame thing;
         // everything that must be deterministic happens in Tick, on the fixed step).
         // =========================================================================================
-        // The cards a run would fly RIGHT NOW: the ScenarioCardSet override if one is set, else every
-        // ticked checkbox, minus anything whose airframe class doesn't match what you're in. Shared so
-        // the entry-condition key places you where the run key would actually start you — two answers
-        // to "which card" is how they drift apart.
-        private static List<Card> SelectCards(Aircraft ac)
+        // WHICH CARDS ARE SELECTED, before anything aircraft-specific: the ScenarioCardSet override if
+        // one is set, else every ticked checkbox. Split out of SelectCards (v0.90) because the drone
+        // preflight has to answer "what would a run fly?" BEFORE the aircraft exists — it is choosing
+        // the airframe to spawn — and the class filter and the replicate expansion below both need one.
+        private static List<Card> SelectRaw()
         {
-            string cls = ClassOf(ac);
             var sel = new List<Card>();
             string ov = Cfg.ScenarioCardSet.Value;
             if (!string.IsNullOrEmpty(ov))
@@ -429,6 +457,94 @@ namespace NuclearOptionMouseAim
                 foreach (var c in _cards)
                     if (_enable.TryGetValue(c.name, out var e) && e.Value) sel.Add(c);
             }
+            return sel;
+        }
+
+        // =========================================================================================
+        // PREFLIGHT (v0.90) — what a run would fly, answerable with NO AIRCRAFT IN HAND.
+        //
+        // This exists for exactly one caller: TestDrone, which has to decide what airframe to spawn
+        // and at what speed/altitude to place it, and which therefore cannot ask a question whose
+        // answer needs the aircraft. So no class filter here (that is a per-aircraft, post-spawn
+        // test — conflating the two would let a card's `cls` decide what metal gets spawned, which
+        // is a different and wrong idea) and no replicate expansion (the count is reported, not
+        // applied; each drone flies the queue itself).
+        //
+        // NEVER THROWS. It runs on a hotkey path before anything is spawned; a throw there would
+        // cancel a launch with a stack trace instead of a refusal line.
+        internal struct Preflight
+        {
+            public int    Cards;        // cards selected before replicates; 0 = nothing would fly
+            public string Name;         // the first one, which is the one that decides everything below
+            public string Airframe;     // "" = the card doesn't say; the Cfg value stands
+            public float  StartAlt;     // <= 0 = doesn't say
+            public float  StartSpeed;   // <= 0 = doesn't say
+            public float  Duration;     // seconds, one replicate of the first card
+            public int    Repeat;
+            public string RepeatSrc;    // human-readable "who decided", for the launch log
+            public string ArmKnob;      // "" = no A/B schedule
+            public string ArmSrc;
+        }
+
+        internal static Preflight Preview()
+        {
+            var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "" };
+            try
+            {
+                var sel = SelectRaw();
+                p.Cards = sel.Count;
+                if (sel.Count == 0) return p;
+                var c = sel[0];
+                p.Name       = c.name;
+                p.Airframe   = c.airframe ?? "";
+                p.StartAlt   = c.startAlt;
+                p.StartSpeed = c.startSpeed;
+                p.Duration   = c.Duration;
+                p.Repeat     = ResolveRepeat(c, out string rsrc); p.RepeatSrc = rsrc;
+                // Report the NAME only, resolved through the shared grammar but without touching the
+                // config: SetUpArmSchedule does the real lookup a moment later and owns the warnings.
+                // Two warnings for one typo would read as two problems.
+                string spec = ResolveArmSpec(c, out string asrc);
+                p.ArmSrc = asrc;
+                if (SplitSpec(spec, out _, out string key)) p.ArmKnob = key;
+            }
+            catch (System.Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning($"[card] preflight failed ({e.Message}) — the Drone settings stand as written.");
+            }
+            return p;
+        }
+
+        // Replicate count for a selection. The FIRST card's own `repeat` wins over Cfg.ScenarioRepeat,
+        // because the card is the test and the number of replicates is part of it — an operator who
+        // ticks a card designed for 8 runs and leaves the global at 1 gets a batch with no statistics
+        // and nothing says so. The first card decides for the whole queue, matching how startSpeed and
+        // the arm toggle are already read (a suite is blocked, so "per card" would mean interleaving
+        // different replicate counts, which is not a design anyone can score).
+        private static int ResolveRepeat(Card first, out string src)
+        {
+            bool fromCard = first != null && first.repeat > 0;
+            src = fromCard ? $"card '{first.name}'" : "Cfg.ScenarioRepeat";
+            return Mathf.Clamp(fromCard ? first.repeat : Cfg.ScenarioRepeat.Value, 1, 20);
+        }
+
+        // The A/B knob spec a selection would sweep — the first card's `armToggle` if it declares one,
+        // else the global. Same "first card decides" rule and the same reason as ResolveRepeat.
+        private static string ResolveArmSpec(Card first, out string src)
+        {
+            bool fromCard = first != null && !string.IsNullOrEmpty(first.armToggle);
+            src = fromCard ? $"card '{first.name}' armToggle" : "Cfg.ScenarioArmToggle";
+            return fromCard ? first.armToggle : Cfg.ScenarioArmToggle.Value;
+        }
+
+        // The cards a run would fly RIGHT NOW: the ScenarioCardSet override if one is set, else every
+        // ticked checkbox, minus anything whose airframe class doesn't match what you're in. Shared so
+        // the entry-condition key places you where the run key would actually start you — two answers
+        // to "which card" is how they drift apart.
+        private static List<Card> SelectCards(Aircraft ac)
+        {
+            string cls = ClassOf(ac);
+            var sel = SelectRaw();
 
             for (int i = sel.Count - 1; i >= 0; i--)
                 if (!ClassMatches(sel[i], cls))
@@ -448,7 +564,7 @@ namespace NuclearOptionMouseAim
             // The same Card OBJECT is added N times on purpose. Playback state (_si, _tSeg, _frameSet,
             // _placed, _derivedRate) all lives on ScenarioPlayer and is reset by NextCard, so nothing
             // is carried in the Card itself and aliasing is safe.
-            int rep = Mathf.Clamp(Cfg.ScenarioRepeat.Value, 1, 20);
+            int rep = ResolveRepeat(sel.Count > 0 ? sel[0] : null, out _);
             if (rep > 1 && sel.Count > 0)
             {
                 var once = new List<Card>(sel);
@@ -456,7 +572,8 @@ namespace NuclearOptionMouseAim
                 // Deliberately NOT logged here: SelectCards is also called by the standalone entry key,
                 // which flies nothing, and "repeat x4 -> 4 runs" printed on a placement is exactly the
                 // kind of miscount this option exists to remove. ToggleSuite's "suite start: N card(s)"
-                // is the one authoritative count, and it is already correct.
+                // is the one authoritative count, and it is already correct — and since v0.90 it also
+                // names WHICH source set the replicate count, which is the same ResolveRepeat call.
             }
             return sel;
         }
@@ -514,22 +631,169 @@ namespace NuclearOptionMouseAim
             return false;
         }
 
-        // The Cfg toggle named by ScenarioArmToggle, or null (no schedule). "Key" or "Section/Key";
-        // bare keys default to Control, which is where every control-law A/B lever lives.
-        private static ConfigEntry<bool> ResolveArm()
+        // =========================================================================================
+        // NAMING A CONFIG ENTRY FROM TEXT. One grammar — "Key" or "Section/Key", bare keys defaulting
+        // to Control, which is where every control-law lever lives — shared by ScenarioArmToggle, a
+        // card's `armToggle` and every `config[].key`. One parser, so the three cannot drift into
+        // three slightly different spellings of the same idea.
+        // =========================================================================================
+        private static bool SplitSpec(string spec, out string sec, out string key)
         {
-            string spec = Cfg.ScenarioArmToggle.Value;
-            if (_cf == null || string.IsNullOrEmpty(spec)) return null;
+            sec = "Control"; key = "";
+            if (string.IsNullOrEmpty(spec)) return false;
             spec = spec.Trim();
             int slash = spec.IndexOf('/');
-            string sec = slash > 0 ? spec.Substring(0, slash).Trim() : "Control";
-            string key = slash > 0 ? spec.Substring(slash + 1).Trim() : spec;
-            if (_cf.TryGetEntry<bool>(sec, key, out var e)) return e;
-            WTMouseAimPlugin.Log.LogWarning(
-                $"[card] ScenarioArmToggle names '{sec}/{key}', which is not a bound ON/OFF setting — "
-                + "arms are NOT being interleaved. Check the spelling against the F1 panel.");
-            Notify($"ARM: '{key}' is not a setting — not interleaving");
-            return null;
+            if (slash >= 0) { sec = spec.Substring(0, slash).Trim(); key = spec.Substring(slash + 1).Trim(); }
+            else key = spec;
+            // Both halves must be non-empty: "/Foo" and "Foo/" are typos, and silently reading them as
+            // a bare key would resolve the wrong entry (or none) without saying so.
+            return sec.Length > 0 && key.Length > 0;
+        }
+
+        // Any bound entry, of ANY type — a card can pin a float or a KeyCode, not just the bool the
+        // arm schedule sweeps. ConfigFile implements IDictionary<ConfigDefinition, ConfigEntryBase>
+        // but implements most of it EXPLICITLY, so the interface cast is required, not stylistic.
+        // Silent: every caller has its own, more specific warning to print.
+        private static ConfigEntryBase ResolveEntry(string spec, out string sec, out string key)
+        {
+            if (!SplitSpec(spec, out sec, out key) || _cf == null) return null;
+            var dict = (IDictionary<ConfigDefinition, ConfigEntryBase>)_cf;
+            return dict.TryGetValue(new ConfigDefinition(sec, key), out var e) ? e : null;
+        }
+
+        // The bool toggle to interleave, or null (no schedule). `spec` comes from the card when it
+        // declares one and from Cfg.ScenarioArmToggle otherwise; `source` only names which, for the
+        // warnings — an operator chasing a typo needs to know WHICH of the two he mistyped.
+        private static ConfigEntry<bool> ResolveArm(string spec, string source)
+        {
+            if (string.IsNullOrEmpty(spec)) return null;
+            var e = ResolveEntry(spec, out string sec, out string key);
+            if (e == null)
+            {
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] {source} names '{sec}/{key}', which is not a bound setting — "
+                    + "arms are NOT being interleaved. Check the spelling against the F1 panel.");
+                Notify($"ARM: '{key}' is not a setting — not interleaving");
+                return null;
+            }
+            var b = e as ConfigEntry<bool>;
+            if (b == null)
+            {
+                // Distinct from "not found" on purpose: until v0.90 both landed on the same message,
+                // so pointing the sweep at a real-but-numeric knob read as a spelling mistake and the
+                // operator went looking for a typo that was not there.
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] {source} names '{sec}/{key}', which is a {e.SettingType.Name}, not an ON/OFF "
+                    + "setting — arms are NOT being interleaved. An A/B arm has to be a bool; use "
+                    + "the card's `config` list to pin a value of any other type.");
+                Notify($"ARM: '{key}' is not ON/OFF — not interleaving");
+                return null;
+            }
+            return b;
+        }
+
+        // =========================================================================================
+        // CARD CONFIG OVERRIDES (v0.90). A card pins the knobs its test needs and hands them back
+        // when it is done, so "tick the card, press the key" is the whole operator procedure.
+        //
+        // WHY THE VALUES ARE SAVED AND RESTORED rather than just written: the knobs are process-
+        // global Cfg entries that the human's own flying reads too. A card that left them set would
+        // silently retune the mod for the rest of the session, and the next hand-flown capture would
+        // measure a law nobody chose.
+        // =========================================================================================
+        private ConfigEntryBase[] _ovEntries;      // entries THIS card pinned, in apply order
+        private object[]          _ovSaved;        // their pre-card values, index-matched to the above
+        private string            _ovNote = "";    // what was applied, verbatim into the '# override' header
+
+        private void ApplyOverrides(Card c)
+        {
+            // The placement re-enters this path on the next tick (StartCard is deferred a tick so the
+            // teleport can settle), and _ovEntries non-null means "this card's pins are already live".
+            // Without the guard the second pass would restore-then-reapply every entry, firing two
+            // spurious SettingChanged events per knob for no change in value.
+            if (_ovEntries != null) return;
+            var ovs = c != null ? c.config : null;
+            if (ovs == null || ovs.Length == 0) return;
+
+            var entries = new List<ConfigEntryBase>(ovs.Length);
+            var saved   = new List<object>(ovs.Length);
+            var note    = new System.Text.StringBuilder();
+            foreach (var o in ovs)
+            {
+                if (o == null || string.IsNullOrEmpty(o.key)) continue;
+                var e = ResolveEntry(o.key, out string sec, out string key);
+                if (e == null)
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{c.name}' pins '{sec}/{key}', which is not a bound setting — that override "
+                        + "is SKIPPED (the rest still apply). Check the spelling against the F1 panel.");
+                    continue;
+                }
+                // REFUSE TO PIN THE KNOB THE A/B SCHEDULE IS SWEEPING. Pinning it collapses the whole
+                // batch onto ONE arm while every capture still carries an honest-looking `arm=0/1`
+                // label from ArmTag — so the A/B reads as "no measurable difference" and the reason is
+                // invisible in the artifacts. That is strictly worse than a run that refuses, and worse
+                // than one that obviously breaks, so it is the one override failure that is named
+                // loudly and skipped rather than silently won by either side.
+                if (_armEntry != null && ReferenceEquals(e, _armEntry))
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{c.name}' pins '{sec}/{key}' to '{o.value}', but that is the knob the A/B "
+                        + "schedule is sweeping — the override is REFUSED. Pinning a swept knob flies every "
+                        + "replicate on one arm while the captures still label themselves A and B. Drop it "
+                        + "from the card's `config` list, or sweep a different knob.");
+                    Notify($"OVERRIDE REFUSED: '{key}' is the A/B knob");
+                    continue;
+                }
+                try
+                {
+                    // BepInEx's own TOML reader, so one call covers bool/int/float/string/KeyCode and
+                    // anything else that is bindable — a hand-rolled parser here would be a second,
+                    // subtly different definition of what a config value looks like.
+                    object v = TomlTypeConverter.ConvertToValue(o.value, e.SettingType);
+                    saved.Add(e.BoxedValue);
+                    entries.Add(e);
+                    e.BoxedValue = v;
+                    note.Append(note.Length > 0 ? " " : "").Append(sec).Append('/').Append(key)
+                        .Append('=').Append(o.value);
+                }
+                catch (System.Exception ex)
+                {
+                    // Fail-soft like every probe in this codebase: one named line, skip this one, fly
+                    // the rest. Never throw — this runs inside the game's fixed step.
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{c.name}' pins '{sec}/{key}' to '{o.value}', which is not a valid "
+                        + $"{e.SettingType.Name} ({ex.Message}) — that override is SKIPPED.");
+                }
+            }
+
+            // Assigned even when everything failed, so the re-entry guard above still holds and the
+            // warnings are printed once per card rather than once per tick until the card starts.
+            _ovEntries = entries.ToArray();
+            _ovSaved   = saved.ToArray();
+            _ovNote    = note.ToString();
+            if (_ovEntries.Length > 0)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[card] '{c.name}' pinned {_ovEntries.Length} setting(s) for this card: {_ovNote} "
+                    + "(restored when the card ends).");
+        }
+
+        // Hand every pinned knob back. IDEMPOTENT — called from Finish, from Abort (via Finish) and at
+        // every card boundary in NextCard, and one card must never inherit the previous one's pins.
+        private void RestoreOverrides()
+        {
+            if (_ovEntries == null) return;
+            for (int i = 0; i < _ovEntries.Length && i < _ovSaved.Length; i++)
+            {
+                try { _ovEntries[i].BoxedValue = _ovSaved[i]; }
+                catch (System.Exception e)
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] could not restore '{_ovEntries[i].Definition.Key}' ({e.Message}) — it is "
+                        + "left at the card's value. Reset it in F1 before flying anything else.");
+                }
+            }
+            _ovEntries = null; _ovSaved = null; _ovNote = "";
         }
 
         // Put the current card's arm into the config, once per card, BEFORE the recorder opens — so
@@ -649,13 +913,20 @@ namespace NuclearOptionMouseAim
             }
 
             float total = 0f; foreach (var c in sel) total += c.Duration;
-            WTMouseAimPlugin.Log.LogInfo($"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}'.");
+            // The replicate count is resolved inside SelectCards (it is what expanded `sel`); re-derive
+            // it here purely to NAME ITS SOURCE. A card that carries its own `repeat` and a global left
+            // at something else look identical in the run count, and the operator has to be able to see
+            // which one he is actually flying before three minutes a run go by.
+            ResolveRepeat(sel[0], out string repSrc);
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
+                + $"replicates from {repSrc}.");
             _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
             _rec.EntryNote = "";     // an UNGATED card must not inherit the last one's note
 
-            SetUpArmSchedule(sel.Count);
+            SetUpArmSchedule(sel.Count, sel[0]);
         }
 
         // Arm schedule. Resolved and PRINTED IN FULL before a single run flies — the schedule and its
@@ -666,7 +937,7 @@ namespace NuclearOptionMouseAim
         // resolve its own: it would overwrite `_armSaved` with the value the FIRST suite had already
         // written, and then "restore" that on finish. A suite that arrives second flies whatever arm
         // is live and says so on its own '# config' line (ArmTag is global, and truthfully so).
-        private void SetUpArmSchedule(int runs)
+        private void SetUpArmSchedule(int runs, Card first)
         {
             if (_armOwner != null && !ReferenceEquals(_armOwner, this))
             {
@@ -676,7 +947,10 @@ namespace NuclearOptionMouseAim
                 Notify("ARMS: owned by another aircraft — this run is unarmed");
                 return;
             }
-            _armEntry = ResolveArm();
+            // The CARD's armToggle wins over the global when it declares one — the knob under test is
+            // part of the test, and matching it by hand is exactly the mismatch this release removes.
+            string spec = ResolveArmSpec(first, out string armSrc);
+            _armEntry = ResolveArm(spec, armSrc);
             _armSaved = _armEntry != null && _armEntry.Value;
             _armOwner = _armEntry != null ? this : null;
             if (_armEntry == null) return;
@@ -698,7 +972,7 @@ namespace NuclearOptionMouseAim
             int nB = runs - nA;
             string key = _armEntry.Definition.Key;
             WTMouseAimPlugin.Log.LogInfo(
-                $"[card] A/B arms on '{key}' (A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
+                $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
                 + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
                 + $"'{key}' is restored to {_armSaved} when the suite ends.");
             if (nA != nB || sumA != sumB)
@@ -931,9 +1205,14 @@ namespace NuclearOptionMouseAim
         private void Finish(string reason)
         {
             _rec.Stop(reason);
-            _rec.SegmentTag = "";
-            _rec.CardTag    = "";
-            _rec.EntryNote  = "";
+            // AFTER the recorder is closed — restoring fires SettingChanged, and a '# cfg' line landing
+            // in the capture that just finished would read as the law changing during the run. Same
+            // reasoning as the apply side in Tick, mirrored.
+            RestoreOverrides();
+            _rec.SegmentTag    = "";
+            _rec.CardTag       = "";
+            _rec.EntryNote     = "";
+            _rec.OverrideNote  = "";
             // Hand the arm knob back — but ONLY if this suite is the one that took it (v0.86). A
             // second aircraft finishing its own run must not restore a value it never saved, nor
             // silently disarm the schedule the first one is still flying.
@@ -992,6 +1271,19 @@ namespace NuclearOptionMouseAim
 
             if (!_frameSet)
             {
+                // ORDER IS LOAD-BEARING, TWICE OVER.
+                //
+                // (a) OVERRIDES BEFORE ApplyArm. If a card pins the knob the schedule sweeps, the ARM
+                //     must win — ApplyArm running second guarantees it even if the refusal in
+                //     ApplyOverrides were ever removed or bypassed. Belt to that braces.
+                // (b) BOTH BEFORE StartCard, which is what calls _rec.Toggle(). ConfigFile.SettingChanged
+                //     drives ManeuverRecorder.NoteConfigChange, which writes a '# cfg' line into every
+                //     capture that is OPEN at the time. Writing the card's own setup after its recorder
+                //     opened would stamp the card's own configuration into its own CSV as a mid-run
+                //     config CHANGE — which is precisely the signal those lines exist to flag. Applying
+                //     here (and restoring after _rec.Stop, see Finish/NextCard) keeps a card's setup out
+                //     of its own capture and inside its '# config' / '# override' header instead.
+                ApplyOverrides(_card);
                 // Arm BEFORE the placement, so the whole run — including the placement tick's own pass
                 // through Apply — flies one arm, and so the value is already in the config when
                 // StartCard opens the recorder and stamps the '# config' header.
@@ -1256,8 +1548,13 @@ namespace NuclearOptionMouseAim
             // can't double-open a writer). The card name goes into the CSV filename so two builds'
             // runs of the same card sort together and diff.
             if (_rec.IsRecording) _rec.Stop("card boundary");
-            _rec.CardTag    = _card.name;
-            _rec.SegmentTag = "";
+            _rec.CardTag      = _card.name;
+            _rec.SegmentTag   = "";
+            // Set before Toggle(): Start() writes the whole header block in one go, so anything not in
+            // hand by now is simply absent from the capture. The pins themselves are already applied
+            // (Tick, above), so '# config' is also already truthful — this line only says which of
+            // those values the CARD chose, which no amount of reading '# config' can recover.
+            _rec.OverrideNote = _ovNote;
             _rec.Toggle();
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] '{_card.name}' start ({_card.segments.Length} segments, {_card.Duration:0}s) — "
@@ -1268,6 +1565,10 @@ namespace NuclearOptionMouseAim
         private void NextCard()
         {
             _rec.Stop($"card '{_card.name}' complete");
+            // Card-to-card, after the close and before the next card's ApplyOverrides: card N+1 must
+            // start from the session's own settings, not from whatever card N pinned. (Restoring after
+            // the Stop for the same '# cfg' reason as Finish.)
+            RestoreOverrides();
             _rec.SegmentTag = "";
             _qi++;
             if (_queue == null || _qi >= _queue.Count)

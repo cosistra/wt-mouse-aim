@@ -47,6 +47,15 @@ namespace NuclearOptionMouseAim
         // we log on the rising edge only or a single 300 ms stall would print fifteen identical lines.
         private const float HitchSec = 0.050f;
 
+        // How long a drone may sit with no card running before it despawns itself (v0.90). Sized by
+        // what it has to clear, not by taste: the gap between NextCard closing one recorder and
+        // StartCard opening the next is a placement tick plus a frame, so anything near zero would
+        // despawn a drone between its own replicates. 5 s also happens to be long enough to watch the
+        // sky empty, which is worth seeing once.
+        // ponytail: a const, not a Cfg knob — nothing about a run wants a different value, and the
+        // despawn key already covers "get rid of it now".
+        private const float IdleDespawnSec = 5f;
+
         private static readonly List<Drone> _live = new List<Drone>();
         // Keyed by Aircraft.GetInstanceID() so the per-pilot postfix is a dictionary probe, not a
         // scan over the live list — that postfix runs once per pilot per fixed step for EVERY
@@ -61,6 +70,17 @@ namespace NuclearOptionMouseAim
         private static Vector3    _laneBase;     // player position when the key was pressed
         private static Vector3    _laneRight;    // horizontal right of his heading (the lane axis)
         private static Quaternion _laneRot;      // spawn attitude: his heading, wings level, nose on the horizon
+
+        // --- WHAT THE CARD SAID (v0.90). Resolved ONCE in RequestLaunch, from the same preflight the
+        // launch line prints, and read by every lane of that batch. Resolving per lane instead would
+        // let a checkbox ticked mid-stagger change the airframe half way through a batch, which is a
+        // heterogeneous batch nobody asked for and no artifact would explain.
+        //
+        // Empty / <= 0 means "the card doesn't say", and then the Drone knob stands exactly as it
+        // did before this existed. That fallback is what keeps a hand-configured launch working.
+        private static string     _cardFrame = "";  // card's airframe jsonKey; "" = the Cfg list stands
+        private static float      _cardAlt;         // card's startAlt, m MSL; <= 0 = Cfg.DroneSpawnAlt stands
+        private static float      _cardSpeed;       // card's startSpeed, m/s; <= 0 = Cfg.DroneSpawnSpeed stands
 
         public static IReadOnlyList<Drone> Live => _live;
 
@@ -103,13 +123,27 @@ namespace NuclearOptionMouseAim
             _laneBase = Vector3.zero;
             try
             {
-                // No aircraft (menu, dead, spectating) is not a refusal: lanes then key off the scene
-                // origin, which is still a well-defined place to put a drone. Fail-soft, like the probes.
+                // LANES ARE RELATIVE TO WHOEVER IS WATCHING. With an aircraft that is his; with none
+                // (menu, dead, ejected, spectating) it is the CAMERA. v0.90 — the old fallback was the
+                // scene origin, and it was worse than "still a well-defined place": the origin is the
+                // SAME point on every press, so a second launch while spectating put lane k exactly
+                // where the first one did, and each drone's card anchor is its own spawn point. The
+                // camera is both visible and observer-dependent. Fail-soft, like the probes.
                 if (AimRig.TryGetContext(out var me, out _) && me != null)
                 {
                     _laneBase = me.transform.position;
                     Vector3 f = me.transform.forward; f.y = 0f;
                     if (f.sqrMagnitude > 1e-6f) fwd = f.normalized;
+                }
+                else
+                {
+                    var cam = Camera.main;                    // stdlib; no game type, no new reflection seam
+                    if (cam != null)
+                    {
+                        _laneBase = cam.transform.position;
+                        Vector3 f = cam.transform.forward; f.y = 0f;
+                        if (f.sqrMagnitude > 1e-6f) fwd = f.normalized;
+                    }
                 }
             }
             catch { /* geometry is best-effort; the defaults above are valid */ }
@@ -117,12 +151,62 @@ namespace NuclearOptionMouseAim
             _laneRight = Vector3.Cross(Vector3.up, fwd);      // horizontal right of the heading
             _laneRot   = Quaternion.LookRotation(fwd, Vector3.up);
             _pending   = Mathf.Clamp(Cfg.DroneCount.Value, 1, 16);
-            _slot      = 0;
+            // Start past whatever is still up, rather than at 0. Auto-despawn (below) normally empties
+            // the sky between batches, so this is the belt to that braces: it makes "press it twice"
+            // safe even when the observer has not moved, which lane 0 alone does not.
+            _slot      = _live.Count;
             _nextAt    = Time.time;                           // first one goes on the next fixed step
+
+            // THE CARD IS THE TEST, SO THE CARD PICKS THE METAL (v0.90). A drone exists to fly a card,
+            // and a card already declares the airframe it was designed on and the speed/altitude it
+            // intends. Matching Drone/DroneAirframe, DroneSpawnAlt and DroneSpawnSpeed to it by hand
+            // was three chances to get it wrong per batch, and getting it wrong does not refuse — the
+            // card's own placement will drag the aircraft to its startSpeed/startAlt anyway, so the
+            // only visible trace was a violent entry transient on the first replicate.
+            //
+            // The `cls` field is deliberately NOT consulted here: it is a PILOT-TYPE filter applied per
+            // aircraft after spawn (does this card suit what I'm flying?), not a statement about what
+            // to spawn. Reading it as one would let "Plane" mean an airframe.
+            var pre = ScenarioPlayer.Preview();
+            _cardFrame = pre.Cards > 0 ? (pre.Airframe ?? "") : "";
+            _cardAlt   = pre.Cards > 0 ? pre.StartAlt   : 0f;
+            _cardSpeed = pre.Cards > 0 ? pre.StartSpeed : 0f;
+
             WTMouseAimPlugin.Log.LogInfo(
-                $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {Cfg.DroneSpawnAlt.Value:0} m / "
-                + $"{Cfg.DroneSpawnSpeed.Value:0} m/s, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
+                $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
+                + $"{SpawnSpeed():0} m/s, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
+            // WHO DECIDED, ITEM BY ITEM. This is the operator's ONLY confirmation that the card drove
+            // the spawn — "4000 m" alone looks the same whether the card asked for it or the knob just
+            // happened to be there, and the difference is exactly what the self-describing card was
+            // built to make visible. Printed even with no card, because "no card" is the case where a
+            // silent line would be read as "the card is driving it".
+            if (pre.Cards == 0)
+                WTMouseAimPlugin.Log.LogWarning(
+                    "[drone] no card is selected — the drones will fly the built-in level-hold, and the spawn "
+                    + "state comes entirely from the Drone settings. Tick one in F1 > 'Scenario Cards'.");
+            else
+            {
+                // Built up front rather than nested inside the interpolation below: an interpolated
+                // string INSIDE an interpolation hole is legal C# but breaks check-architecture.py's
+                // string stripper, which pairs quotes left to right and then loses its brace depth —
+                // the top-level types after this point stop being found. Cheap to avoid, and the
+                // flatter line is easier to read anyway.
+                string armPart = string.IsNullOrEmpty(pre.ArmKnob)
+                               ? "" : $", A/B on '{pre.ArmKnob}' from {pre.ArmSrc}";
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[drone] card '{pre.Name}' ({pre.Cards} selected, {pre.Duration:0}s each, x{pre.Repeat} "
+                    + $"from {pre.RepeatSrc}{armPart}): "
+                    + $"airframe '{string.Join(",", AirframeList())}' [{(string.IsNullOrEmpty(_cardFrame) ? "DroneAirframe" : "card")}], "
+                    + $"{SpawnAlt():0} m [{(_cardAlt > 0f ? "card" : "DroneSpawnAlt")}], "
+                    + $"{SpawnSpeed():0} m/s [{(_cardSpeed > 0f ? "card" : "DroneSpawnSpeed")}].");
+            }
         }
+
+        // The spawn state, card-first. Two one-liners rather than inlined ternaries because they are
+        // read from both the launch log and the launch itself, and those two must never disagree —
+        // the log IS the operator's confirmation of what the spawn did.
+        private static float SpawnAlt()   => _cardAlt   > 0f ? _cardAlt   : Cfg.DroneSpawnAlt.Value;
+        private static float SpawnSpeed() => _cardSpeed > 0f ? _cardSpeed : Cfg.DroneSpawnSpeed.Value;
 
         // =========================================================================================
         // THE FIXED STEP. Called from WTMouseAimPlugin.FixedUpdate — a real fixed-step hook that
@@ -165,10 +249,10 @@ namespace NuclearOptionMouseAim
             // and every card's startAlt are expressed in. Round-tripping a global y through
             // ToLocalPosition converts it without this file needing to know whether the floating
             // origin shifts y at all (ScenarioPlayer's placement dodges the same question).
-            pos.y = new GlobalPosition(0f, Cfg.DroneSpawnAlt.Value, 0f).ToLocalPosition().y;
+            pos.y = new GlobalPosition(0f, SpawnAlt(), 0f).ToLocalPosition().y;
             _slot++;
 
-            var d = Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * Cfg.DroneSpawnSpeed.Value);
+            var d = Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * SpawnSpeed());
             if (d == null)
             {
                 // With ONE airframe the next lane fails identically (no server, bad jsonKey, no
@@ -197,8 +281,13 @@ namespace NuclearOptionMouseAim
         // shape. When the API is known, the lane index is the hook: give Drone a per-lane loadout the
         // same way, and the .airframe.json sidecar already records the resulting stations/masses/drag
         // per capture, so the analysis side needs no change.
+        // v0.90: a card that names its airframe overrides the whole list, not one lane — the card is
+        // one test, and a batch flying it on a mix of airframes is not replicates of anything
+        // (compare-runs.py refuses to pool across jsonKeys for exactly that reason). A heterogeneous
+        // batch is still available: leave `airframe` out of the card and use the Cfg list.
         private static string[] AirframeList()
         {
+            if (!string.IsNullOrEmpty(_cardFrame)) return new[] { _cardFrame };
             var parts = (Cfg.DroneAirframe.Value ?? "").Split(',');
             int n = 0;
             for (int i = 0; i < parts.Length; i++)
@@ -226,11 +315,36 @@ namespace NuclearOptionMouseAim
             for (int i = _live.Count - 1; i >= 0; i--)
             {
                 var d = _live[i];
-                if (d.Aircraft != null && !d.Aircraft.disabled) continue;
-                WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
-                _live.RemoveAt(i);
-                _byAircraftId.Remove(d.AircraftId);
-                ForgetState(d.AircraftId);
+                if (d.Aircraft == null || d.Aircraft.disabled)
+                {
+                    WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
+                    _live.RemoveAt(i);
+                    _byAircraftId.Remove(d.AircraftId);
+                    ForgetState(d.AircraftId);
+                    continue;
+                }
+
+                // AUTO-DESPAWN WHEN THE CARD IS DONE (v0.90). ONE rule — "not flying a card" — covers
+                // suite complete, aborted, refused, and never-started, so there is no path that leaves
+                // an aircraft circling unattended. That matters beyond tidiness: a live drone keeps a
+                // full complex-physics aero job and all three of its per-aircraft registries alive, and
+                // that is the same frame budget the launch stagger exists to protect, measured by the
+                // very `frameMs` column added to detect it.
+                //
+                // The grace window is not politeness — it is the gap between NextCard closing one
+                // recorder and StartCard opening the next, during which `Playing` is legitimately
+                // false mid-suite. Anything shorter than a placement tick would despawn a drone
+                // between its own replicates.
+                if (!d.CardStarted) continue;                 // pre-first-pilot-step; the stagger owns this window
+
+                bool playing = false;
+                try { playing = ScenarioPlayer.For(d.Aircraft).Playing; }
+                catch { /* fail-soft: a throwing lookup reads as "not playing" and the grace timer runs */ }
+
+                if (playing) { d.IdleSince = -1f; continue; }
+                if (d.IdleSince < 0f) { d.IdleSince = Time.time; continue; }
+                if (Time.time - d.IdleSince < IdleDespawnSec) continue;
+                Despawn(d, "card finished");
             }
         }
 
@@ -384,7 +498,7 @@ namespace NuclearOptionMouseAim
         //   * `UnitRegistry.persistentUnitLookup` is NEVER pruned by the game, so every spawn leaks
         //     one dictionary entry for the life of the mission. A few hundred entries is nothing;
         //     do NOT reach into that dictionary to "fix" it — the game reads it from several places.
-        public static void Despawn(Drone d)
+        public static void Despawn(Drone d, string reason = "requested")
         {
             if (d == null) return;
             _live.Remove(d);
@@ -396,7 +510,7 @@ namespace NuclearOptionMouseAim
             {
                 ac.DisableUnit();
                 Object.Destroy(ac.gameObject, 2f);
-                WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} despawned. {_live.Count} live.");
+                WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} despawned ({reason}). {_live.Count} live.");
             }
             catch (System.Exception e)
             {
@@ -421,10 +535,27 @@ namespace NuclearOptionMouseAim
         // =========================================================================================
         internal static void OnPilotStep(Pilot p)
         {
-            if (_byAircraftId.Count == 0 || p == null || p.dead || p.ejected) return;
+            if (_byAircraftId.Count == 0 || p == null) return;
             var ac = p.aircraft;
-            if (ac == null || ac.disabled) return;
+            if (ac == null) return;
             if (!_byAircraftId.TryGetValue(ac.GetInstanceID(), out var d)) return;   // every other aircraft, including the player's
+
+            // A DRONE WHOSE PILOT DIED IS NOT A TEST ARTICLE ANY MORE, AND `PruneDead` CANNOT SEE IT.
+            // Its predicate is `Aircraft == null || Aircraft.disabled`, and the game never
+            // self-disables an Aircraft on damage: `Unit.disabled` is written only by
+            // ServerDisableUnit / ReturnToInventory / OnDestroy, and `WaitRemoveAircraft` is fired
+            // FROM the disabled hook — so a shot-down drone keeps a live GameObject with
+            // `disabled == false` indefinitely. That is why one stayed registered until the mission
+            // quit in R25. Catch it HERE, the one place holding the `Pilot` the damage lands on.
+            // (An airframe destroyed without killing the pilot is covered too, one layer out: the
+            // card's own altitude floor aborts it on the way down, and the idle rule then despawns.)
+            // The dead/ejected check was an early-return before v0.90 — it must stay ahead of every
+            // write below, since the original method early-returns on both and only the postfix runs.
+            if (p.dead || p.ejected || ac.disabled)
+            {
+                Despawn(d, p.ejected ? "pilot ejected" : p.dead ? "pilot killed" : "disabled by the game");
+                return;
+            }
 
             try
             {
@@ -440,10 +571,9 @@ namespace NuclearOptionMouseAim
                 // StartSuite is the same body the player's run key calls (no second copy to drift), and
                 // it refuses with its own [card] log line when no card is enabled for this airframe
                 // class — the drone then just level-holds, which is the phase-1 behaviour.
-                // ponytail: fire-and-forget, one attempt. A drone whose suite finishes keeps flying the
-                // level-hold until the despawn key; auto-despawn-on-finish is the obvious next step and
-                // deliberately not here, because "the sky empties itself" is a thing to watch once
-                // before it runs unattended.
+                // ponytail: fire-and-forget, one attempt. A drone whose suite finishes despawns itself
+                // `IdleDespawnSec` later — see PruneDead, which owns that clock because it is the one
+                // thing that runs every fixed step regardless of which `Fly` delegate is installed.
                 if (!d.CardStarted)
                 {
                     d.CardStarted = true;
@@ -591,6 +721,11 @@ namespace NuclearOptionMouseAim
         // Has this drone been offered a test card? One attempt, on its first pilot step (see
         // OnPilotStep), so a suite that finishes — or was refused — is not restarted every tick.
         public bool CardStarted;
+
+        // `Time.time` at which this drone was first seen with no card running, or -1 while it is
+        // flying one. PruneDead's auto-despawn clock. Per drone and not a shared timer, because the
+        // launch stagger means N drones finish at N different instants — which is the point.
+        public float IdleSince = -1f;
 
         // WHAT FLIES THIS DRONE. Return true if inputs were written (the caller then runs the game's
         // FBW over them), false to leave this tick alone. It lives HERE, per drone, rather than as one
