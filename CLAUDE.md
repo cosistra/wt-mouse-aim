@@ -205,16 +205,30 @@ Machine-specific paths are written as placeholders:
     rebase can't move it), writes the demand, and calls `ChaseController.Forget(ac)`. Engine spool is
     deliberately not reset (throttle is pinned across the card boundary, so it doesn't drift); damage
     and session age can't be reset and are **recorded** in the `# entry` header line instead.
-    **v0.88 — the placement is TRIMMED.** It wrote the velocity along a level nose, i.e. **AoA = 0 =
-    zero lift** for one physics step; the Gate A batch read `aoa=-0.05 g=0.00` at row 0 of every
-    capture, the FBW caught the drop at ~1 g (this is the audible thump on every reset) and AoA
-    overshot to 2.14° before settling at 1.41°. `_trimAoA` is sampled every tick of a card's opening
-    `arm` segment — the aircraft's own trim incidence at that card's speed/altitude/mass, measured
-    rather than solved — and the velocity is written that far **below** the level nose. The nose stays
-    level and the velocity moves, not the reverse: the arm demand is horizontal and the law puts the
-    *nose* on it, so the equilibrium already has the flight path one AoA low. Zero until an arm has
-    been flown, so a run's first placement matches v0.87 exactly. Logged as `aoaTrim=` on the
-    `# entry` line, so the check is one row: `g` at row 0 should no longer read 0.00.
+    **v0.88 trimmed the placement; v0.89 REVERTED it — and the entry transient has a different
+    cause.** v0.88 wrote the velocity one measured trim-AoA below the level nose, on the theory that
+    AoA = 0 is zero lift and the resulting ~1 g catch was the thump. Gate B (R23) disproved it: run 01
+    is the run's first placement, so no trim had been measured and it was written **untrimmed** — the
+    exact condition v0.88 blamed — and it has the *cleanest entry of the four* (AoA 0.07° → 1.46° with
+    no overshoot, `off` peak 0.59°) against 2.74–2.87° and 1.72–1.97° on the three trimmed ones. It
+    also coupled each replicate's entry to a value measured during the **previous** replicate, in a rig
+    whose whole purpose is replicate independence. Gone; the `# entry` line no longer carries
+    `aoaTrim=` (the CSV stays at 64 columns — it was never one).
+    **The real defect, measured and NOT yet fixed: `ChaseController.Forget(ac)` does not take effect on
+    the placement tick.** At `tSeg=0.000` of every *placed* capture the controller still holds
+    pre-placement state — `rollRate` −58.99/−58.66/−58.65 (vs −0.16 on the unplaced run 01),
+    `rollRateF` −12.83 bleeding through the roll damper for ~0.2 s, `headingRateFilt` 10.4–19.3, and
+    `leadDeg` **6.8–12.5°** of phantom anticipatory lead against a 0.04° error. `rollRate` is
+    `(t.up − _prevUp)/dt`, so −59 requires `_prevUp` to hold the *banked* attitude: the placement snaps
+    a ~79° banked turn wings-level in one fixed step and the finite difference straddles it. Every
+    **direct** measurement on that row (`bank`/`alt`/`pos`/`spd`/`aoa`) is correctly post-placement;
+    only the derivatives are poisoned, which a freshly-`Forget`-ed instance cannot do. **`iPitch`
+    reading 0.0000 there is not evidence of a reset** — R21 measured it at ±0.001 for an entire 30 s
+    turn, so it is ~0 coming out of a turn regardless (this retracts a Gate A claim). Deliberately
+    unfixed: a discontinuity guard on the finite difference would clean `rollRate` and leave
+    `headingRateFilt`/`leadDeg` alone, making the symptom look fixed while hiding the cause. Harmless
+    to results so far — deterministic to within 0.02 across replicates, and it decays inside the 6 s
+    `arm` before the scored segment starts.
     `Cfg.ScenarioArmToggle` names a bool knob the runner alternates **ABBA** by queue index
     (`((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns drift into a fake effect —
     restoring it at suite end, and each capture self-identifies via `arm=`/`armKnob=` on its

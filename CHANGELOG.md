@@ -3,6 +3,55 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.89.0
+
+**The 0.88 entry trim is reverted — it was aimed at a phantom — and the real cause of the entry
+transient is now measured.** Gate B (R23, 4 replicates of `fixedwing-sweep`, Multirole1, ABBA on
+`RelativeTurnLead`) passed all four labelling criteria, and in doing so produced the capture that
+disproves 0.88.
+
+- **Run 01 disproves the lift-hole theory.** It is the first placement of the run, so no trim had been
+  measured yet and it was written **untrimmed** — the exact AoA = 0 condition 0.88 blamed for the
+  thump. It has the **cleanest entry of the four**: AoA rises smoothly 0.07° → 1.46° with *no
+  overshoot at all*, and `off` peaks at 0.59°. The three trimmed replicates overshoot to 2.74–2.87°
+  and peak at `off` 1.72–1.97°. Trimming the velocity did not remove the transient; it stacked on top
+  of one.
+- Reverted rather than kept-and-ignored, on a second ground: `_trimAoA` made each replicate's entry
+  depend on a value measured during the **previous** replicate, which is a cross-replicate coupling in
+  a rig whose entire purpose (Gate A) is replicate independence.
+- The `# entry` line loses `aoaTrim=`; the CSV is unchanged at **64 columns** (it was a header field,
+  never a column).
+
+**The real finding: the per-replicate controller reset does not take effect on the placement tick.**
+`PlaceOnCondition` calls `ChaseController.Forget(ac)` and logs `controller reset` immediately after,
+yet at `tSeg=0.000` of every *placed* capture the controller still holds pre-placement state:
+
+| signal | placed runs (02–04) | run 01 (no preceding card) |
+|---|---|---|
+| `rollRate` | **−58.99 / −58.66 / −58.65** | −0.16 |
+| `rollRateF` (filtered, feeds roll damping) | −12.83, bleeding out over ~0.2 s | ~0 |
+| `headingRateFilt` | **10.4 / 19.0 / 19.3** | 0.00 |
+| `leadDeg` (anticipatory lead actually subtracted) | **6.8 / 12.4 / 12.5°** | 0.00 |
+
+`rollRate = (t.up − _prevUp)/dt` reading −59 requires `_prevUp` to hold the *banked* attitude: the
+placement snaps a ~79° banked turn to wings-level in one fixed step and the finite difference
+straddles it (Δup·right ≈ 1.18 over dt 0.02 = 59). Every **direct** measurement on that row —
+`bank`, `alt`, `pos`, `spd`, `aoa` — is correctly post-placement; only the derivatives are poisoned.
+A freshly-`Forget`-ed instance cannot produce this, so the controller flying that tick is not fresh.
+
+**This also retracts a Gate A claim.** R22 concluded "`iPitch`/`iYaw` read exactly 0.0000 on every
+first row, so v0.84's `ctrlReset` does what it claims." That is not evidence: R21 already measured
+`_iPitch` sitting at ±0.001 against a 0.12 cap for an entire 30 s turn, so it is ~0 coming out of a
+turn whether or not anything reset it. `FLIGHT-PROTOCOL.md` is corrected.
+
+No fix shipped for it in this release, deliberately: a discontinuity guard on the finite difference
+would clean up `rollRate` while leaving `headingRateFilt`/`leadDeg` untouched, which would make the
+symptom look fixed and hide the root cause on the next capture.
+
+**Impact on results so far: none that invalidates a gate.** The transient is deterministic (the three
+placed runs agree to within 0.02 on every affected signal), it decays inside the 6 s `arm`, and the
+scored `turn360` segment starts after it. Gate A passed *with* it present.
+
 ## 0.88.0
 
 **The entry placement is trimmed — the reset no longer drops the aircraft for a physics step.**

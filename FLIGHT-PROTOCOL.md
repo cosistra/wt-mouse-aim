@@ -1,4 +1,4 @@
-# Flight protocol — v0.82 … v0.87
+# Flight protocol — v0.82 … v0.89
 
 Six changes shipped without a single flight. This is the order to fly them in, and it is an
 **order, not a menu**: each gate validates the instrument the next step measures with. A gate that
@@ -12,11 +12,12 @@ prediction that misses is a result, not a failure of the test — write down wha
 |---|---|---|
 | 0.82 | `ChaseController` per-aircraft | **crewed, Gate A** |
 | 0.83 | relative turn lead + stall-gated integrator | crewed only — never A/B'd |
-| 0.84 | entry reset + ABBA arms | **reset yes; ABBA not yet (Gate B)** |
+| 0.84 | entry reset + ABBA arms | **ABBA yes, Gate B; reset only PARTLY works — see B result** |
 | 0.85 | below-nose roll-to-align loop broken | not exercised — `fixedwing-sweep` is above-nose |
 | 0.86 | `ScenarioPlayer`/`ManeuverRecorder` per-aircraft, `frameMs` | **crewed, Gate A** |
 | 0.87 | drones fly the real control law | no — Gate C |
-| 0.88 | trimmed entry placement (from Gate A) | no |
+| 0.88 | trimmed entry placement (from Gate A) | **flown Gate B — disproved, reverted in 0.89** |
+| 0.89 | 0.88 reverted; placement-tick reset defect measured | harness-only revert |
 
 Total for gates A–D: **~25 minutes**. Do not skip to the experiments.
 
@@ -89,6 +90,56 @@ Written before there was a noise floor to write them against, and both flagged a
 **Fail.** `d<n>` present = the drone discriminator leaked into the crewed path. `arm=` not
 alternating = the v0.86 ownership guard misfiring on a single aircraft. `frameMs` all zero =
 `FrameDt` not sampling with the harness off, which it is meant to do always.
+
+### R23 result — **PASSED 2026-07-29**, all four
+
+| criterion | measured |
+|---|---|
+| filenames | `mouseaim-rec-v0.88.0-R23-01..04-fixedwing-sweep-*.csv` — no `d<n>`, no airframe segment |
+| columns | **64**, last three `bWt,phiLead,frameMs`; `frameMs` = 16.7 throughout |
+| `arm=` | **0, 1, 1, 0** = A,B,B,A, all with `armKnob=RelativeTurnLead` |
+| `compare-runs.py` | one airframe group (`multirole1`), split A n=2 / B n=2, no unbalanced-arm warning |
+
+The log confirms the scheduler announced itself and cleaned up: `A/B arms on 'RelativeTurnLead'
+(A = OFF, B = ON): ABBA — 2 A / 2 B … restored to True when the suite ends`.
+
+### Two findings out of the same batch
+
+**1. The v0.88 entry trim was aimed at a phantom, and is reverted in v0.89.** Run 01 is the run's
+first placement, so no trim had been measured and it was written **untrimmed** — the exact AoA = 0
+condition v0.88 blamed for the thump. It has the cleanest entry of the four: AoA 0.07° → 1.46° with
+*no overshoot*, `off` peak 0.59°, against 2.74–2.87° and 1.72–1.97° on the three trimmed replicates.
+
+**2. The per-replicate controller reset does not take effect on the placement tick.** At
+`tSeg=0.000` of every *placed* capture the controller still holds pre-placement state:
+
+| signal | runs 02–04 (placed) | run 01 (no preceding card) |
+|---|---|---|
+| `rollRate` | **−58.99 / −58.66 / −58.65** | −0.16 |
+| `rollRateF` | −12.83, bleeding out over ~0.2 s | ~0 |
+| `headingRateFilt` | 10.4 / 19.0 / 19.3 | 0.00 |
+| `leadDeg` | **6.8 / 12.4 / 12.5°** against a 0.04° error | 0.00 |
+
+`rollRate = (t.up − _prevUp)/dt`, so −59 requires `_prevUp` at the *banked* attitude — the placement
+snaps a ~79° banked turn wings-level in one fixed step and the difference straddles it (Δup·right
+≈ 1.18 over dt 0.02). Direct measurements on that row (`bank`, `alt`, `pos`, `spd`, `aoa`) are all
+correctly post-placement; only derivatives are poisoned, which a freshly-`Forget`-ed instance cannot
+do. `PlaceOnCondition` calls `ChaseController.Forget(ac)` and logs `controller reset` right after it,
+so the call happens and does not stick.
+
+**Deliberately unfixed.** A discontinuity guard on the finite difference would clean up `rollRate`
+while leaving `headingRateFilt`/`leadDeg` untouched — the symptom would look fixed and the cause
+would hide. **This does not invalidate Gate A or B**: the transient is deterministic (the three
+placed runs agree within 0.02 on every affected signal) and decays inside the 6 s `arm`, before the
+scored segment starts.
+
+### This retracts one Gate A claim
+
+Gate A concluded "`iPitch`/`iYaw` read exactly 0.0000 on every first row, so v0.84's `ctrlReset` does
+what it claims." **That is not evidence.** R21 measured `_iPitch` at ±0.001 against a 0.12 cap for an
+entire 30 s turn, so it is ~0 coming out of a turn whether or not anything reset it. The A-batch
+observation stands as a fact; the inference drawn from it does not. Gate A's own pass criteria
+(`spd` spread and the null split) are unaffected.
 
 ---
 
