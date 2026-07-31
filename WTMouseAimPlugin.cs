@@ -20,7 +20,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.90.0";
+        public const string PluginVersion = "0.96.0";
 
         internal static ManualLogSource Log;
 
@@ -113,6 +113,13 @@ namespace NuclearOptionMouseAim
                 _toastOn = Cfg.Enabled.Value;
             }
 
+            // FRAME TIME, sampled here because here is the only place it is real: Time.unscaledDeltaTime
+            // returns fixedUnscaledDeltaTime (a constant) when read from FixedUpdate, which is where
+            // this lived until v0.92.1 and why the recorder's `frameMs` column held one value for a
+            // whole 352-capture batch. Unconditional, like the AimRig call below — it is a recorder
+            // signal, not a drone signal, and the harness's own gate is inside it.
+            TestDrone.SampleFrameTime();
+
             AimRig.Update();
 
             // Fly Level toggle (v0.24). Edge-triggered; needs an aircraft to latch the heading onto.
@@ -151,6 +158,11 @@ namespace NuclearOptionMouseAim
                 if (Input.GetKeyDown(Cfg.DroneSpawnKey.Value))   TestDrone.RequestLaunch();
                 if (Input.GetKeyDown(Cfg.DroneDespawnKey.Value)) TestDrone.DespawnAll();
             }
+
+            // Sandbox (v0.95): put the OPERATOR airborne. Deliberately OUTSIDE the DroneEnabled gate
+            // above — this is for hand-flying the law, not part of the harness, and needing to arm
+            // the drone subsystem to use it would be a lie about what it does.
+            if (Input.GetKeyDown(Cfg.SandboxKey.Value)) PlayerSpawn.Trigger();
         }
 
         // The mod's only fixed-step hook that exists independently of an aircraft. The drone harness
@@ -464,7 +476,10 @@ namespace NuclearOptionMouseAim
                 _pre = ScenarioPlayer.Preview(true);   // quiet: this is a repaint, not an operator action
             }
             var p = _pre;
-            string head = $"HARNESS  ready   [{Cfg.DroneSpawnKey.Value}] to launch {Cfg.DroneCount.Value}";
+            // CountOf, not Cfg.DroneCount: since v0.91 the card's airframe list decides the fleet size,
+            // so the knob is only one of three possible answers and quoting it would be wrong exactly
+            // when the card is driving — which is the case this panel exists to make visible.
+            string head = $"HARNESS  ready   [{Cfg.DroneSpawnKey.Value}] to launch {TestDrone.CountOf(p)}";
 
             if (p.Cards == 0)
             {
@@ -489,10 +504,17 @@ namespace NuclearOptionMouseAim
             BoardLine(2, BoardDim,
                 $"  plant {TestDrone.AirframeOf(p)} {Src(!string.IsNullOrEmpty(p.Airframe))}   "
               + $"{TestDrone.AltOf(p):0} m {Src(p.StartAlt > 0f)}   "
-              + $"{TestDrone.SpeedOf(p):0} m/s {Src(p.StartSpeed > 0f)}");
+              // SpeedText, not a number: a v0.93 corner-relative card has a DIFFERENT entry speed per
+              // lane, so it reads "1.00x corner (per airframe)". Printing one number here would be a
+              // promise the spawn does not keep — on a panel whose whole job is that it cannot be.
+              + $"{TestDrone.SpeedText(p)} {Src(TestDrone.SpeedFromCard(p))}   "
+              + $"x{TestDrone.CountOf(p)} drones ({p.CountSrc})");
             BoardLine(3, BoardDim, string.IsNullOrEmpty(p.ArmKnob)
                 ? "  A/B   none — one arm; set a card's armToggle or Scenario/ScenarioArmToggle to interleave"
-                : $"  A/B   {p.ArmKnob}   ABBA by run index   (from {p.ArmSrc})");
+                // "per aircraft" earns its width: until v0.94 a multi-drone launch stood the schedule
+                // down, so an operator who learned that rule still believes he must fly A/Bs one at a
+                // time. This line is where he finds out he no longer does.
+                : $"  A/B   {p.ArmKnob}   ABBA per aircraft, by run index   (from {p.ArmSrc})");
         }
 
         private static string Src(bool fromCard) => fromCard ? "[from card]" : "[from F1]";

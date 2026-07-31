@@ -35,12 +35,18 @@ namespace NuclearOptionMouseAim
         // key was pressed — parallel courses, so nothing converges on anything.
         //   AbeamM  : how far out the first lane sits. Far enough that the drone cannot collide with,
         //             be shot at by, or visually clutter whatever is happening near the player.
-        //   LaneM   : lateral gap between consecutive drones.
+        //   LaneM   : lateral gap between consecutive drones. SIZED BY THE TURN CARDS, not by taste:
+        //             the sustained-turn family flies a full 360 at the bank clamp, and at the 250 m/s
+        //             entry condition a 72 deg banked turn has radius v^2/(g*tan phi) = 62500/(9.81*
+        //             3.08) = 2.07 km, i.e. a 4.1 km CIRCLE. At the old 2 km gap two neighbouring
+        //             lanes flying the same card swept overlapping ground tracks — they only ever
+        //             missed because the launch stagger put them at different points on it. 6 km
+        //             clears the widest card circle with a lane's width to spare.
         // ponytail: fixed lateral lanes, no altitude stacking and no re-check that the lane is clear.
         // The range mission (`harness/WTM-Range`) is deliberately empty, which is what makes that
         // safe. If a card ever flies over a populated map, give each lane its own altitude block.
         private const float AbeamM = 8000f;
-        private const float LaneM  = 2000f;
+        private const float LaneM  = 6000f;
 
         // Hitch reporting. A "hitch" is any rendered frame that took more than this; during one,
         // Unity runs several FixedUpdates back to back all reporting the SAME unscaledDeltaTime, so
@@ -85,19 +91,19 @@ namespace NuclearOptionMouseAim
         // change airframe half way through.
         private static ScenarioPlayer.Preflight _plan;
 
-        public static IReadOnlyList<Drone> Live => _live;
-
         // The hot-path gate. Everything in this file that runs per-tick early-outs on this single
         // read, exactly like ScenarioPlayer's null-card check — with no drone alive the harness costs
         // one int compare per pilot per fixed step.
         public static bool Idle => _byAircraftId.Count == 0;
 
-        // FRAME TIME, sampled on the fixed step (v0.81). The stagger below exists because a frame
-        // hitch lands on whatever segment is running when it happens; if all N replicates are flying
-        // the same segment at that instant, one hitch corrupts all N identically and they stop being
-        // independent samples. That is an assumption until it is instrumented, so: this is the last
-        // `Time.unscaledDeltaTime` seen by a fixed step, exposed for the recorder to sample as a
-        // column. Unscaled on purpose — the scaled one would hide a hitch as a timeScale change.
+        // FRAME TIME, sampled on the RENDERED FRAME (v0.81; corrected in v0.92.1 — it said "on the
+        // fixed step" and did exactly that, which is the bug: see SampleFrameTime). The stagger below
+        // exists because a frame hitch lands on whatever segment is running when it happens; if all N
+        // replicates are flying the same segment at that instant, one hitch corrupts all N identically
+        // and they stop being independent samples. That is an assumption until it is instrumented, so:
+        // this is the last `Time.unscaledDeltaTime` seen by Update(), exposed for the recorder to
+        // sample as a column. Unscaled on purpose — the scaled one would hide a hitch as a timeScale
+        // change.
         public static float FrameDt { get; private set; }
 
         // "Which drone is this aircraft, if any?" — 1..N for a drone, 0 for anything else (the player
@@ -153,7 +159,6 @@ namespace NuclearOptionMouseAim
 
             _laneRight = Vector3.Cross(Vector3.up, fwd);      // horizontal right of the heading
             _laneRot   = Quaternion.LookRotation(fwd, Vector3.up);
-            _pending   = Mathf.Clamp(Cfg.DroneCount.Value, 1, 16);
             // Start past whatever is still up, rather than at 0. Auto-despawn (below) normally empties
             // the sky between batches, so this is the belt to that braces: it makes "press it twice"
             // safe even when the observer has not moved, which lane 0 alone does not.
@@ -173,10 +178,15 @@ namespace NuclearOptionMouseAim
             // Preview() already reports "" / 0 for every field when nothing is selected, so there is
             // no Cards>0 guard to write here: the fallbacks below ARE the no-card case.
             var pre = _plan = ScenarioPlayer.Preview();
+            // AFTER the preview, not before: since v0.91 the fleet size is one of the things the card
+            // gets to decide, and CountOf reads it off `_plan`. Ordering the other way round is how it
+            // was written when the count could only come from Cfg, and it would silently pin every
+            // batch to the global again.
+            _pending = CountOf(pre);
 
             WTMouseAimPlugin.Log.LogInfo(
                 $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
-                + $"{SpawnSpeed():0} m/s, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
+                + $"{SpeedText(pre)}, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
             // WHO DECIDED, ITEM BY ITEM. This is the operator's ONLY confirmation that the card drove
             // the spawn — "4000 m" alone looks the same whether the card asked for it or the knob just
             // happened to be there, and the difference is exactly what the self-describing card was
@@ -200,7 +210,8 @@ namespace NuclearOptionMouseAim
                     + $"from {pre.RepeatSrc}{armPart}): "
                     + $"airframe '{AirframeOf(pre)}' [{(string.IsNullOrEmpty(pre.Airframe) ? "DroneAirframe" : "card")}], "
                     + $"{AltOf(pre):0} m [{(pre.StartAlt > 0f ? "card" : "DroneSpawnAlt")}], "
-                    + $"{SpeedOf(pre):0} m/s [{(pre.StartSpeed > 0f ? "card" : "DroneSpawnSpeed")}].");
+                    + $"{SpeedText(pre)} [{(SpeedFromCard(pre) ? "card" : "DroneSpawnSpeed")}], "
+                    + $"{_pending} drone(s) [{pre.CountSrc}].");
             }
         }
 
@@ -212,10 +223,47 @@ namespace NuclearOptionMouseAim
         internal static string AirframeOf(ScenarioPlayer.Preflight p) =>
             string.IsNullOrEmpty(p.Airframe) ? (Cfg.DroneAirframe.Value ?? "") : p.Airframe;
         internal static float  AltOf(ScenarioPlayer.Preflight p)   => p.StartAlt   > 0f ? p.StartAlt   : Cfg.DroneSpawnAlt.Value;
+
+        // SPEED COMES IN TWO SHAPES SINCE v0.93, and only one of them has a batch-wide answer.
+        //   SpeedOf     — no lane in hand. The ABSOLUTE form only; a corner-relative card has no
+        //                 single number for the batch by construction, so this deliberately does not
+        //                 pretend to one. Its callers (the run board, SpeedText) branch on
+        //                 StartSpeedCorner and say "1.00x corner (per airframe)" instead of printing
+        //                 a fallback that no lane will be placed at.
+        //   SpeedOfLane — the real answer, for the lane about to spawn. Used by the spawn velocity AND
+        //                 by the v0.92 envelope gate, which must check the speed the placement will
+        //                 later write, not the card's raw number.
         internal static float  SpeedOf(ScenarioPlayer.Preflight p) => p.StartSpeed > 0f ? p.StartSpeed : Cfg.DroneSpawnSpeed.Value;
 
-        private static float SpawnAlt()   => AltOf(_plan);
-        private static float SpawnSpeed() => SpeedOf(_plan);
+        internal static float SpeedOfLane(ScenarioPlayer.Preflight p, string jsonKey)
+        {
+            // The policy itself lives in ScenarioPlayer, next to the placement that has to agree with
+            // it — this is the Cfg fallback and nothing else, exactly like AltOf above.
+            float v = ScenarioPlayer.ResolveStartSpeed(p.StartSpeed, p.StartSpeedCorner, jsonKey);
+            return v > 0f ? v : Cfg.DroneSpawnSpeed.Value;
+        }
+
+        // The entry speed as the OPERATOR needs to read it, for the launch log and the run board. A
+        // corner-relative card gets the multiple, not a number: printing one number for a per-lane
+        // quantity is the misleading half of the only confirmation he gets.
+        internal static string SpeedText(ScenarioPlayer.Preflight p) =>
+            p.StartSpeedCorner > 0f ? $"{p.StartSpeedCorner:0.00}x corner (per airframe)"
+                                    : $"{SpeedOf(p):0} m/s";
+
+        // Did the CARD decide the entry speed, in either of its forms? (The board and the log spell
+        // the answer differently, so they share the test and not the wording.)
+        internal static bool SpeedFromCard(ScenarioPlayer.Preflight p) =>
+            p.StartSpeedCorner > 0f || p.StartSpeed > 0f;
+        // Unlike the three above, the Cfg fallback lives in ScenarioPlayer.ResolveCount — because the
+        // "as many as the airframe list names" rule needs the CARD, and a Preflight with no card
+        // already carries Count 0. So this is a clamp and a no-card guard, not a second policy.
+        internal static int    CountOf(ScenarioPlayer.Preflight p) =>
+            Mathf.Clamp(p.Count > 0 ? p.Count : Cfg.DroneCount.Value, 1, 16);
+
+        private static float SpawnAlt() => AltOf(_plan);
+        // No SpawnSpeed() twin: since v0.93 the entry speed is a per-LANE question (see SpeedOfLane),
+        // and a no-argument accessor is precisely how the gate and the placement would end up
+        // checking different speeds. LaunchDue resolves it once with the lane's key in hand.
 
         // =========================================================================================
         // THE FIXED STEP. Called from WTMouseAimPlugin.FixedUpdate — a real fixed-step hook that
@@ -225,14 +273,31 @@ namespace NuclearOptionMouseAim
         // =========================================================================================
         public static void FixedTick()
         {
-            SampleFrameTime();
             if (_pending > 0) LaunchDue();
             if (_live.Count > 0) PruneDead();
         }
 
         private static float _hitchArmed;   // Time.time the current hitch was first reported (edge gate)
 
-        private static void SampleFrameTime()
+        // CALLED FROM Update(), NOT FixedTick — and that is the whole content of the v0.92.1 fix.
+        //
+        // `Time.unscaledDeltaTime` returns the RENDERED-frame delta only when read from a per-frame
+        // callback. Read from inside FixedUpdate, Unity substitutes `fixedUnscaledDeltaTime`, which is
+        // a CONSTANT — so from v0.86 (when the column was added) to v0.92 this sampled the fixed step
+        // and called it frame time.
+        //
+        // Measured on R27, which is why this is not a theoretical tidy-up: `frameMs` read exactly
+        // 16.70 ms on all 223,899 rows of a 352-capture batch. One distinct value, zero variance, on
+        // the column whose entire purpose is showing that a frame hitch landed on one replicate's
+        // segment and not another's. It also MISSED a 119 ms hitch that the log caught while four
+        // recorders were open and sampling through it — the value only ever moved when Unity's
+        // catch-up machinery engaged, i.e. it was a coarse stall flag masquerading as a budget meter.
+        // The direct cost: the harness could not answer "is there frame headroom for more drones?",
+        // which is the question the stagger and this column exist to make answerable.
+        //
+        // The hitch WARNING is unaffected in kind but becomes far more sensitive here, since it now
+        // sees the actual frame times rather than only the ones big enough to distort the fixed clock.
+        internal static void SampleFrameTime()
         {
             float dt = Time.unscaledDeltaTime;
             bool rising = dt >= HitchSec && FrameDt < HitchSec;
@@ -261,7 +326,22 @@ namespace NuclearOptionMouseAim
             pos.y = new GlobalPosition(0f, SpawnAlt(), 0f).ToLocalPosition().y;
             _slot++;
 
-            var d = Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * SpawnSpeed());
+            // THE LANE'S OWN ENTRY SPEED (v0.93). Resolved once, here, and used by the gate and the
+            // spawn velocity both — with a corner-relative card these differ per lane, and asking
+            // twice (or asking the batch-wide SpeedOf) is how a lane gets gated on one speed and
+            // placed at another.
+            float laneSpeed = SpeedOfLane(_plan, key);
+
+            // FEASIBILITY BEFORE THE SPAWN (v0.92). Refusing here rather than after registering the
+            // aircraft is the entire value of the check: an unflyable lane then costs nothing and,
+            // more to the point, never writes a capture. `null` flows into the SAME skip-or-cancel
+            // decision an unknown jsonKey takes below — one policy for "this lane will not happen",
+            // not a second one bolted alongside it. Still live under v0.93: a corner multiple is not
+            // automatically flyable (2.0x corner is over Vmax on most of the roster), it is just no
+            // longer a number chosen without reference to the airframe.
+            var d = EntrySpeedFlyable(key, laneSpeed)
+                  ? Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * laneSpeed)
+                  : null;
             if (d == null)
             {
                 // With ONE airframe the next lane fails identically (no server, bad jsonKey, no
@@ -294,6 +374,11 @@ namespace NuclearOptionMouseAim
         // one test, and a batch flying it on a mix of airframes is not replicates of anything
         // (compare-runs.py refuses to pool across jsonKeys for exactly that reason). A heterogeneous
         // batch is still available: leave `airframe` out of the card and use the Cfg list.
+        // Between markers: debugtests/test-fleet-resolve.py extracts these two verbatim and checks
+        // them against ScenarioPlayer.CountKeys, which must count exactly the tokens this splits —
+        // they are a deliberate count-only / assignment pair, and a disagreement means the fleet size
+        // and the lane assignment come from two different readings of one string.
+        // --- FLEET-RESOLVE BEGIN ---
         private static string[] AirframeList()
         {
             // One path, not two: AirframeOf already picks the card's key over the list, and a jsonKey
@@ -314,6 +399,175 @@ namespace NuclearOptionMouseAim
         {
             var list = AirframeList();
             return list[slot % list.Length];
+        }
+        // --- FLEET-RESOLVE END ---
+
+        // =========================================================================================
+        // CAN THIS AIRFRAME HOLD THE ENTRY CONDITION AT ALL? (v0.92)
+        //
+        // A card declares ONE entry speed and a batch may name ten airframes. Nothing refuses the
+        // mismatch today: the lane spawns, the placement writes a speed the aircraft cannot hold,
+        // and the capture measures the decay back to whatever it CAN hold — which scores perfectly
+        // well and answers a different question. That is the failure mode v0.90/v0.91 removed from
+        // the airframe/alt/speed knobs, one level down: not a wrong value but an IMPOSSIBLE one.
+        // The shipped grid has three of them by construction (AIRFRAMES.md): every `oblique-*`,
+        // `sweep-*` and `e1`-`e3` card asks for 250 m/s, and `CAS1` tops out at 205.6, `COIN` at
+        // 141.7, the rotorcraft lower still.
+        //
+        // Asked BEFORE the spawn, off `Encyclopedia.Lookup` (a public static
+        // Dictionary<string, UnitDefinition> filled by `Encyclopedia.AfterLoad`, decompile :9715) —
+        // an aircraft instance would defeat the point, which is to refuse without creating a unit.
+        // =========================================================================================
+
+        // What one airframe's definition publishes about its envelope. Nested rather than a
+        // top-level type because it is the return shape of the one function below, not a subsystem.
+        internal struct Envelope
+        {
+            public float VStall;   // m/s
+            public float VMax;     // m/s
+            public float Corner;   // m/s — the speed the devs' own table calls its manoeuvring point
+            public float GLimit;   // g
+        }
+
+        // FAIL-SOFT, exactly like the FBW/canard/helo probes in ChaseController: `false` means "we
+        // could not read it", NEVER "the bounds are zero". A zero Vmax taken as a real bound would
+        // refuse every lane on an airframe we merely failed to look up, and a probe that cancels a
+        // batch because a field was missing is worse than no probe at all. The out-value is
+        // untouched on false by construction, so there is no zero for a caller to mistake for data.
+        // The FBW's own corner speed, read off the PREFAB — no aircraft instance, same as everything
+        // else in this block. `ControlsFilter.GetFlyByWireParameters()` is public (:65521) and packs
+        // cornerSpeed at index 2 (`FlyByWire.GetParameters()`, :64786), so this needs no reflection —
+        // it is the same public accessor the v0.55 FBW probe in ChaseController already reads
+        // `_fbwCorner` out of, just asked of a prefab instead of a flying aircraft. `GetComponentInChildren`
+        // with `includeInactive` because a prefab's hierarchy is inactive and `HeloControlsFilter`
+        // (:35847) derives from `ControlsFilter`, so rotorcraft resolve through the same call.
+        //
+        // FAIL-SOFT, and NaN is the sentinel on purpose: 0 is a speed and would silently become an
+        // entry condition. Cached per jsonKey — both to keep this off the per-lane launch path and
+        // because the cache IS the once-per-airframe warning: the value (sentinel included) is
+        // computed exactly once, so the log line cannot repeat.
+        private static readonly Dictionary<string, float> _fbwCornerByKey = new Dictionary<string, float>();
+
+        private static float FbwCornerSpeed(string jsonKey)
+        {
+            if (_fbwCornerByKey.TryGetValue(jsonKey ?? "", out float cached)) return cached;
+            float v = float.NaN;
+            try
+            {
+                if (Encyclopedia.i != null && Encyclopedia.i.TryGetPrefab(jsonKey ?? "", out var prefab) && prefab != null)
+                {
+                    var cf = prefab.GetComponentInChildren<ControlsFilter>(true);
+                    if (cf != null)
+                    {
+                        var (_, p) = cf.GetFlyByWireParameters();
+                        if (p != null && p.Length > 2 && p[2] > 0f) v = p[2];
+                    }
+                }
+            }
+            catch { /* fall through to the sentinel — never throw into the launch path */ }
+            if (float.IsNaN(v))
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[drone] '{jsonKey}': could not read ControlsFilter.FlyByWire.cornerSpeed off the prefab — "
+                    + "falling back to the encyclopedia's AI cornerSpeed, which the flight model does not use. "
+                    + "A startSpeedCorner card will enter THIS lane at a different aerodynamic state than the rest "
+                    + "of the fleet; pin an absolute startSpeed if that matters.");
+            _fbwCornerByKey[jsonKey ?? ""] = v;
+            return v;
+        }
+
+        internal static bool TryEnvelope(string jsonKey, out Envelope e)
+        {
+            e = default(Envelope);
+            try
+            {
+                // The SAME readiness test the spawn uses, not a second one: `Lookup` is populated by
+                // `Encyclopedia.AfterLoad`, the loader callback that also makes `i` non-null, so one
+                // question answers both. (The null check on the dictionary itself is the cheap
+                // belt — a static field the game clears is not ours to assume about.)
+                if (Encyclopedia.i == null || Encyclopedia.Lookup == null) return false;
+                if (!Encyclopedia.Lookup.TryGetValue(jsonKey ?? "", out var ud)) return false;
+                var ad = ud as AircraftDefinition;
+                if (ad == null || ad.aircraftInfo == null || ad.aircraftParameters == null) return false;
+
+                // KM/H -> M/S. `aircraftInfo` is the encyclopedia's display block and is in km/h at
+                // every use site in the game (:2583, :10258-10259); `aircraftParameters` is already
+                // m/s. Mixing the two is a silent factor of 3.6.
+                e.VStall = ad.aircraftInfo.stallSpeed / 3.6f;   // :62791
+                e.VMax   = ad.aircraftInfo.maxSpeed   / 3.6f;   // :62789
+                // NOT `aircraftParameters.maxSpeed`, which is the obvious field and the wrong one:
+                // it is a NORMALIZER (`aircraft.speed / maxSpeed` at :15554, :15919, :70152) reading
+                // a flat 600 for every fast jet, so a check built on it concludes that the 141 m/s
+                // Cricket can do 250. The two agree only for rotorcraft.
+                // CORNER SPEED: the FLIGHT MODEL's, not the AI's. There are TWO `cornerSpeed` fields
+                // and until v0.96 this read the wrong one. `aircraftParameters.cornerSpeed` (:62924)
+                // is consumed only by the AI — throttle policy (:12993), glideslope (:13624), effort
+                // scaling (:15773) — while the thing that actually shapes the stick is
+                // `ControlsFilter.FlyByWire.cornerSpeed` (:64704): it is the pitch-rate demand's
+                // saturation speed (`targetPitchAngVel = pitch * gLimitPositive * 9.81 /
+                // max(speed, cornerSpeed * 0.75)`, :64859) and the G-limit knee (:64672). Measured
+                // over the whole capture corpus (1604 sidecars, both numbers already recorded) they
+                // differ by 0.556x (Darkreach 100 vs 180) to 1.417x (AttackHelo1 170 vs 120) — so a
+                // `startSpeedCorner` card, whose entire claim is "every lane enters at the same
+                // aerodynamic state", was spreading the fleet over 2.2x of true FBW corner. Falls
+                // back to the AI value, never to zero.
+                float fbwCorner = FbwCornerSpeed(jsonKey);
+                e.Corner = float.IsNaN(fbwCorner) ? ad.aircraftParameters.cornerSpeed : fbwCorner;
+                e.GLimit = ad.aircraftParameters.aircraftGLimit; // :62910
+                // A definition that publishes no Vmax has nothing to check against; report unknown
+                // rather than hand back a ceiling of zero that would refuse everything.
+                return e.VMax > 0f;
+            }
+            catch { return false; }   // never throw into the launch path
+        }
+
+        // THE MARGINS, and why these rather than the round numbers.
+        //   Floor 1.10x Vstall — not "can it stay airborne" but "can it manoeuvre": 1.10 Vs leaves
+        //     1.21 g of load before the stall, i.e. ~34 deg of sustained bank, the least that lets a
+        //     card measure a control law instead of a stall. The obvious 1.20 was rejected on the
+        //     SHIPPED grid: its tightest legitimate pairing is `stol-*` at 90 m/s on `SmallFighter1`
+        //     (Vstall exactly 75.0), a ratio of exactly 1.200 — so a 1.2 floor would decide a card
+        //     AIRFRAMES.md calls flyable by the float rounding of `stallSpeed / 3.6`. 1.10 gives
+        //     that pairing 9% of clearance and still refuses anything genuinely near the stall.
+        //   Ceiling 0.95x Vmax — an airframe pinned at Vmax has no energy left to manoeuvre with,
+        //     and cannot HOLD the condition either: the placement writes the speed once and thrust
+        //     alone has to keep it. The 250 m/s family clears this on every airframe that can fly it
+        //     at all (tightest: `Darkreach` at 0.895) and fails it on exactly the three AIRFRAMES.md
+        //     names — `CAS1` (0.95 x 205.6 = 195.3), `COIN` (134.6), and all three rotorcraft.
+        // ponytail: speed only. Altitude has no per-airframe bound to check against — there is no
+        // service ceiling anywhere in the decompile (AIRFRAMES.md trap 5), and `maxEditorHeight` is
+        // an editor placement limit, not a physics one.
+        //
+        // Between markers because debugtests/test-fleet-resolve.py compiles these two verbatim and
+        // asserts the documented roster pairings against them — in particular that `stol-*` at
+        // 90 m/s on `SmallFighter1` (Vstall exactly 75.0) clears the floor with room to spare, which
+        // is the whole reason the floor is not 1.20. A Python copy of the numbers would agree with
+        // itself after someone "rounded them up".
+        // --- ENTRY-MARGINS BEGIN ---
+        private const float StallMargin = 1.10f;
+        private const float VMaxMargin  = 0.95f;
+        // --- ENTRY-MARGINS END ---
+
+        // Returns false having ALREADY logged the reason, so the caller only has to skip the lane —
+        // the same division of labour as the unknown-jsonKey refusal inside `Spawn`. An UNKNOWN
+        // envelope never refuses.
+        private static bool EntrySpeedFlyable(string jsonKey, float speed)
+        {
+            if (!TryEnvelope(jsonKey, out var e)) return true;
+
+            float lo = e.VStall * StallMargin, hi = e.VMax * VMaxMargin;
+            // Built up front rather than nested in the interpolation below — an interpolated string
+            // inside an interpolation hole is legal C# but breaks check-architecture.py's string
+            // stripper (see the same note in RequestLaunch).
+            string bound = speed < lo ? $"below the {StallMargin:0.00}x Vstall floor of {lo:0.#} m/s (Vstall {e.VStall:0.#})"
+                         : speed > hi ? $"above the {VMaxMargin:0.00}x Vmax ceiling of {hi:0.#} m/s (Vmax {e.VMax:0.#})"
+                         : null;
+            if (bound == null) return true;
+
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[drone] refused: '{jsonKey}' cannot fly the {speed:0.#} m/s entry condition — it is {bound}; "
+                + $"FBW corner {e.Corner:0.#} m/s, {e.GLimit:0.#} g. Give this airframe its OWN card — a slower "
+                + "startSpeed on the shared one re-bands every other lane at once.");
+            return false;
         }
 
         // An aircraft can leave without us: it can be shot down, fly into the sea, or be cleaned up
@@ -370,6 +624,11 @@ namespace NuclearOptionMouseAim
             ScenarioPlayer.Forget(aircraftId);      // v0.86: card playback state
             ManeuverRecorder.Forget(aircraftId);    // v0.86: closes an open capture
             ChaseController.Forget(aircraftId);     // v0.82: integrators / filters / probes
+            // v0.94: the A/B arm assignment, which deliberately SURVIVES Forget (the per-replicate
+            // reset drops the controller every run and must not un-sweep the experiment), so despawn
+            // is one of only two places that clears it — the other being the suite's own Finish.
+            // Without this line a recycled instance id would inherit a dead batch's arm.
+            ChaseController.SetArm(aircraftId, null, false);
         }
 
         // =========================================================================================
@@ -482,7 +741,13 @@ namespace NuclearOptionMouseAim
                 _byAircraftId[d.AircraftId] = d;
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[drone] #{id} '{jsonKey}' spawned at ({worldPos.x:0}, {worldPos.y:0}, {worldPos.z:0}) local / "
-                    + $"{d.HoldAlt:0} m MSL, {velocity.magnitude:0} m/s, hdg {rot.eulerAngles.y:0}deg. {_live.Count} live.");
+                    + $"{d.HoldAlt:0} m MSL, {velocity.magnitude:0} m/s, hdg {rot.eulerAngles.y:0}deg, "
+                    // Crew count is the airframe property that broke R26: every seat fires the pilot
+                    // postfix, so a two-seater double-stepped the card clock AND the control law until
+                    // the guard in OnPilotStep. It is prefab data with no code-side definition (there
+                    // is no `crew` anywhere in the decompile), so the log line is the only place an
+                    // operator can learn that `trainer` has two seats and `Fighter1` has one.
+                    + $"{(ac.pilots != null ? ac.pilots.Length : 0)} crew. {_live.Count} live.");
                 return d;
             }
             catch (System.Exception e)
@@ -566,6 +831,29 @@ namespace NuclearOptionMouseAim
                 Despawn(d, p.ejected ? "pilot ejected" : p.dead ? "pilot killed" : "disabled by the game");
                 return;
             }
+
+            // ONCE PER AIRCRAFT PER FIXED STEP — NOT once per PILOT. `Aircraft.pilots` is an ARRAY
+            // (Aircraft:60288 in the 0.34 decompile), every `Pilot` registers itself with `JobManager`
+            // in its own Awake (Pilot:85535), and `JobManager.PilotAeroInputs` walks that flat list
+            // calling `Pilot_OnAeroInputsApplied` on each one (:168794). So a TWO-SEAT airframe runs
+            // this postfix TWICE per fixed step, and everything below it twice with it.
+            //
+            // Measured in R26, and it is not a cosmetic doubling: `trainer` and `FastBomber1` (two
+            // seats) flew a 6 s segment in 2.97 s and a 30 s segment in 14.95 s, against 5.97/29.95
+            // for the single-seat `Fighter1`/`Multirole1` — a 2x-rate stimulus. Worse, the control law
+            // was double-stepped inside one physics step: integrators and rate filters advanced twice
+            // per dt, and every finite difference taken against a cached previous attitude (rollRate =
+            // (t.up - _prevUp)/dt) read ZERO on the second call, because nothing had moved. The two
+            // airframes' captures are not comparable to the other two and were not measuring the law.
+            //
+            // The stamp, not the game's own `aircraft.pilots[0] == p` identity idiom (:85536, :85645):
+            // a pilot that dies returns PartResult.Remove and is dropped from JobManager's list
+            // (:168804), so keying on pilot 0 would silently stop ticking a drone whose front-seater
+            // was killed — and it would never reach the despawn above either, since that check sits on
+            // the INVOKING pilot. The stamp keeps flying on whichever crew member is still alive, and
+            // leaving the death check upstream of it means ANY seat's death still despawns.
+            if (d.LastStep == Time.fixedTime) return;
+            d.LastStep = Time.fixedTime;
 
             try
             {
@@ -736,6 +1024,12 @@ namespace NuclearOptionMouseAim
         // flying one. PruneDead's auto-despawn clock. Per drone and not a shared timer, because the
         // launch stagger means N drones finish at N different instants — which is the point.
         public float IdleSince = -1f;
+
+        // `Time.fixedTime` of the last step this drone was actually flown. The de-duplicator for a
+        // MULTI-CREW airframe, whose every seat fires the pilot postfix independently — see the long
+        // note at the guard in TestDrone.OnPilotStep. Per drone because the seats of one aircraft are
+        // what collide, and -1 rather than 0 so the very first fixed step of a session is not eaten.
+        public float LastStep = -1f;
 
         // WHAT FLIES THIS DRONE. Return true if inputs were written (the caller then runs the game's
         // FBW over them), false to leave this tick alone. It lives HERE, per drone, rather than as one

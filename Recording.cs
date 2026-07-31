@@ -184,7 +184,26 @@ namespace NuclearOptionMouseAim
             // warning in a log nobody diffs; as a column it is per-row evidence, so a batch can drop
             // (or covary out) the rows that were actually stalled instead of arguing about them. Also
             // the honest reading of tWall: dt/dtWall says timeScale slipped, this says WHY.
-            "frameMs";
+            "frameMs," +
+            // v0.96. AIRFRAME DAMAGE — the fraction of THIS aircraft's parts that have DETACHED,
+            // straight off the game's own aggregate (Aircraft.partDamageTracker is a public field,
+            // decompile :60388, constructed for every aircraft at :61084; PartDamageTracker at
+            // :79217). Free to read on every row: GetDetachedRatio (:79244) is event-driven and
+            // self-throttled to 1 Hz — it returns a CACHED float and walks nothing at all until a
+            // part actually falls off.
+            // Why a column at all: over-G damages the PILOT only (Pilot.TakeGForceDamage), so
+            // joint-break detachment is the only in-flight airframe damage this harness produces —
+            // and a replicate flying with a part missing is not the same airframe the previous
+            // replicate flew, so it cannot contribute a comparable sample. v0.84 named damage as
+            // one of the two things the per-replicate reset CANNOT undo and therefore has to be
+            // recorded instead of removed; until now it was the one of those two with no record.
+            // -1 = COULD NOT READ IT (no aircraft, no tracker, or the read threw). Never 0: 0 is
+            // "intact", and reporting a failed probe as zero is the exact confusion the fail-soft
+            // rule exists to prevent. The sidecar's aeroPartCount is NOT a substitute — nothing on
+            // the detach path calls RemoveFromUnit(), the only caller of DeregisterAeroPart
+            // (AeroPart:74558-74564), so it never decreases and a constant 35 is not evidence that
+            // nothing fell off.
+            "dmgFrac";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -332,12 +351,17 @@ namespace NuclearOptionMouseAim
                 // describe the drone, and the drone is never the local aircraft by construction.
                 string acName = "<unknown>", fbwLine = "<unavailable>";
                 Aircraft acRef = _ac;
+                // v0.94: held for the '# config' line below too — it is what knows which A/B arm THIS
+                // aircraft is flying, and the five swept levers have to be printed as flown, not as
+                // configured. Same instance the FBW header comes from, so one lookup covers both.
+                ChaseController cc = null;
                 try
                 {
                     if (acRef != null)
                     {
                         if (acRef.definition != null) acName = acRef.definition.name;
-                        fbwLine = ChaseController.For(acRef).FbwHeader(acRef); // v0.55: per-airframe FBW params (fail-soft)
+                        cc = ChaseController.For(acRef);
+                        fbwLine = cc.FbwHeader(acRef); // v0.55: per-airframe FBW params (fail-soft)
                     }
                 }
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }
@@ -353,7 +377,7 @@ namespace NuclearOptionMouseAim
                 // set, so reading it apart from the card name is meaningless.
                 if (!string.IsNullOrEmpty(_overrideNote)) _w.WriteLine($"# override {_overrideNote}"); // v0.90: what the CARD pinned
                 if (!string.IsNullOrEmpty(_entryNote)) _w.WriteLine($"# entry {_entryNote}"); // v0.84: reset provenance
-                _w.WriteLine($"# config {Cfg.SnapshotString()}");
+                _w.WriteLine($"# config {Cfg.SnapshotString(cc, ScenarioPlayer.ArmTagFor(acRef))}");
                 _w.WriteLine($"# fbw {fbwLine}");
                 _w.WriteLine(Header);
                 _startTime  = Time.time;
@@ -457,6 +481,12 @@ namespace NuclearOptionMouseAim
                 }
             }
             catch { /* leave zeros */ }
+            // SEPARATE from the block above, and initialised to the sentinel rather than to 0: a
+            // failure up there is allowed to leave zeros because 0 is a plausible reading of every
+            // one of those signals, whereas 0 detached parts means INTACT. See the header comment.
+            float dmg = -1f;
+            try { if (ac != null && ac.partDamageTracker != null) dmg = ac.partDamageTracker.GetDetachedRatio(); }
+            catch { /* leave the -1 sentinel */ }
             try
             {
                 _w.WriteLine(
@@ -470,7 +500,7 @@ namespace NuclearOptionMouseAim
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
                     $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}," +
-                    $"{TestDrone.FrameDt * 1000f:0.0}");
+                    $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }
@@ -558,11 +588,38 @@ namespace NuclearOptionMouseAim
                     if (d == null) return;
                     Str("unitName", d.unitName); Str("jsonKey", d.jsonKey);
                     Str("code", d.code); Str("definitionName", d.name);
+
+                    // THE PUBLISHED SPEED ENVELOPE, in m/s (v0.92). Until now no capture could
+                    // answer "could this airframe fly the entry condition it was given?" from its
+                    // own artifacts — the exact question the v0.92 pre-spawn refusal asks, and the
+                    // one an unflyable lane's capture looks innocent under.
+                    //
+                    // Separate key names from the `maxSpeed` written below ON PURPOSE: that one is
+                    // `aircraftParameters.maxSpeed`, which is a NORMALIZER (`aircraft.speed /
+                    // maxSpeed`, decompile :15554) reading a flat 600 for every fast jet, not a
+                    // Vmax. Two different quantities must never share a key.
+                    // `aircraftInfo` is the encyclopedia's display block and is in KM/H at every use
+                    // site in the game (:2583, :10258-10259) — converted here so the sidecar stays
+                    // one unit throughout.
+                    var ad = d as AircraftDefinition;   // `Unit.definition` is a UnitDefinition
+                    if (ad == null || ad.aircraftInfo == null) return;
+                    Num("infoStallSpeed", ad.aircraftInfo.stallSpeed / 3.6f);   // :62791
+                    Num("infoMaxSpeed",   ad.aircraftInfo.maxSpeed   / 3.6f);   // :62789
+                    // Free (same block) and recorded for completeness, but read it as ADVISORY: its
+                    // sibling `emptyWeight` is documented template junk — 10700 shared by three
+                    // airframes, 5200 by three more (AIRFRAMES.md trap 3) — so this block's masses
+                    // have not earned the trust `massKg` above has. Normalise by `massKg`.
+                    Num("infoMaxWeight",  ad.aircraftInfo.maxWeight);
                 });
                 Try(() => { if (ac.pilots != null && ac.pilots.Length > 0 && ac.pilots[0] != null)
                                 Str("pilotType", ac.pilots[0].pilotType.ToString()); });
 
                 // --- mass / fuel / stores / thrust: the live state a bound must be normalised by ---
+                // Did this replicate START bent? The dmgFrac column says when damage appeared WITHIN
+                // a capture and cannot say the aircraft already had a part missing when the recorder
+                // opened — which for a drone on its seventh replicate is the likelier case. Absent
+                // (not 0) when the tracker cannot be read, like every other fail-soft key here.
+                Try(() => { if (ac.partDamageTracker != null) Num("detachedRatioAtStart", ac.partDamageTracker.GetDetachedRatio()); });
                 Try(() => Num("massKg", ac.GetMass()));           // whole aircraft (rb.mass is the root part only)
                 Try(() => Num("fuelLevel", ac.GetFuelLevel()));   // 0..1
                 Try(() => Num("fuelKg", ac.GetFuelQuantity()));

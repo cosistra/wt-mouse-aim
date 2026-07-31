@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using BepInEx.Configuration;
 using HarmonyLib;
 using Rewired;
 using UnityEngine;
@@ -22,7 +23,11 @@ namespace NuclearOptionMouseAim
     // flies N at once, and N aircraft sharing one integrator does not produce a slightly worse
     // capture, it produces a meaningless one. Get a controller through `For(aircraft)` — never
     // `new` — so the same aircraft always gets the same state back. The handful of members that
-    // remain `static` are genuinely process-global and each says why at its declaration.
+    // remain `static` are genuinely process-global and each says why at its declaration: the Rewired
+    // player-0 cache (one input device per process), the anomaly stream's index/flash fields plus the
+    // trail throttle (one log stream per process), and — v0.94 — the A/B arm map, which is static
+    // precisely BECAUSE it is keyed by aircraft: it holds N independent assignments and has to
+    // outlive the per-replicate `Forget` that drops the controllers (see the ARM-SEAM note).
     internal sealed class ChaseController
     {
         private bool  _active;     // owning the stick this frame
@@ -315,6 +320,7 @@ namespace NuclearOptionMouseAim
             // never announces itself — it just keeps a corpse mapped forever.
             Sweep();
             c = new ChaseController { _ac = ac };
+            c.SeedArm(id);   // v0.94: the A/B arm OUTLIVES the controller — see the ARM-SEAM note below
             _byAc[id] = c;
             return c;
         }
@@ -322,6 +328,10 @@ namespace NuclearOptionMouseAim
         // Drop an aircraft's controller. Idempotent; safe to call for an aircraft that never had one.
         // TestDrone calls this from both removal paths (deliberate despawn and the prune of a drone
         // the game removed under us), which is what keeps a long unattended run flat.
+        //
+        // IT DOES NOT DROP THE ARM (v0.94), and that is the load-bearing half of the seam below:
+        // ScenarioPlayer.PlaceOnCondition calls this on EVERY replicate, so clearing the assignment
+        // here would silently un-sweep every A/B while each capture still labelled itself arm=0/arm=1.
         internal static void Forget(Aircraft ac) { if (ac != null) Forget(ac.GetInstanceID()); }
 
         internal static void Forget(int aircraftId)
@@ -332,6 +342,91 @@ namespace NuclearOptionMouseAim
                 _byAc.Remove(aircraftId);
             }
         }
+
+        // =========================================================================================
+        // THE A/B ARM SEAM (v0.94) — how the law reads a knob an experiment is SWEEPING.
+        //
+        // The five bools Cfg marks `(A/B lever)` are what an attribution card alternates. Until now
+        // the law read them straight off the process-global ConfigEntry, so N aircraft physically
+        // could not fly different arms in the same instant and ScenarioPlayer had to STAND THE WHOLE
+        // SCHEDULE DOWN the moment a second aircraft was mid-card — every A/B was a one-drone serial
+        // grind, which is why all five `e*` cards pin `count: 1`.
+        //
+        // Now the sweep goes through the CONTROLLER instead: `Arm(entry)` returns THIS aircraft's
+        // assigned value when the assignment names that entry, and the live config value otherwise.
+        // Nothing writes Cfg any more, so the human's own F1 setting is still exactly what he flies
+        // while a drone batch sweeps around him.
+        //
+        // A NEW A/B LEVER MUST BE READ THROUGH Arm() TO BE SWEEPABLE. Reading it as `Cfg.X.Value`
+        // compiles and flies — it is simply invisible to the schedule, which is the same
+        // silently-answers-a-different-question failure this release exists to remove. And ONLY the
+        // levers go through here: this is the sweep seam, not a general config indirection layer, and
+        // every unnecessary conversion is a string compare on the hot path buying nothing.
+        //
+        // THE ASSIGNMENT LIVES IN THE REGISTRY, NOT IN THE INSTANCE. `ScenarioPlayer.PlaceOnCondition`
+        // calls `Forget(ac)` on every replicate (the v0.84 per-replicate reset), so a plain instance
+        // field would be wiped at the start of every single replicate. That is not merely a
+        // workaround for the reset: the arm is a property of THE AIRCRAFT'S CURRENT TEST ASSIGNMENT,
+        // not of the controller's integrator state, so surviving a controller reset is the correct
+        // semantics — an integrator is what the last few seconds of flying left behind, an arm is what
+        // the suite decided this replicate is measuring. Exactly two things clear it: the suite that
+        // set it, in Finish, and TestDrone.ForgetState on despawn.
+        //
+        // The map is a third `static` in this class (with the Rewired cache and the anomaly stream),
+        // and it is process-global for the same reason they are: it is keyed BY AIRCRAFT, so it holds
+        // N independent assignments rather than one shared one.
+        // --- ARM-SEAM BEGIN ---
+        // KeyValuePair rather than a tuple purely so the region stays trivially compilable on its own
+        // (see the debugtests note under SetArm).
+        private static readonly Dictionary<int, KeyValuePair<string, bool>> _armByAircraft =
+            new Dictionary<int, KeyValuePair<string, bool>>();
+
+        private string _armKnob;    // null = this aircraft has no arm assigned; else the ConfigEntry Key swept
+        private bool   _armValue;   // the value it is pinned to for this replicate
+
+        // Write (or clear) an aircraft's assignment. An empty/null knob clears it.
+        internal static void StoreArm(int aircraftId, string knob, bool val)
+        {
+            if (string.IsNullOrEmpty(knob)) _armByAircraft.Remove(aircraftId);
+            else _armByAircraft[aircraftId] = new KeyValuePair<string, bool>(knob, val);
+        }
+
+        // Copy the standing assignment onto this instance. Called from `For` on every freshly built
+        // controller — i.e. on the first tick after every `Forget` — and from `SetArm`.
+        internal void SeedArm(int aircraftId)
+        {
+            if (_armByAircraft.TryGetValue(aircraftId, out var a)) { _armKnob = a.Key; _armValue = a.Value; }
+            else { _armKnob = null; _armValue = false; }
+        }
+
+        // The value the law must use for one lever: this aircraft's arm when the schedule is sweeping
+        // THIS knob, the live config value otherwise. Two field reads and, only while a sweep is
+        // running at all, one string compare.
+        internal bool Arm(string knobKey, bool live) =>
+            _armKnob != null && _armKnob == knobKey ? _armValue : live;
+        // --- ARM-SEAM END ---
+
+        // Assign (knob) or clear (null knob) an aircraft's arm. Keyed by INSTANCE ID rather than by
+        // `Aircraft` for the same reason `Forget(int)` is: the despawn path calls it with an aircraft
+        // the game may already have destroyed, and both callers (ScenarioPlayer, TestDrone) hold the
+        // cached id anyway.
+        //
+        // The `_byAc` poke is not optional: `Forget` only happens on a card that HAS an entry
+        // condition, so a hover card (or the very first card of a run on an aircraft that has already
+        // been flown) would otherwise keep flying the previous arm out of a live instance.
+        //
+        // Split from StoreArm above so the seam stays inside the ARM-SEAM markers with no game or
+        // BepInEx type in it — `debugtests/test-arm-schedule.py` extracts that region verbatim and
+        // compiles it, the same trick BOARD-MATH and CARD-MODEL use in ScenarioPlayer.cs.
+        internal static void SetArm(int aircraftId, string knob, bool val)
+        {
+            StoreArm(aircraftId, knob, val);
+            if (_byAc.TryGetValue(aircraftId, out var c)) c.SeedArm(aircraftId);
+        }
+
+        // What the law and the '# config' header call. One line, so the rule above has exactly one
+        // definition and a second reading of "is this knob being swept?" cannot drift from it.
+        internal bool Arm(ConfigEntry<bool> e) => Arm(e.Definition.Key, e.Value);
 
         // ponytail: linear scan + a throwaway list, on a path that runs once per new aircraft. The
         // dictionary holds single digits in practice (DroneCount caps at 16); if it ever holds
@@ -1249,7 +1344,7 @@ namespace NuclearOptionMouseAim
                 // Cfg.RelativeTurnLead is the A/B lever: off = bit-identical to v0.82, no restart needed.
                 // Feeds the SINGLE azErrPred site; ApplyEvolvedLegacy inherits it as a parameter, so the
                 // v0.51/v0.55 two-site lockstep is unaffected (there is only one lead computation).
-                float leadRate = _headingRateFilt - (Cfg.RelativeTurnLead.Value ? _aimAzRateFilt : 0f);
+                float leadRate = _headingRateFilt - (Arm(Cfg.RelativeTurnLead) ? _aimAzRateFilt : 0f);
                 float leadDeg  = leadRate * Cfg.TurnLeadTime.Value; // deg of lead ACTUALLY applied (recorder column)
                 float azErrPred = azErr - leadDeg;
                 // BRAKE-ONLY LEAD (v0.52). Unclamped, the lead term closed its own fast loop: near
@@ -1323,7 +1418,7 @@ namespace NuclearOptionMouseAim
                 // MarkerRateFeedForward is the A/B lever: off = bit-identical to v0.77, no restart needed.
                 // LOCKSTEP: ApplyEvolvedLegacy's local omega copy adds the SAME term at the same point,
                 // under the same rule as the azErrPred / achievability-cap lockstep notes.
-                if (Cfg.MarkerRateFeedForward.Value) omegaDes += _aimAzRateFilt * Mathf.Deg2Rad;
+                if (Arm(Cfg.MarkerRateFeedForward)) omegaDes += _aimAzRateFilt * Mathf.Deg2Rad;
                 // ACHIEVABILITY CAP (v0.55) — the low-speed anti-windup. Below corner speed the FBW's
                 // deliverable pitch rate collapses (x q_ratio, see the probe above) but the turn-rate
                 // demand didn't know that: it kept asking for a turn the plane can't fly, the bank target
@@ -1402,7 +1497,7 @@ namespace NuclearOptionMouseAim
                     // the axis actually flying the turn. IntegralStallGate off => iGate == fineBlend,
                     // i.e. bit-identical to v0.82.
                     iGate = Mathf.Max(fineBlend,
-                        Cfg.IntegralStallGate.Value && !yawCapped ? _stallFilt : 0f);
+                        Arm(Cfg.IntegralStallGate) && !yawCapped ? _stallFilt : 0f);
                     if (_engP > 0f) _iPitch = 0f; // you own pitch — don't wind against your stick
                     else if (aoaGateUp >= 1f && aoaGateDn >= 1f) // v0.55 anti-windup: FREEZE while the AoA
                     // ceiling is biting — winding in nose-up bias the ceiling won't let fly would just
@@ -1424,8 +1519,7 @@ namespace NuclearOptionMouseAim
                 // below (slew, manual override, write-out, anomaly/recorder/phase) is SHARED — only the
                 // per-axis shaping differs here. pullGate/yawScale/coordPull are surfaced for the debug trace.
                 float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
-                _tBankFlown = targetBank; // the law overwrites this with its own slewed tBankE below
-                ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, alignFracH, bigTurn, targetBank, azErr, azErrPred,
+                ApplyEvolvedLegacy(t, local, vMag, sens, fineGain, alignFrac, alignFracH, bigTurn, azErr, azErrPred,
                     phi, lateral, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
                     out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
 
@@ -1688,13 +1782,17 @@ namespace NuclearOptionMouseAim
         // Everything else (pitch, yaw, fine integrator winding, roll-rate low-pass) is byte-for-byte
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
         private void ApplyEvolvedLegacy(
-            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float alignFracH, float bigTurn,
-            float targetBank, float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
+            Transform t, Vector3 local, float vMag, float sens, float fineGain, float alignFrac, float alignFracH, float bigTurn,
+            float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
         {
-            // off/vMag are used here (unlike Legacy where vMag was unused).
+            // vMag is used here (unlike Legacy, where it was unused). `off` and `targetBank` were
+            // parameters until v0.96 and were never read: change 2a computes its own tBankE locally, so
+            // the caller's weakness-gated targetBank was dead the moment Legacy was removed in v0.60,
+            // and `off` went the same way. Apply still keeps BOTH as locals — DetectAnomalies' over-roll
+            // check and the recorder column read them there.
 
             // PITCH — identical to Legacy.
             pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
@@ -1718,7 +1816,7 @@ namespace NuclearOptionMouseAim
             // rationale lives there. Same term, same unit gain, and applied at the same point: BEFORE the
             // achievability cap below, so omegaMax bounds it too. A sustained marker sweep is now paid for by
             // the feed-forward instead of by a standing azimuth lag (measured 9.54 deg at 12.07 deg/s).
-            if (Cfg.MarkerRateFeedForward.Value) omega += _aimAzRateFilt * Mathf.Deg2Rad;
+            if (Arm(Cfg.MarkerRateFeedForward)) omega += _aimAzRateFilt * Mathf.Deg2Rad;
             // v0.55 ACHIEVABILITY CAP — the SAME clamp Apply's shared bankTR block applies to omegaDes
             // (see the comment there); the two sites MUST stay in lockstep, same rule as the azErrPred
             // note above. At low speed this shrinks the bank target physically instead of letting it slam
@@ -1894,7 +1992,7 @@ namespace NuclearOptionMouseAim
             // ponytail: RollDamping is the reused derivative time; split it out only when a capture shows the
             // align channel wants a different lead than the wings-level channel (the probe-based replacement
             // would be a measured stick->roll-rate lag, i.e. a roll twin of _pitchEff).
-            _phiLead = (Cfg.AlignRateLead.Value && Mathf.Abs(phi) <= phiWrapGate)
+            _phiLead = (Arm(Cfg.AlignRateLead) && Mathf.Abs(phi) <= phiWrapGate)
                      ? _phiRateFilt * Cfg.RollDamping.Value : 0f;
             float eAlignTgt = (lateral > EAlignLatGate) ? Mathf.Clamp((phi + _phiLead) / 90f, -1.5f, 1.5f) : 0f;
             // Two-rate slew (single MoveTowards, so it's continuous at the gate — no exit snap if phi sweeps
@@ -1950,7 +2048,7 @@ namespace NuclearOptionMouseAim
             // Still live geometry only, still no per-plane constant, and still exactly zero for any target at
             // or above the nose — the hemisphere that already converges to 0.03° is untouched by construction.
             const float downAlignTaper = 0.3f; // top fraction of the bigTurn ramp over which roll-to-align returns
-            float belowSuppress = Cfg.BelowAlignSuppress.Value
+            float belowSuppress = Arm(Cfg.BelowAlignSuppress)
                 ? Mathf.Clamp01(-alignFracH) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper)
                 : Mathf.Clamp01(-alignFrac) * (1f - lateralHold) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
             blendWeight *= (1f - belowSuppress);

@@ -38,17 +38,27 @@ namespace NuclearOptionMouseAim
     //   * the CARD LIBRARY (_cards/_enable/_cf): shared, read-only config. Loaded once, never mutated
     //     by playback; N players reading it is exactly right.
     //   * the ON-SCREEN NOTICE: one screen per process, the same judgment as AnomalyLog's one stream.
-    //   * the A/B ARM SCHEDULE: the knob it flips is a process-global ConfigEntry that the control law
-    //     reads globally, so N aircraft CANNOT fly different arms at the same instant. See ApplyArm.
+    // (The A/B ARM SCHEDULE was the third until v0.94, when the swept lever moved off Cfg and onto the
+    // controller — see ApplyArm. It is per-instance now, and N aircraft fly N concurrent A/Bs.)
     internal sealed class ScenarioPlayer
     {
         // -----------------------------------------------------------------------------------------
-        // CARD MODEL. JsonUtility shape: [Serializable], PUBLIC FIELDS ONLY. Unity's own serializer
-        // ships in UnityEngine.CoreModule (already referenced), so there is deliberately no parser in
-        // this file — a hand-rolled one would be code to maintain for nothing. Its behaviour is the
-        // fail-soft contract the probes already use: unknown keys are ignored, missing keys keep the
-        // C# default, and a malformed file throws where Load() catches it.
+        // CARD MODEL — PUBLIC FIELDS ONLY, read and written with **Newtonsoft**, which ships in the
+        // game's Managed folder. Behaviour is the fail-soft contract the probes already use: unknown
+        // keys are ignored (that is what `note` relies on), missing keys keep the C# default, and a
+        // malformed file throws where Load() catches it.
+        //
+        // NOT UnityEngine.JsonUtility, and this is not a preference. JsonUtility silently DROPS the
+        // `Seg[] segments` field in BOTH directions — `ToJson` wrote every recorded card with no
+        // `segments` key at all (see any pre-v0.90.1 `rec-*.json`) and `FromJson` read every disk card
+        // back with `segments == null`, which Validate then rejected as "no segments — skipped". So
+        // from v0.71 to v0.90 NO card file on disk ever loaded, and nothing caught it: the built-in
+        // cards are constructed in C# and never touch a serializer, so every gate and every batch we
+        // flew went through the one path that could not fail. The load line said "0 from disk" the
+        // whole time. `debugtests/test-card-model.py` is the check that would have.
+        //
         // `cls` (not `class`) because the latter is a C# keyword; the JSON key must match the field.
+        // --- CARD-MODEL BEGIN ---
         [System.Serializable]
         internal class Seg
         {
@@ -64,8 +74,8 @@ namespace NuclearOptionMouseAim
         // as Cfg.ScenarioArmToggle (bare key => section "Control", where every control-law lever
         // lives), and `value` is the TOML text form of whatever type that entry actually is — parsed
         // by BepInEx's own TomlTypeConverter, so bool/int/float/string/KeyCode all work with no
-        // per-type code here. A string pair rather than a typed union because JsonUtility has no
-        // union: it deserializes public fields of a fixed shape and silently ignores everything else.
+        // per-type code here. A string pair rather than a typed union because the card model is a
+        // fixed shape of public fields — one `value` string keeps every knob type on one code path.
         [System.Serializable]
         internal class CfgOverride
         {
@@ -79,9 +89,23 @@ namespace NuclearOptionMouseAim
             public string name = "";      // card id; for a file card this is always the file basename
             public string cls = "";       // comma list of Pilot.PilotType names ("" = any airframe class)
             public float  step = 0.02f;   // seconds between track samples (the fixed step at record time)
-            public string airframe = "";  // jsonKey it was recorded on — and, since v0.90, what the drone harness SPAWNS
+            public string airframe = "";  // jsonKey(s) the drone harness SPAWNS — comma list = one per lane (v0.91)
             public float  startSpeed;     // m/s at record start — the condition the card intends
             public float  startAlt;       // m MSL at record start
+
+            // ENTRY SPEED AS A MULTIPLE OF THE LANE AIRFRAME'S OWN CORNER SPEED (v0.93). 0 = unset,
+            // i.e. `startSpeed` stands and the card behaves exactly as it did before this field.
+            // When > 0 it WINS over `startSpeed`, which stays as the absolute form and as the
+            // fail-soft fallback for an airframe whose envelope cannot be read.
+            //
+            // Why: one absolute number for every lane is what makes the shipped 250 m/s grid
+            // unflyable by CAS1 (Vmax 205.6) and COIN (141.7) — v0.92's pre-spawn gate refuses those
+            // lanes, correctly, so a 10-airframe card flies 8. A multiple of corner speed is flyable
+            // by the whole roster AND enters every airframe at the equivalent AERODYNAMIC state (its
+            // own best turn-rate point) instead of at an equivalent number, which is the stronger
+            // reason of the two. See ResolveStartSpeed for the resolution order.
+            public float  startSpeedCorner;
+
             public Seg[]  segments;
 
             // --- SELF-DESCRIPTION (v0.90). A card is the whole test, not just the stimulus.
@@ -100,11 +124,24 @@ namespace NuclearOptionMouseAim
             public string armToggle = ""; // A/B knob to interleave; "" = fall back to Cfg.ScenarioArmToggle
             public CfgOverride[] config;  // knobs pinned for this card's duration; null/empty = none
 
+            // HOW MANY DRONES (v0.91). 0 = "as many as `airframe` names", and only if that names
+            // nothing does Cfg.DroneCount stand. That middle rule is not a convenience: a card whose
+            // airframe list is the fleet it wants tested is INCOMPLETE without it — name 12 airframes,
+            // leave the global at 4, and the batch flies the first 4 by lane and silently answers a
+            // different question. Set it explicitly only to fly a MULTIPLE of the list (count 8 over a
+            // 4-key list = two drones per airframe, since lanes wrap).
+            public int    count;
+
+            // Derived, never stored. Without the attribute Newtonsoft writes it into every recorded
+            // card (it serializes get-only properties), and a hand-editable artifact that carries a
+            // number nothing reads back is an invitation to change it and expect an effect.
+            [Newtonsoft.Json.JsonIgnore]
             public float Duration
             {
                 get { float d = 0f; if (segments != null) for (int i = 0; i < segments.Length; i++) d += segments[i].dur; return d; }
             }
         }
+        // --- CARD-MODEL END ---
 
         private const string FolderName  = "wtmouseaim-cards";
         private const float  BuiltInStep = 0.02f;   // track spacing for generated built-in tracks
@@ -148,14 +185,11 @@ namespace NuclearOptionMouseAim
         private Vector3    _anchorPos;
         private Vector3    _anchorFwd;      // horizontal unit heading captured with it
 
-        // --- A/B arm interleaving (v0.84). STATIC — see ApplyArm for why it cannot be per-aircraft. ---
-        private static ConfigEntry<bool> _armEntry;      // the toggle being alternated; null = no schedule
-        private static bool              _armSaved;      // its value before the suite, restored by Finish
-        private static int               _armIdx = -1;   // arm the CURRENT card is flying (-1 = no schedule)
-        // WHICH suite owns the schedule. There is one knob, so there is one owner: without this, a
-        // second aircraft's ApplyArm would write the knob from ITS queue index, and its Finish would
-        // "restore" a value it never saved — both silently, mid-run, in the other aircraft's capture.
-        private static ScenarioPlayer    _armOwner;
+        // --- A/B arm interleaving (v0.84; PER AIRCRAFT since v0.94 — see ApplyArm) ---
+        // No `_armSaved` and no `_armOwner`: nothing writes the global knob any more, so there is
+        // nothing to save, nothing to restore and nothing for two suites to fight over.
+        private ConfigEntry<bool> _armEntry;      // the toggle THIS suite is alternating; null = no schedule
+        private int               _armIdx = -1;   // arm the current card is flying (-1 = no schedule)
 
         // =========================================================================================
         // THE REGISTRY (v0.86) — one player per aircraft, keyed by Aircraft.GetInstanceID(), the same
@@ -231,8 +265,18 @@ namespace NuclearOptionMouseAim
         // with no change on the Python side; `armKnob=` names WHICH toggle, because "arm=1" alone is
         // only meaningful if you already know what was being swept. Empty when nothing is scheduled,
         // so the startup config line and every hand-flown capture read exactly as they did before.
-        public static string ArmTag =>
+        //
+        // v0.94: PER AIRCRAFT, like everything else about the arm. Two aircraft flying opposite arms
+        // in the same instant is the whole point of the release, and a static tag would have labelled
+        // both captures with whichever one wrote it last — the exact "scores fine, answers a different
+        // question" artifact the A/B exists to avoid.
+        public string ArmTag =>
             _armEntry == null ? "" : $"arm={_armIdx} armKnob={_armEntry.Definition.Key} ";
+
+        // ...asked BY AIRCRAFT, for the recorder header. NON-CREATING on purpose: a hand-flown
+        // capture has no ScenarioPlayer at all and must not gain one just by opening a recorder.
+        internal static string ArmTagFor(Aircraft ac) =>
+            ac != null && _byAc.TryGetValue(ac.GetInstanceID(), out var s) ? s.ArmTag : "";
 
         // --- card-recording state (per aircraft: it samples THIS aircraft's aim demand) ---
         private bool       _recording;
@@ -327,10 +371,9 @@ namespace NuclearOptionMouseAim
             }
         }
 
-        // WHICH ARM THIS AIRCRAFT IS FLYING. Derived from the static schedule, so every line of the
-        // board shows the same letter — and that is the truth, not a bug: the swept knob is a
-        // process-global ConfigEntry the law reads globally (see ApplyArm), so N aircraft cannot be on
-        // different arms at the same instant. "-" = nothing is being interleaved.
+        // WHICH ARM THIS AIRCRAFT IS FLYING. Per aircraft since v0.94, so the board's lines can now
+        // legitimately disagree — a batch of four drones mid-ABBA reads A/B/B/A, and that is the
+        // release working rather than a display bug. "-" = nothing is being interleaved.
         public string ArmLabel => _armEntry == null ? "-" : (_armIdx == 1 ? "B" : "A");
 
         public float SegSecondsLeft =>
@@ -405,9 +448,13 @@ namespace NuclearOptionMouseAim
 
         // =========================================================================================
         // SELECTION (plan §5.2) — no custom UI. One ConfigEntry<bool> per card, so the F1
-        // ConfigurationManager panel IS the enable/disable checklist. Built-ins default ON (they are
-        // the designed set); file cards default OFF (a folder of ad-hoc captures must not silently
-        // join a suite). Cfg.ScenarioCardSet overrides the whole thing for a scripted run.
+        // ConfigurationManager panel IS the enable/disable checklist. EVERY card defaults OFF,
+        // built-ins included (v0.96; they defaulted ON as "the designed set" until the shipped grid
+        // moved to disk and left them the legacy path). Registered first, they land at sel[0] — and
+        // sel[0] alone dictates airframe/count/repeat/armToggle/startAlt/startSpeed for the whole
+        // spawn, so one built-in checkbox nobody ticked collapsed a 10-lane fleet card to a single
+        // Multirole1 at Cfg defaults: a capture that scores fine and answers a different question.
+        // Cfg.ScenarioCardSet overrides the whole thing for a scripted run.
         // =========================================================================================
         public static void BindCards(ConfigFile cf)
         {
@@ -451,7 +498,7 @@ namespace NuclearOptionMouseAim
                 return false;
             }
             _cards.Add(c);
-            _enable[c.name] = _cf.Bind("Scenario Cards", c.name, builtIn, new ConfigDescription(
+            _enable[c.name] = _cf.Bind("Scenario Cards", c.name, false, new ConfigDescription(
                 $"Include this test card when the run hotkey ({Cfg.ScenarioRunKey.Value}) starts a suite. "
                 + $"{(builtIn ? "Built-in" : "Recorded")} card: {c.segments?.Length ?? 0} segments, "
                 + $"{c.Duration:0}s, airframe class '{(string.IsNullOrEmpty(c.cls) ? "any" : c.cls)}'. "
@@ -468,7 +515,7 @@ namespace NuclearOptionMouseAim
         {
             try
             {
-                var c = JsonUtility.FromJson<Card>(System.IO.File.ReadAllText(path));
+                var c = Newtonsoft.Json.JsonConvert.DeserializeObject<Card>(System.IO.File.ReadAllText(path));
                 if (c == null) { WTMouseAimPlugin.Log.LogWarning($"[card] {System.IO.Path.GetFileName(path)}: not a card object — skipped."); return null; }
                 c.name = Sanitize(System.IO.Path.GetFileNameWithoutExtension(path)); // the FILE is the identity
                 string bad = Validate(c);
@@ -510,17 +557,28 @@ namespace NuclearOptionMouseAim
             // instead would turn a stale comment into a night of drones that never launch, and passing
             // it through would refuse the spawn with a prose sentence as the jsonKey. The human
             // description belongs in `note`, which the C# ignores by construction (Card has no such
-            // field, and JsonUtility drops what it can't map).
+            // field, and the deserializer ignores keys it can't map).
+            //
+            // v0.91: the field is a COMMA LIST (one jsonKey per drone lane, wrapping), so the test
+            // is per TOKEN, not over the whole string — "Fighter1, Multirole1" is a two-airframe
+            // fleet, while "any jet at the fixedwing-v2 entry condition" is still prose. A jsonKey
+            // never contains whitespace, so a token that does is unambiguous; whitespace merely
+            // AROUND the commas is formatting and is trimmed by AirframeList either way.
             if (!string.IsNullOrEmpty(c.airframe))
             {
                 bool prose = false;
-                foreach (char ch in c.airframe) if (char.IsWhiteSpace(ch)) { prose = true; break; }
+                foreach (string tok in c.airframe.Split(','))
+                {
+                    string t = tok.Trim();
+                    foreach (char ch in t) if (char.IsWhiteSpace(ch)) { prose = true; break; }
+                    if (prose) break;
+                }
                 if (prose)
                 {
                     WTMouseAimPlugin.Log.LogWarning(
-                        $"[card] '{c.name}': airframe '{c.airframe}' contains whitespace, so it is not a spawnable "
-                        + "jsonKey — ignoring it (the drone harness will use Drone/DroneAirframe). Put the human "
-                        + "description in 'note' instead.");
+                        $"[card] '{c.name}': airframe '{c.airframe}' has an entry containing whitespace, so it is "
+                        + "not a comma list of spawnable jsonKeys — ignoring it (the drone harness will use "
+                        + "Drone/DroneAirframe). Put the human description in 'note' instead.");
                     c.airframe = "";
                 }
             }
@@ -599,6 +657,13 @@ namespace NuclearOptionMouseAim
                 foreach (var c in _cards)
                     if (_enable.TryGetValue(c.name, out var e) && e.Value) sel.Add(c);
             }
+            // Everything the SPAWN is configured from — airframe, count, repeat, armToggle, alt,
+            // speed — comes from sel[0]; the rest contribute only their segments. That is invisible
+            // in F1, where N ticked boxes look like N equal cards, so say which one is driving.
+            if (!quiet && sel.Count > 1)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] {sel.Count} cards selected — '{sel[0].name}' is first and decides the whole "
+                    + "spawn (airframe/count/repeat/armToggle/alt/speed); the others only add segments.");
             return sel;
         }
 
@@ -621,6 +686,11 @@ namespace NuclearOptionMouseAim
             public string Airframe;     // "" = the card doesn't say; the Cfg value stands
             public float  StartAlt;     // <= 0 = doesn't say
             public float  StartSpeed;   // <= 0 = doesn't say
+            // v0.93. Carried alongside StartSpeed rather than resolved into it, because with a
+            // corner-relative card there IS no single answer for the batch — the number is per lane,
+            // and this struct is answered with no aircraft in hand. TestDrone.SpeedOfLane turns the
+            // pair into a speed once it knows which airframe the lane flies.
+            public float  StartSpeedCorner;
             public float  Duration;     // seconds, one replicate of the first card
             // Every selected card summed, i.e. ONE replicate of the whole queue. Duration alone is the
             // first card's, so a multi-card selection times x Repeat off it under-reports the batch by
@@ -630,11 +700,13 @@ namespace NuclearOptionMouseAim
             public string RepeatSrc;    // human-readable "who decided", for the launch log
             public string ArmKnob;      // "" = no A/B schedule
             public string ArmSrc;
+            public int    Count;        // drones to launch (v0.91)
+            public string CountSrc;
         }
 
         internal static Preflight Preview(bool quiet = false)
         {
-            var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "" };
+            var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "", CountSrc = "" };
             try
             {
                 var sel = SelectRaw(quiet);
@@ -645,9 +717,11 @@ namespace NuclearOptionMouseAim
                 p.Airframe   = c.airframe ?? "";
                 p.StartAlt   = c.startAlt;
                 p.StartSpeed = c.startSpeed;
+                p.StartSpeedCorner = c.startSpeedCorner;
                 p.Duration   = c.Duration;
                 foreach (var x in sel) p.AllDuration += x.Duration;
                 p.Repeat     = ResolveRepeat(c, out string rsrc); p.RepeatSrc = rsrc;
+                p.Count      = ResolveCount(c, out string csrc);  p.CountSrc  = csrc;
                 // Report the NAME only, resolved through the shared grammar but without touching the
                 // config: SetUpArmSchedule does the real lookup a moment later and owns the warnings.
                 // Two warnings for one typo would read as two problems.
@@ -674,6 +748,51 @@ namespace NuclearOptionMouseAim
             src = fromCard ? $"card '{first.name}'" : "Cfg.ScenarioRepeat";
             return Mathf.Clamp(fromCard ? first.repeat : Cfg.ScenarioRepeat.Value, 1, 20);
         }
+
+        // How many drones a selection wants (v0.91). THREE sources, in this order, and the middle one
+        // is the whole point of the field:
+        //   1. the card's own `count`, if it declares one;
+        //   2. else, the NUMBER OF AIRFRAMES the card names — because a card whose `airframe` is the
+        //      fleet it wants tested has already said how many drones it needs, and taking the number
+        //      from a global instead is the failure this replaces: 12 keys against Cfg.DroneCount 4
+        //      flies the first four lanes and answers a different question without refusing;
+        //   3. else Cfg.DroneCount, i.e. exactly the pre-v0.91 behaviour for a card that says nothing.
+        // Clamped to the same 1..16 as the Cfg knob — one clamp for the value, wherever it came from,
+        // so a card cannot reach a fleet size the operator could not have set by hand.
+        //
+        // ResolveCount + CountKeys sit between markers because debugtests/test-fleet-resolve.py
+        // extracts and compiles them verbatim: between them they decide HOW MANY drones fly and,
+        // with TestDrone.AirframeList, what each lane is — a wrong answer here writes a full batch
+        // of captures that score fine and answer a different question.
+        // --- FLEET-RESOLVE BEGIN ---
+        private static int ResolveCount(Card first, out string src)
+        {
+            if (first != null && first.count > 0)
+            {
+                src = $"card '{first.name}' count";
+                return Mathf.Clamp(first.count, 1, 16);
+            }
+            int keys = CountKeys(first != null ? first.airframe : null);
+            if (keys > 0)
+            {
+                src = $"card '{first.name}' airframe list ({keys} named)";
+                return Mathf.Clamp(keys, 1, 16);
+            }
+            src = "Cfg.DroneCount";
+            return Mathf.Clamp(Cfg.DroneCount.Value, 1, 16);
+        }
+
+        // Non-empty comma-separated entries in an airframe list. Mirrors TestDrone.AirframeList's
+        // trim-and-drop-empties rule; kept here as a count-only twin rather than shared, because that
+        // one returns the lane assignment and this one runs with no aircraft in hand from Preview.
+        private static int CountKeys(string list)
+        {
+            if (string.IsNullOrEmpty(list)) return 0;
+            int n = 0;
+            foreach (string tok in list.Split(',')) if (tok.Trim().Length > 0) n++;
+            return n;
+        }
+        // --- FLEET-RESOLVE END ---
 
         // The A/B knob spec a selection would sweep — the first card's `armToggle` if it declares one,
         // else the global. Same "first card decides" rule and the same reason as ResolveRepeat.
@@ -743,59 +862,74 @@ namespace NuclearOptionMouseAim
         // ever needed the upgrade is a list of (knob, value) pairs and a Latin square here — but
         // that is a different tool, and this one has to stay something you can read in ten seconds.
         //
-        // v0.86 — WHAT SURVIVES N AIRCRAFT, AND THE INVARIANT IT PRESERVES.
+        // v0.94 — CONCURRENT A/B. WHAT EACH AIRCRAFT'S OWN ABBA DOES AND DOES NOT BUY.
         //
         // THE INVARIANT ABBA EXISTS FOR: both arms must have the same MEAN POSITION IN THE BATCH, so
         // that a drift which is monotonic in run order contributes equally to both and cancels instead
         // of masquerading as an effect. (Not equal counts — ABBAAB has equal counts and still leans A
         // early. The balance check in ToggleSuite is on sum(index) for exactly that reason.)
         //
-        // The arm index still keys on THIS SUITE'S QUEUE INDEX (_qi), unchanged, and that is still the
-        // run's position in the batch — because the schedule is only ever honoured while ONE aircraft
-        // is flying a card. That is not a simplification, it is forced: `_armEntry` is a `Cfg`
-        // ConfigEntry<bool>, i.e. process-global, and the control law reads it globally. Two aircraft
-        // physically CANNOT fly different arms in the same instant, and staggered card boundaries mean
-        // any global "advance the arm now" flips it mid-card for whoever else is airborne — which
-        // silently mislabels part of their capture, the precise failure v0.84 was built to stop.
+        // Until v0.94 the swept knob was a process-global `Cfg` entry the law read globally, so N
+        // aircraft could not be on different arms in the same instant and ApplyArm stood the whole
+        // schedule down whenever a second aircraft was mid-card: every A/B was a one-drone serial run,
+        // which is why all five `e*` attribution cards pin `count: 1`. Now the lever is read through
+        // ChaseController.Arm() off a PER-AIRCRAFT assignment, so nothing has to stand down.
         //
-        // So concurrency STANDS THE SCHEDULE DOWN, loudly (see ApplyArm), rather than degrading it:
-        // no interleaving, one log line, the knob restored. Both alternatives are worse — flipping
-        // mid-card corrupts, and "don't advance while anyone else is flying" degenerates to arm A
-        // forever under a stagger (drone 1 is always mid-card when drone 2 starts, and vice versa).
+        // EACH AIRCRAFT IS ITS OWN INTERNALLY-BALANCED A/B, indexed by its OWN queue index (_qi) —
+        // unchanged arithmetic, and still exactly "this run's position in this aircraft's batch". What
+        // that buys: the drift-cancelling invariant holds within every lane, which is the unit of
+        // analysis that matters, because compare-runs.py groups by (airframe, card, arm) and refuses
+        // to pool across airframes anyway. A 4-lane fleet card is four independent A/Bs, not one.
         //
-        // ponytail: the real fix for concurrent A/B is to make the swept knob per-aircraft state read
-        // through the controller instead of through Cfg — then each drone can carry its own arm and
-        // ABBA over the drone index. That is a change to how the law reads its config, not to this
-        // scheduler, so it does not belong here.
-        private static int ArmOf(int queueIndex) => ((queueIndex + 1) >> 1) & 1;
-
-        // Is some OTHER aircraft mid-card right now? One scan of a single-digit dictionary, on a path
-        // that runs once per card start.
-        private bool OthersPlaying()
-        {
-            foreach (var kv in _byAc)
-                if (!ReferenceEquals(kv.Value, this) && kv.Value._card != null) return true;
-            return false;
-        }
+        // What it does NOT buy, deliberately: the arms are not balanced ACROSS aircraft at a given
+        // wall-clock instant. Lane 0 and lane 1 launch a stagger apart and may both be on A at the
+        // same second. That is fine — a confound would have to be one that hits the fleet at one
+        // instant AND correlates with lane, and the two candidates (a frame hitch, an airframe
+        // difference) are already handled: `frameMs` is a per-row column and airframes are never
+        // pooled. Interleaving the launch order instead would trade a real per-lane guarantee for a
+        // cosmetic fleet-wide one.
+        //
+        // ponytail: still one toggle and one fixed sequence — no factorial designs, no per-card arms.
+        // A real 2-factor experiment would be a list of (knob, value) pairs and a Latin square here;
+        // that is a different tool and this one has to stay readable in ten seconds.
+        //
+        // ArmOf lives between markers because debugtests/test-arm-schedule.py extracts and compiles
+        // it verbatim — a Python copy of the sequence would agree with itself forever.
+        // --- ARM-SCHEDULE BEGIN ---
+        internal static int ArmOf(int queueIndex) => ((queueIndex + 1) >> 1) & 1;
+        // --- ARM-SCHEDULE END ---
 
         // =========================================================================================
         // NAMING A CONFIG ENTRY FROM TEXT. One grammar — "Key" or "Section/Key", bare keys defaulting
-        // to Control, which is where every control-law lever lives — shared by ScenarioArmToggle, a
-        // card's `armToggle` and every `config[].key`. One parser, so the three cannot drift into
-        // three slightly different spellings of the same idea.
+        // to Control, which is where every control-law lever lives, both halves non-empty and at most
+        // one slash — shared by ScenarioArmToggle, a card's `armToggle` and every `config[].key`. One
+        // parser, so the three cannot drift into three slightly different spellings of the same idea.
+        //
+        // Between markers because debugtests/test-spec-grammar.py extracts and compiles it verbatim,
+        // and cross-checks scorecard.py's hand-written Python copy (`split_spec`) against ONE shared
+        // case table — that copy is the offline half of `card_setup_problems`, and a copy that is
+        // stricter or looser than this one flags cards that fly fine, or passes cards that do not.
+        // (That test found exactly one such divergence, multi-slash; it was closed here in v0.96.)
         // =========================================================================================
+        // --- SPEC-GRAMMAR BEGIN ---
         private static bool SplitSpec(string spec, out string sec, out string key)
         {
             sec = "Control"; key = "";
             if (string.IsNullOrEmpty(spec)) return false;
             spec = spec.Trim();
             int slash = spec.IndexOf('/');
+            // At most one slash. "A/B/C" used to parse as section "A", key "B/C" — which no bound
+            // entry can ever match, so it was a typo that only surfaced as a resolve warning after
+            // the batch flew. Refusing it here is the same answer, said before anything spawns, and
+            // it is what scorecard.split_spec (the offline card check) already did.
+            if (slash != spec.LastIndexOf('/')) return false;
             if (slash >= 0) { sec = spec.Substring(0, slash).Trim(); key = spec.Substring(slash + 1).Trim(); }
             else key = spec;
             // Both halves must be non-empty: "/Foo" and "Foo/" are typos, and silently reading them as
             // a bare key would resolve the wrong entry (or none) without saying so.
             return sec.Length > 0 && key.Length > 0;
         }
+        // --- SPEC-GRAMMAR END ---
 
         // Any bound entry, of ANY type — a card can pin a float or a KeyCode, not just the bool the
         // arm schedule sweeps. ConfigFile implements IDictionary<ConfigDefinition, ConfigEntryBase>
@@ -876,19 +1010,20 @@ namespace NuclearOptionMouseAim
                         + "is SKIPPED (the rest still apply). Check the spelling against the F1 panel.");
                     continue;
                 }
-                // REFUSE TO PIN THE KNOB THE A/B SCHEDULE IS SWEEPING. Pinning it collapses the whole
-                // batch onto ONE arm while every capture still carries an honest-looking `arm=0/1`
-                // label from ArmTag — so the A/B reads as "no measurable difference" and the reason is
-                // invisible in the artifacts. That is strictly worse than a run that refuses, and worse
-                // than one that obviously breaks, so it is the one override failure that is named
-                // loudly and skipped rather than silently won by either side.
+                // REFUSE TO PIN THE KNOB THE A/B SCHEDULE IS SWEEPING. Since v0.94 the arm WINS (the
+                // law reads it through ChaseController.Arm, which ignores the config value for the
+                // swept knob), so the pin no longer collapses the batch onto one arm — it does
+                // something just as bad the other way round: it silently does nothing to the flying,
+                // while `# config` prints the pinned value and `# override` claims the card set it.
+                // Either direction produces a capture that scores fine and describes a run that did
+                // not happen, so this stays the one override failure that is named loudly and skipped.
                 if (_armEntry != null && ReferenceEquals(e, _armEntry))
                 {
                     WTMouseAimPlugin.Log.LogWarning(
                         $"[card] '{c.name}' pins '{sec}/{key}' to '{o.value}', but that is the knob the A/B "
-                        + "schedule is sweeping — the override is REFUSED. Pinning a swept knob flies every "
-                        + "replicate on one arm while the captures still label themselves A and B. Drop it "
-                        + "from the card's `config` list, or sweep a different knob.");
+                        + "schedule is sweeping — the override is REFUSED. The arm would win and the pin "
+                        + "would change nothing about what flew, while the capture's header advertised it. "
+                        + "Drop it from the card's `config` list, or sweep a different knob.");
                     Notify($"OVERRIDE REFUSED: '{key}' is the A/B knob");
                     continue;
                 }
@@ -943,33 +1078,18 @@ namespace NuclearOptionMouseAim
             _ovEntries = null; _ovSaved = null; _ovNote = "";
         }
 
-        // Put the current card's arm into the config, once per card, BEFORE the recorder opens — so
-        // the value lands in that capture's own `# config` header and the capture self-identifies.
-        // Idempotent: ConfigEntry only fires SettingChanged on a real change.
+        // Put the current card's arm onto THIS AIRCRAFT, once per card, BEFORE the recorder opens — so
+        // ArmTag lands in that capture's own `# config` header and the capture self-identifies.
+        //
+        // v0.94: this writes the CONTROLLER, never `_armEntry.Value`. Writing the global was what
+        // forced the old stand-down (one knob, N aircraft) and what made a card's own pin of the swept
+        // knob dangerous. Nothing here touches the operator's config, so his own aircraft goes on
+        // flying whatever F1 says while a fleet sweeps around him.
         private void ApplyArm()
         {
-            // Not my schedule: the live arm stands, and it is globally true for this aircraft too (the
-            // knob is process-wide), so ArmTag still labels my capture honestly.
-            if (!ReferenceEquals(_armOwner, this)) return;
             if (_armEntry == null) { _armIdx = -1; return; }
-            if (OthersPlaying())
-            {
-                // Stand down rather than flip a process-global knob under an aircraft that is already
-                // mid-card. Loud, and it hands the knob back, so the batch is one honest un-armed
-                // batch instead of a set of captures each claiming an arm it only partly flew.
-                WTMouseAimPlugin.Log.LogWarning(
-                    $"[card] A/B arms STOOD DOWN: another aircraft is already flying a card, and "
-                    + $"'{_armEntry.Definition.Key}' is a process-global setting — N aircraft cannot fly "
-                    + "different arms at once. This batch flies ONE arm; run the A/B one aircraft at a time.");
-                Notify("ARMS OFF — concurrent cards share one global knob");
-                _armEntry.Value = _armSaved;
-                _armEntry = null;
-                _armOwner = null;
-                _armIdx = -1;
-                return;
-            }
             _armIdx = ArmOf(_qi);
-            _armEntry.Value = _armIdx == 1;
+            ChaseController.SetArm(_acId, _armEntry.Definition.Key, _armIdx == 1);
         }
 
         // Standalone entry-condition key. Puts the aircraft exactly where a run would start it WITHOUT
@@ -996,7 +1116,9 @@ namespace NuclearOptionMouseAim
             if (_card != null) { Notify("CARD RUNNING — abort it first"); return; }
             if (_recording)   { Notify("RECORDING — stop it first");     return; }
             Card c = null;
-            foreach (var x in SelectCards(ac)) if (x.startSpeed > 0f) { c = x; break; }
+            // "Declares an entry condition" now means EITHER form — a corner-relative card carries no
+            // startSpeed at all, and testing the raw field would make F3 skip straight past it.
+            foreach (var x in SelectCards(ac)) if (EntrySpeed(x) > 0f) { c = x; break; }
             if (c == null)
             {
                 WTMouseAimPlugin.Log.LogWarning(
@@ -1081,26 +1203,16 @@ namespace NuclearOptionMouseAim
         // A/B tally are the whole check on this feature, and reading them after the batch is three
         // minutes per run too late.
         //
-        // ONE OWNER (v0.86). The knob is a process-global ConfigEntry, so a second suite must not
-        // resolve its own: it would overwrite `_armSaved` with the value the FIRST suite had already
-        // written, and then "restore" that on finish. A suite that arrives second flies whatever arm
-        // is live and says so on its own '# config' line (ArmTag is global, and truthfully so).
+        // NO OWNER since v0.94. There is no longer one shared thing to own: the sweep writes this
+        // aircraft's own arm through ChaseController, so every suite resolves its own schedule and N
+        // of them interleave side by side. What went with the owner: `_armSaved` (nothing to restore
+        // — the global is never written) and the stand-down warning in ApplyArm.
         private void SetUpArmSchedule(int runs, Card first)
         {
-            if (_armOwner != null && !ReferenceEquals(_armOwner, this))
-            {
-                WTMouseAimPlugin.Log.LogWarning(
-                    "[card] another aircraft already owns the A/B arm schedule (the knob is process-global) — "
-                    + "this suite is NOT interleaving; it flies whichever arm is live and records it.");
-                Notify("ARMS: owned by another aircraft — this run is unarmed");
-                return;
-            }
             // The CARD's armToggle wins over the global when it declares one — the knob under test is
             // part of the test, and matching it by hand is exactly the mismatch this release removes.
             string spec = ResolveArmSpec(first, out string armSrc);
             _armEntry = ResolveArm(spec, armSrc);
-            _armSaved = _armEntry != null && _armEntry.Value;
-            _armOwner = _armEntry != null ? this : null;
             if (_armEntry == null) return;
 
             // The balance check is on the SUM OF RUN INDICES per arm, not on the counts. Equal counts
@@ -1122,7 +1234,8 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
                 + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
-                + $"'{key}' is restored to {_armSaved} when the suite ends.");
+                + $"THIS AIRCRAFT only (v0.94): the arm is per-aircraft state read through the controller, "
+                + $"so other aircraft sweep their own schedules and the F1 value of '{key}' is never written.");
             if (nA != nB || sumA != sumB)
                 WTMouseAimPlugin.Log.LogWarning(
                     $"[card] arm schedule is UNBALANCED over {runs} run(s): {nA}/{nB} runs, mean run index "
@@ -1191,7 +1304,10 @@ namespace NuclearOptionMouseAim
                 var ci = ac.GetInputs();
                 if (ci == null) return false;
                 ci.brake = 0f;                          // wheel brake; the AIRBRAKE rides on throttle (below)
-                if (_card.startSpeed <= 0f) return false;   // ungated card (hover): the pilot keeps the collective
+                // Ungated card (hover): the pilot keeps the collective. Through EntrySpeed so a
+                // corner-relative card counts as gated — and cached on a reference compare, because
+                // this runs every fixed step.
+                if (EntrySpeed(_card) <= 0f) return false;
                 ci.throttle = EntryThrottle();
                 return true;
             }
@@ -1258,7 +1374,11 @@ namespace NuclearOptionMouseAim
         //
         // Called BEFORE the velocity write on purpose: if it throws, the teleport never happens and
         // the caller aborts, rather than leaving an aircraft mid-step with a live 800 g reading.
-        private static void ResetGLoadTrackers(Aircraft ac)
+        // `internal` since v0.95 so PlayerSpawn can reuse it. This pair (ResetGLoadTrackers +
+        // MoveAssembly) is the whole safe-teleport primitive, and both halves were learned by
+        // destroying the airframe — anything that moves an aircraft MUST call both, so they are
+        // shared rather than reimplemented.
+        internal static void ResetGLoadTrackers(Aircraft ac)
         {
             ac.velocityPrev = Vector3.zero;             // physics-LOD tracker; the DAMAGE comes from Pilot's
             var pilots = ac.pilots;
@@ -1297,8 +1417,8 @@ namespace NuclearOptionMouseAim
         // A rigid transform destroys nothing, needs no frame staging, and works identically in simple
         // or complex physics: merged parts share the root's Rigidbody and are skipped by the identity
         // check below, so there is no physics-mode branch at all.
-        private static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
-                                         Vector3 dPos, Quaternion rot1, Vector3 vel)
+        internal static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
+                                          Vector3 dPos, Quaternion rot1, Vector3 vel)
         {
             var parts = ac.partLookup;
             if (parts != null)
@@ -1361,15 +1481,13 @@ namespace NuclearOptionMouseAim
             _rec.CardTag       = "";
             _rec.EntryNote     = "";
             _rec.OverrideNote  = "";
-            // Hand the arm knob back — but ONLY if this suite is the one that took it (v0.86). A
-            // second aircraft finishing its own run must not restore a value it never saved, nor
-            // silently disarm the schedule the first one is still flying.
-            if (ReferenceEquals(_armOwner, this))
-            {
-                if (_armEntry != null) { _armEntry.Value = _armSaved; _armEntry = null; }
-                _armOwner = null;
-                _armIdx = -1;
-            }
+            // Drop THIS AIRCRAFT'S arm assignment (v0.94). Nothing to restore — the sweep never wrote
+            // the config — and nothing to coordinate: clearing one aircraft's arm cannot disturb a
+            // schedule another aircraft is still flying, which is what the old ownership dance existed
+            // to prevent. The despawn path clears it again via TestDrone.ForgetState; both are
+            // idempotent, and one of them always runs.
+            if (_armEntry != null) { ChaseController.SetArm(_acId, null, false); _armEntry = null; }
+            _armIdx = -1;
             _anchorSet = false;
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
             IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
@@ -1418,6 +1536,27 @@ namespace NuclearOptionMouseAim
                 return;
             }
 
+            // SAFETY, the other kind: A PART FELL OFF. Over-G damages the PILOT only
+            // (Pilot.TakeGForceDamage), so joint-break detachment is the only in-flight airframe
+            // damage this rig produces — and it is enough to end the run, because an aircraft with a
+            // part missing is not the same airframe the previous replicate flew and cannot contribute
+            // a comparable sample. THRESHOLD IS ANY DETACHMENT, deliberately not the game's own 0.12
+            // (the AI's "abandon this aircraft" test, decompile :12203/:13463): that number asks
+            // whether the thing can still fight, and this is a measurement rig.
+            // Same _frameSet gate and the same CLEAN TRUNCATION as the floor above — the reason names
+            // the ratio, so the CSV's '# stop' line says how bent it was without opening the rows;
+            // dmgFrac (per row) and the sidecar's detachedRatioAtStart carry the rest. Here rather
+            // than in TestDrone because this one placement covers the drones AND the player.
+            // Read is fail-soft and, unlike the recorder's, defaults to NOT damaged: "could not read
+            // it" must never abort a good run, and the -1 in the column is what says the probe failed.
+            if (_frameSet)
+            {
+                float dmg = 0f;
+                try { if (ac.partDamageTracker != null) dmg = ac.partDamageTracker.GetDetachedRatio(); }
+                catch { /* unreadable — see above */ }
+                if (dmg > 0f) { Abort($"airframe damage (detached ratio {dmg:0.000})"); return; }
+            }
+
             if (!_frameSet)
             {
                 // ORDER IS LOAD-BEARING, TWICE OVER.
@@ -1440,7 +1579,7 @@ namespace NuclearOptionMouseAim
                 // Place first, start second — and place ONCE PER CARD, so every card in a suite gets its
                 // own entry condition rather than inheriting the state the previous one left behind.
                 // Returning after the placement gives it a tick to settle before the card is timed.
-                if (Cfg.ScenarioForceEntry.Value && _card.startSpeed > 0f && !_placed)
+                if (Cfg.ScenarioForceEntry.Value && EntrySpeed(_card) > 0f && !_placed)
                 {
                     _placed = true;
                     if (!PlaceOnCondition(ac, _card)) { Finish("entry condition could not be set"); }
@@ -1495,11 +1634,74 @@ namespace NuclearOptionMouseAim
             return Mathf.Clamp(w * SustainedFrac, RateMinDegS, RateMaxDegS);
         }
 
+        // =========================================================================================
+        // WHAT SPEED DOES THIS CARD WANT *THIS AIRFRAME* PLACED AT? (v0.93)
+        //
+        // ONE resolver, and that is the whole of the feature. `startSpeed` is read on the placement,
+        // by the entry-condition gate, by the force-entry key, by the throttle-ownership test and by
+        // three notices — so converting only the spawn site would place the aircraft at (say) 180 m/s
+        // while EntryConditionError still demanded 250 and refused the run forever. Every read below
+        // this line goes through here.
+        //
+        // PRIMITIVES rather than a Card, because the other caller — TestDrone's pre-spawn per-lane
+        // check — holds a Preflight and no aircraft at all. A second copy of the policy over there is
+        // exactly the drift this signature exists to prevent, and the two answers MUST agree: the
+        // v0.92 envelope gate checks the speed the placement will later write.
+        internal static float ResolveStartSpeed(float startSpeed, float startSpeedCorner, string jsonKey)
+        {
+            // The absolute form, and the overwhelmingly common one: byte-identical to pre-v0.93.
+            if (startSpeedCorner <= 0f) return startSpeed;
+            if (TestDrone.TryEnvelope(jsonKey, out var e) && e.Corner > 0f)
+                return startSpeedCorner * e.Corner;
+            // FAIL-SOFT, the same doctrine as the FBW / canard / helo probes: "could not read it" is
+            // never "the corner speed is zero". A zero here would place every lane at 0 m/s, and a
+            // probe that destroys a batch because a field was missing is worse than no probe. So fall
+            // back to the card's absolute startSpeed — and if that is 0 too the card is simply
+            // ungated, which is existing behaviour (the rotor cards live there).
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[card] startSpeedCorner {startSpeedCorner:0.00}x could not be resolved for airframe "
+                + $"'{jsonKey}' (no corner speed readable from Encyclopedia) — falling back to the card's "
+                + $"absolute startSpeed of {startSpeed:0} m/s.");
+            return startSpeed;
+        }
+
+        internal static float EffectiveStartSpeed(Card c, string jsonKey) =>
+            c == null ? 0f : ResolveStartSpeed(c.startSpeed, c.startSpeedCorner, jsonKey);
+
+        // THE INSTANCE FORM. Same resolver, but the answer is constant for (this aircraft, this card)
+        // — the Encyclopedia lookup cannot change mid-flight — while one of its callers is OwnInputs,
+        // which runs on every fixed step. Cached on a REFERENCE compare because the queue holds the
+        // same Card object once per replicate (see SelectCards), so that is the whole cache key, and
+        // one lookup per aircraft is what a batch actually costs.
+        private Card  _entrySpeedFor;
+        private float _entrySpeedVal;
+
+        private float EntrySpeed(Card c)
+        {
+            if (c == null) return 0f;
+            if (!ReferenceEquals(c, _entrySpeedFor))
+            {
+                _entrySpeedFor = c;
+                _entrySpeedVal = EffectiveStartSpeed(c, JsonKeyOf(_ac));
+            }
+            return _entrySpeedVal;
+        }
+
+        // This aircraft's Encyclopedia key — the same string TestDrone spawned it by and the recorder
+        // names its sidecar with. "" if it cannot be read, which resolves as "unknown envelope" and
+        // therefore as the fail-soft fallback above; same contract as PlaneName.
+        private static string JsonKeyOf(Aircraft ac)
+        {
+            try { return ac != null && ac.definition != null ? ac.definition.jsonKey : ""; }
+            catch { return ""; }
+        }
+
         // Entry-condition gate. A card's score is only comparable to another run of the same card if
         // both started from the same state, so a card that DECLARES startSpeed/startAlt refuses to fly
         // outside them. Until v2 these two fields were written by the recorder and read by nothing —
         // which meant "I hand-flew to roughly 250" was an uncontrolled input feeding every score.
-        // Cards that declare nothing (startSpeed 0) are ungated, so ad-hoc recordings still just work.
+        // Cards that declare nothing (neither startSpeed nor startSpeedCorner, so EntrySpeed resolves
+        // to 0) are ungated, so ad-hoc recordings still just work.
         private const float SpeedTolFrac = 0.15f, AltTolM = 800f;
 
         // Put the aircraft ON the card's declared entry condition rather than asking the pilot to fly
@@ -1572,6 +1774,12 @@ namespace NuclearOptionMouseAim
                 var rb = ac.rb;
                 if (rb == null) return false;
 
+                // THE ONE READ of the card's entry speed on this path (v0.93). Resolved once here and
+                // used by the velocity write, the audit, the header note and both notices below — a
+                // second `c.startSpeed` anywhere in this function would write one speed and report
+                // another the moment a card is corner-relative.
+                float vTgt = EntrySpeed(c);
+
                 var g = ac.GlobalPosition();                    // the game's own datum-relative struct
                 Vector3 gp0 = new Vector3(g.x, g.y, g.z);
                 float alt0 = gp0.y, v0 = rb.velocity.magnitude;
@@ -1600,7 +1808,7 @@ namespace NuclearOptionMouseAim
                 }
 
                 ResetGLoadTrackers(ac);                 // MUST precede the velocity write — see above
-                _auditAc = ac; _auditSpeed = c.startSpeed; _auditFrame = Time.frameCount + 2;
+                _auditAc = ac; _auditSpeed = vTgt; _auditFrame = Time.frameCount + 2;
 
                 // Snap back to the anchor in ALL THREE axes, not just altitude. A delta is the same in
                 // the global and the physics frame as long as they differ only by a translation, which
@@ -1620,7 +1828,7 @@ namespace NuclearOptionMouseAim
                 // replicate independence (Gate A).
                 Quaternion rot1 = Quaternion.LookRotation(fwd, Vector3.up);
                 MoveAssembly(ac, rb, rot1 * Quaternion.Inverse(rb.rotation), rb.position, dPos,
-                             rot1, fwd * c.startSpeed);
+                             rot1, fwd * vTgt);
 
                 // NO STALE DEMAND. Apply runs from this same call's POSTfix, so without this the tick
                 // that teleports the aircraft is also a tick chasing the previous card's last marker
@@ -1642,15 +1850,23 @@ namespace NuclearOptionMouseAim
                 string fuelMsg = fuel0 >= 0f ? $", fuel {fuel0:0.00} -> {fuelTgt:0.00}" : "";
                 // Into the CAPTURE, not just the log: this is the per-replicate record of everything the
                 // reset had to undo, which is what lets an analysis covary out whatever it could not.
+                // The resolved SPEED is what goes in, not the multiple — the note is the record of what
+                // the reset actually wrote, and the multiple is recoverable anyway (the card is named
+                // in the header and the sidecar records this airframe's `cornerSpeed`). No new column
+                // and no new key for a number two existing artifacts already pin down between them.
                 _rec.EntryNote =
-                    $"v={v0:0.0}->{c.startSpeed:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
+                    $"v={v0:0.0}->{vTgt:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
                     + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
+                // The log line DOES name the multiple: it is the operator-facing confirmation that the
+                // card drove the number, and "180 m/s" alone reads identically whether it came from a
+                // corner multiple, an absolute startSpeed or a fallback.
+                string cornerMsg = c.startSpeedCorner > 0f ? $" ({c.startSpeedCorner:0.00}x corner)" : "";
                 WTMouseAimPlugin.Log.LogInfo(
-                    $"[card] entry condition set: {v0:0} -> {c.startSpeed:0} m/s, {alt0:0} -> {c.startAlt:0} m"
+                    $"[card] entry condition set: {v0:0} -> {vTgt:0} m/s{cornerMsg}, {alt0:0} -> {c.startAlt:0} m"
                     + $"{fuelMsg}, wings level, snapped back {snapBack:0} m"
                     + " to the anchor heading, controller reset.");
-                Notify($"ON CONDITION  {c.startSpeed:0} m/s  {c.startAlt:0} m"
+                Notify($"ON CONDITION  {vTgt:0} m/s  {c.startAlt:0} m"
                     + (fuel0 >= 0f ? $"  fuel {fuelTgt:P0}" : ""));
                 return true;
             }
@@ -1665,16 +1881,20 @@ namespace NuclearOptionMouseAim
             }
         }
 
-        private static string EntryConditionError(Card c, Aircraft ac)
+        // INSTANCE, not static, since v0.93: the speed it gates on is the one EntrySpeed resolves for
+        // THIS aircraft. A static copy reading `c.startSpeed` would demand 250 of an airframe the
+        // placement had just put on 180, and refuse the run forever.
+        private string EntryConditionError(Card c, Aircraft ac)
         {
-            if (c.startSpeed <= 0f) return null;
+            float want = EntrySpeed(c);
+            if (want <= 0f) return null;
             try
             {
                 float v = ac.rb != null ? ac.rb.velocity.magnitude : 0f;
                 float alt = ac.GlobalPosition().y;
-                float dv = c.startSpeed * SpeedTolFrac;
-                if (Mathf.Abs(v - c.startSpeed) > dv)
-                    return $"airspeed {v:0} m/s, card wants {c.startSpeed:0} +/- {dv:0}";
+                float dv = want * SpeedTolFrac;
+                if (Mathf.Abs(v - want) > dv)
+                    return $"airspeed {v:0} m/s, card wants {want:0} +/- {dv:0}";
                 if (c.startAlt > 0f && Mathf.Abs(alt - c.startAlt) > AltTolM)
                     return $"altitude {alt:0} m, card wants {c.startAlt:0} +/- {AltTolM:0}";
             }
@@ -1824,7 +2044,8 @@ namespace NuclearOptionMouseAim
                 string dir = CardDir();
                 System.IO.Directory.CreateDirectory(dir);
                 path = System.IO.Path.Combine(dir, card.name + ".json");
-                System.IO.File.WriteAllText(path, JsonUtility.ToJson(card, true));
+                System.IO.File.WriteAllText(path,
+                    Newtonsoft.Json.JsonConvert.SerializeObject(card, Newtonsoft.Json.Formatting.Indented));
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[card] saved ({reason}) {n} samples / {track.dur:0.0}s -> {path}. Rename the FILE to rename the card.");
                 if (_cf != null && Register(card, false))                    // runnable now, no restart

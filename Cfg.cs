@@ -141,6 +141,11 @@ namespace NuclearOptionMouseAim
         public static ConfigEntry<int>     DroneCount;       // how many one key press launches
         public static ConfigEntry<float>   DroneStaggerSec;  // gap between consecutive launches
 
+        public static ConfigEntry<KeyCode> SandboxKey;       // put ME airborne (place current aircraft, or spawn one)
+        public static ConfigEntry<string>  SandboxAirframe;  // jsonKey to spawn when not already in an aircraft
+        public static ConfigEntry<float>   SandboxAlt;       // altitude for the above
+        public static ConfigEntry<float>   SandboxSpeed;     // airspeed for the above
+
         // --- Fly Level autopilot (v0.24): toggle a key to hold wings-level + nose-on-horizon at the
         // heading captured when you pressed it. Ignores the reticle; a stick nudge or re-press releases it.
         public static ConfigEntry<bool>    FlyLevelEnabled;   // master on/off for the feature
@@ -381,16 +386,16 @@ namespace NuclearOptionMouseAim
                 "REPLICATE COUNT: how many times the whole selection is flown, back to back, from ONE press of the run key. A single run of a card measures nothing on its own — every metric needs a spread before a change can be called real — and replicates were previously only reachable by typing a card name repeatedly into ScenarioCardSet, which is a text field nobody finds. Each replicate re-applies the entry condition (speed, altitude, attitude, fuel) and writes its OWN capture file, so 4 replicates give 4 independent CSVs, not one long one. The selection repeats as a BLOCK (A,B,A,B — not A,A,B,B) so that any one-way drift across the session lands on every card equally instead of stacking on the last one.",
                 new AcceptableValueRange<int>(1, 20)));
             ScenarioArmToggle   = cf.Bind("Scenario", "ScenarioArmToggle", "",
-                "A/B ARM: the name of an ON/OFF setting to alternate BETWEEN REPLICATES, so one press of the run key flies both sides of a change. Empty (default) = off, every run flies whatever the config says. Give it a setting name as it appears in the F1 panel — 'RelativeTurnLead', 'IntegralStallGate', 'MarkerRateFeedForward' — or 'Section/Key' if it is not in the Control section. The arms run ABBA (off, on, on, off, off, on, on, off...), NOT A-times-N then B-times-N: a session drifts one way (the aircraft is somewhere else on the map, the air is different, the airframe is older), and a blocked design turns that drift into what reads as a real effect. Measured on ten identical replicates of one card: a first-half/second-half split produced 0.077 deg of pure drift against that split's own 0.073 deg detection threshold, i.e. changing NOTHING scored as significant. ABBA lands the drift on both arms equally. Use a run count that is a multiple of 4 (cards x ScenarioRepeat) or the balance is only approximate — the schedule and its A/B tally are printed to the log before the batch flies. Each capture names its own arm on the '# config' header line (arm=0 is A / arm=1 is B, armKnob= names the setting), so the arm is recoverable from the file with no filename convention. The setting is put back the way you left it when the suite ends.");
+                "A/B ARM: the name of an ON/OFF setting to alternate BETWEEN REPLICATES, so one press of the run key flies both sides of a change. Empty (default) = off, every run flies whatever the config says. Give it a setting name as it appears in the F1 panel — 'RelativeTurnLead', 'IntegralStallGate', 'MarkerRateFeedForward' — or 'Section/Key' if it is not in the Control section. The arms run ABBA (off, on, on, off, off, on, on, off...), NOT A-times-N then B-times-N: a session drifts one way (the aircraft is somewhere else on the map, the air is different, the airframe is older), and a blocked design turns that drift into what reads as a real effect. Measured on ten identical replicates of one card: a first-half/second-half split produced 0.077 deg of pure drift against that split's own 0.073 deg detection threshold, i.e. changing NOTHING scored as significant. ABBA lands the drift on both arms equally. Use a run count that is a multiple of 4 (cards x ScenarioRepeat) or the balance is only approximate — the schedule and its A/B tally are printed to the log before the batch flies. Each capture names its own arm on the '# config' header line (arm=0 is A / arm=1 is B, armKnob= names the setting), so the arm is recoverable from the file with no filename convention. SINCE v0.94 THIS RUNS ON A WHOLE FLEET AT ONCE: the arm is per-aircraft state read through that aircraft's controller, so every drone flies its own independent ABBA and a 10-airframe attribution batch is one launch instead of ten serial ones. Nothing writes this setting any more — its own value is only the DEFAULT for anything not being swept, so your own aircraft keeps flying whatever you left in F1 while a batch sweeps around you, and there is nothing to put back at the end. Named here only when the card does not name its own 'armToggle', which wins.");
 
             DroneEnabled        = cf.Bind("Drone", "DroneEnabled", false,
                 "Master ON/OFF for the UNCREWED TEST HARNESS (v0.81). When ON, a hotkey spawns aircraft nobody is sitting in, flies them, and despawns them — the point being that a test card no longer needs a human in a cockpit for its full length, and that several replicates can fly SIDE BY SIDE instead of back to back. OFF by default and genuinely inert while off: the spawn/despawn keys are not even read, no aircraft is created, and the per-aircraft seam that writes drone controls costs one integer compare per aircraft per physics step. Requires an ACTIVE SERVER — single player counts (single player is a host) and so does hosting a multiplayer game, but as a multiplayer CLIENT the spawn is refused with a log line rather than attempted. v0.87: each drone STARTS A TEST CARD as soon as it is airborne (whichever cards are ticked in 'Scenario Cards' for its airframe class) and flies it with THIS MOD'S CONTROL LAW, writing its own CSV — so a drone capture and a hand-flown capture measure the same thing. With no card enabled for that airframe it says so in the log and just holds wings-level; that trivial hold is NOT the control law and must never be compared against one.");
             DroneSpawnKey       = cf.Bind("Drone", "DroneSpawnKey", KeyCode.F2,
-                "Key that launches DroneCount test drones, DroneStaggerSec apart, in parallel lanes abeam of you (8 km out, 2 km between lanes, on your current heading — so they can never converge on you or on each other). Only read while DroneEnabled is on. Each drone appears at DroneSpawnAlt / DroneSpawnSpeed, starts its own test card (v0.87 — wings-level if no card is enabled for its airframe class), and shows on the map as an unaffiliated icon. Default F2.");
+                "Key that launches DroneCount test drones, DroneStaggerSec apart, in parallel lanes abeam of you (8 km out, 6 km between lanes, on your current heading — so they can never converge on you or on each other; the gap is sized by the sustained-turn cards, whose 360 at the bank clamp is a 4.1 km circle). Only read while DroneEnabled is on. Each drone appears at DroneSpawnAlt / DroneSpawnSpeed, starts its own test card (v0.87 — wings-level if no card is enabled for its airframe class), and shows on the map as an unaffiliated icon. Default F2.");
             DroneDespawnKey     = cf.Bind("Drone", "DroneDespawnKey", KeyCode.F9,
                 "Key that removes EVERY live test drone and cancels any launch still staggering in. Safe to press when there are none. Only read while DroneEnabled is on. Note that removing a unit posts a kill message to the HUD — that is the game's own removal path, not a bug. Default F9.");
             DroneAirframe       = cf.Bind("Drone", "DroneAirframe", "Multirole1",
-                "Which airframe the drones spawn as, by its Encyclopedia jsonKey — the SAME key a mission file uses in its 'aircraft[].type' field (see harness/WTM-Range/WTM-Range.json). 'Multirole1' is the key the test range already flies. A COMMA LIST spawns a MIXED batch, one key per lane, wrapping if the list is shorter than DroneCount ('Multirole1, Attacker1' with DroneCount 4 gives two of each). An unknown key refuses that lane with a log line naming it: with a single key that cancels the launch (the next lane would fail identically), with a list only that lane is skipped and the rest fly. Each capture records the airframe it ACTUALLY flew, in its .airframe.json sidecar and its filename — compare-runs.py groups on that and refuses to pool across airframes.");
+                "Which airframe the drones spawn as, by its Encyclopedia jsonKey — the SAME key a mission file uses in its 'aircraft[].type' field (see harness/WTM-Range/WTM-Range.json). 'Multirole1' is the key the test range already flies. A COMMA LIST spawns a MIXED batch, one key per lane, wrapping if the list is shorter than DroneCount ('Multirole1, CAS1' with DroneCount 4 gives two of each). The 13 real keys are Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach (fixed-wing), AttackHelo1, UtilityHelo1, QuadVTOL1 (rotary/tiltwing) — read them off Encyclopedia.Lookup, not off a doc example. NOTE that since v0.91 a CARD's own airframe field is also a comma list and overrides this one entirely, which is the intended way to drive a batch. An unknown key refuses that lane with a log line naming it: with a single key that cancels the launch (the next lane would fail identically), with a list only that lane is skipped and the rest fly. Each capture records the airframe it ACTUALLY flew, in its .airframe.json sidecar and its filename — compare-runs.py groups on that and refuses to pool across airframes.");
             DroneSpawnAlt       = cf.Bind("Drone", "DroneSpawnAlt", 4000f, new ConfigDescription(
                 "Altitude (m MSL) the drones are placed at. Expressed in the same frame as a card's startAlt and the recorder's alt column, so a drone card and a hand-flown card can be compared directly. Keep it well clear of the ground: the drones spawn AIRBORNE on purpose — the game's parked pilot state cuts the throttle and sets the wheel brake below 1 m radar altitude, and a drone that lands in that state never takes off again.",
                 new AcceptableValueRange<float>(500f, 12000f)));
@@ -403,6 +408,26 @@ namespace NuclearOptionMouseAim
             DroneStaggerSec     = cf.Bind("Drone", "DroneStaggerSec", 3f, new ConfigDescription(
                 "Seconds between consecutive drone launches. NOT cosmetic, and not about spawn cost: replicates are only independent samples if a disturbance cannot hit them all in the same place. A frame hitch lands on whatever segment is running when it happens, so launching N drones on the same instant means one hitch corrupts the same segment in all N runs identically — which destroys exactly the independence the replicates were flown for. Offsetting the launches offsets their segment boundaries. 0 = simultaneous (don't, unless you are deliberately testing that claim); a few seconds is plenty, since it only has to exceed the length of a typical hitch. Hitches over 50 ms are logged as '[drone] frame hitch' so this stays a measurement rather than an article of faith.",
                 new AcceptableValueRange<float>(0f, 30f)));
+
+            // SANDBOX (v0.95). Nothing to do with the drone harness — this is for HAND-flying the law.
+            // Deliberately its own section and its own key: overloading DroneSpawnKey would mean the
+            // operator's "put me in the air" and the batch launcher fire on the same press, and the
+            // alt/speed knobs are separate for the same reason — reusing DroneSpawnAlt would make
+            // setting up a hand-flight silently re-band the next batch.
+            SandboxKey          = cf.Bind("Sandbox", "SandboxKey", KeyCode.F4,
+                "Key that puts YOU airborne, for hand-flying the control law without setting up a mission. IN AN AIRCRAFT ALREADY: it is placed at SandboxAlt/SandboxSpeed, wings level, on its current heading and over its current position — nothing is spawned and nothing is lost. NOT IN ONE (spectating, ejected, on the ramp): an aircraft of type SandboxAirframe is spawned around you, airborne and already at speed, and the game puts you in it. Requires an ACTIVE SERVER, exactly like the drone harness — single player is a host, so single player and hosting both work; as a multiplayer client it refuses with a log line. Unlike the drone keys this is read whether or not DroneEnabled is on, because it is not part of the harness. Default F4.");
+            SandboxAirframe     = cf.Bind("Sandbox", "SandboxAirframe", "Multirole1", new ConfigDescription(
+                "Which airframe to spawn you into when you are NOT already in one, by Encyclopedia jsonKey. Ignored when you are already flying — that case places the aircraft you are in, whatever it is. This is a single key, NOT a comma list: it is one aircraft for one pilot, unlike DroneAirframe which is a per-lane list for a fleet.",
+                new AcceptableValueList<string>(
+                    "Fighter1", "Multirole1", "SmallFighter1", "trainer", "VTOLTrainer1",
+                    "CAS1", "COIN", "EW1", "FastBomber1", "Darkreach",
+                    "AttackHelo1", "UtilityHelo1", "QuadVTOL1")));
+            SandboxAlt          = cf.Bind("Sandbox", "SandboxAlt", 4000f, new ConfigDescription(
+                "Altitude (m MSL) you are placed or spawned at. Same frame as a card's startAlt and the recorder's alt column, so a hand-flown capture lines up with a drone capture. Well clear of the ground on purpose: the game's parked pilot state cuts throttle and sets the wheel brake below 1 m radar altitude.",
+                new AcceptableValueRange<float>(500f, 12000f)));
+            SandboxSpeed        = cf.Bind("Sandbox", "SandboxSpeed", 250f, new ConfigDescription(
+                "Airspeed (m/s) you are given, along your current heading. 250 matches the shipped cards' entry condition. NOT envelope-checked the way a drone lane is (v0.92 gates those pre-spawn): you are a pilot, not a batch, and refusing to place you would be more annoying than a slow acceleration — but a value outside the airframe's envelope will simply decay or overspeed, so check AIRFRAMES.md if the number matters.",
+                new AcceptableValueRange<float>(0f, 500f)));
 
             FlyLevelEnabled     = cf.Bind("FlyLevel", "Enabled", true,
                 "Enable the 'Fly Level' toggle key. When you press it, the instructor locks the current heading and holds TRUE level flight — wings level, zero climb rate (the velocity vector on the horizon, accounting for angle-of-attack), ignoring the aim circle. Press again (or nudge the stick) to return to mouse-aim.");
@@ -484,8 +509,22 @@ namespace NuclearOptionMouseAim
         // One compact line with every control-law knob — the single source of truth for the gain dump,
         // reused by the startup/reset log line (LogSnapshot) AND the maneuver-recorder CSV header so a
         // recording is self-describing without cross-referencing the BepInEx log. Includes the active law.
-        public static string SnapshotString()
+        //
+        // v0.94 — TAKES THE AIRCRAFT'S CONTROLLER, and that is not decoration. The five `(A/B lever)`
+        // bools are no longer read off these entries by the law: a swept aircraft reads its own arm
+        // through ChaseController.Arm(). Printing `Value` here would put the operator's F1 setting on
+        // the same line as `arm=1`, i.e. a capture contradicting itself about the one knob the whole
+        // run is measuring. So the levers are printed through the SAME Arm() the law used — one
+        // definition of "what did this aircraft actually fly", not a second one that can drift.
+        // A null controller (the startup log line, a capture whose aircraft could not be resolved)
+        // falls back to the live config, which is the truth when nothing is being swept.
+        public static string SnapshotString(ChaseController arm = null, string armTag = "")
         {
+            bool mrFF      = arm != null ? arm.Arm(MarkerRateFeedForward) : MarkerRateFeedForward.Value;
+            bool relLead   = arm != null ? arm.Arm(RelativeTurnLead)      : RelativeTurnLead.Value;
+            bool iStall    = arm != null ? arm.Arm(IntegralStallGate)     : IntegralStallGate.Value;
+            bool belowSup  = arm != null ? arm.Arm(BelowAlignSuppress)    : BelowAlignSuppress.Value;
+            bool alignLead = arm != null ? arm.Arm(AlignRateLead)         : AlignRateLead.Value;
             return
                 $"law=EvolvedLegacy sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
                 $"pitchG={PitchGain.Value:0.0} yawG={YawGain.Value:0.0} rollG={RollGain.Value:0.00} rollDamp={RollDamping.Value:0.00} rollSm={RollRateSmoothing.Value:0.00} " +
@@ -496,15 +535,16 @@ namespace NuclearOptionMouseAim
                 $"yawAssist={(YawAssistEnabled.Value ? 1 : 0)} yaStr={YawAssistStrength.Value:0.00} yaResp={YawAssistResponse.Value:0.00} " +
                 $"coordPull={CoordPullGain.Value:0.00} coordCap={CoordPullCap.Value:0.00} bankAuth={BankAuthGain.Value:0.0} yawFade={YawWeakFade.Value:0.00} " +
                 $"trGain={AssistTurnRateGain.Value:0.00} pullRel={CoordPullReleaseAngle.Value:0.0} alignHold={EvolvedAlignHoldDeg.Value:0.0} " +
-                $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} mrFF={(MarkerRateFeedForward.Value ? 1 : 0)} " +
-                $"relLead={(RelativeTurnLead.Value ? 1 : 0)} iStall={(IntegralStallGate.Value ? 1 : 0)} " +
-                $"belowSup={(BelowAlignSuppress.Value ? 1 : 0)} alignLead={(AlignRateLead.Value ? 1 : 0)} " +
+                $"leadT={TurnLeadTime.Value:0.00} bankSlew={BankSlewRate.Value:0} mrFF={(mrFF ? 1 : 0)} " +
+                $"relLead={(relLead ? 1 : 0)} iStall={(iStall ? 1 : 0)} " +
+                $"belowSup={(belowSup ? 1 : 0)} alignLead={(alignLead ? 1 : 0)} " +
                 // v0.84 A/B ARM, empty unless a suite is interleaving one. Here rather than on its own
                 // header line because '# config' is the line every offline tool already parses — the
                 // bare `arm=` number falls straight out of scorecard.py's existing cfg_params() regex
                 // with no Python change, and `armKnob=` (non-numeric, so that regex skips it) says
                 // which knob, because "arm=1" is only meaningful next to the name of what was swept.
-                ScenarioPlayer.ArmTag +
+                // v0.94: passed IN (per aircraft) rather than read from a static — see ArmTagFor.
+                armTag +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
         }
 
