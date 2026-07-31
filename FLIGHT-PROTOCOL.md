@@ -66,9 +66,12 @@ Written before there was a noise floor to write them against, and both flagged a
   written to catch a *stale aim demand*; the signal for that is `off` at row 0, which reads
   **0.02–0.08°** — clean. `|outP|` reads 0.146 on seven of eight runs, identical to three decimals,
   because it is a **deterministic entry transient**, not drift: the placement wrote AoA = 0 and the
-  FBW is catching the resulting 1-g drop. It is gone by t+0.7 s, well inside the 6 s `arm`. Fixed at
-  source in v0.88 (see CHANGELOG); the criterion is dropped rather than retuned because `off0` already
-  covers what it was for.
+  FBW is catching the resulting 1-g drop. It is gone by t+0.7 s, well inside the 6 s `arm`. The
+  criterion is dropped rather than retuned because `off0` already covers what it was for.
+  ~~Fixed at source in v0.88.~~ **It was not.** v0.88's trimmed placement was disproved by this very
+  batch and reverted in v0.89 — see Gate B finding 1 below, which contradicts this sentence and is
+  the one to believe. The AoA = 0 explanation for the transient is *also* what R23 disproved; the
+  transient is real, its cause is not the trim.
 - **`|r| < 0.4` on `terminalOffDeg` vs run index** is the wrong *statistic*. Correlation has no
   effect-size floor: as noise falls, any residual trend drives |r| → 1, so a perfectly reproducible
   rig fails it. Measured r = **−0.885** — across a total range of **0.11°** on a 9.4° mean, with
@@ -135,6 +138,20 @@ while leaving `headingRateFilt`/`leadDeg` untouched — the symptom would look f
 would hide. **This does not invalidate Gate A or B**: the transient is deterministic (the three
 placed runs agree within 0.02 on every affected signal) and decays inside the 6 s `arm`, before the
 scored segment starts.
+
+> **Scope correction, 2026-07-30 (R32).** The sentence above is true of Gate A/B and of R28 — and
+> **only** of the light, high-`gLimitPositive` airframes both were flown on. The transient's
+> distribution is **bimodal**, and everything measured until R32 was the lower mode. Over R32's 58
+> placed `Darkreach` captures: median `|rollRate|` at `tSeg=0` is **0.753** (R28's 0.725, reproduced)
+> but **19 of 58 exceed 5**, max **54.2**; `|leadDeg|` reaches **314°**, `|headingRateFilt|`
+> **483 °/s**, and **`|outP|` rails at 1.000 on 15 of 58 placement ticks**. The magnitude is set by
+> the attitude the *previous* replicate ended in, so once a lane has one bad replicate the next
+> placement injects a full-authority spurious command on tick zero — and on a 105 t airframe with
+> `maxPitchAngularVel = 0.3` that departs it **inside the `arm` segment**, before the card has
+> demanded anything. So: deterministic yes, harmless **no**, and "decays before the scored segment"
+> must be read as an airframe-scoped observation rather than a property of the rig.
+> See [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md) §8. Still deliberately unfixed, for
+> the unchanged reason in the paragraph above.
 
 ### This retracts one Gate A claim
 

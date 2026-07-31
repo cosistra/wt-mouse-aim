@@ -85,6 +85,22 @@ to abandon and is nonetheless correct — which sharpens the rule:
 > *roll* on a *horizon-frame* geometric fact (the align law's false below-nose equilibrium), so it
 > had to be roll-invariant. Same signal, opposite verdicts, one criterion.
 
+**Status (2026-07-30, R32): new finding 18 — the law has no recovery mode, only a graded stand-down,
+and the constants that grade it are hardcoded.** Five separate terms de-authorize the pitch channel
+when the plant stops responding (`qSched`'s two 0.3 floors, `Max(0.3f, aoaGateUp)`, `pErrTerm *=
+_pitchEff` below `PEffRevThresh`, `aoaRecover *= _pitchEff`) and **nothing anywhere in `Apply`
+increases authority or changes strategy**. On nine of ten airframes the airframe's own stability
+covers the gap. On `Darkreach` it does not, and R32 measured the schedule sitting on its floor for
+100.0% of the rows past |AoA| 20° while the aircraft descended 3 000 m and killed the pilot. Full
+evidence in [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md); finding 18 below.
+
+**Also corrected by the R32 decompile audit, because it changes what "the game protects it" means:**
+`ControlsFilter.GLimiter` is **dead code** (one occurrence in 181 878 lines, never instantiated,
+`LimitG` never called), and the FBW's alpha limiter is gated `if (num2 < 1f)` (`:64860`) so it is
+**inactive above corner q — where every shipped card flies** (97.7% of R32 rows). The law's
+"probed ceiling + live AoA" pattern is therefore not backstopped by the game the way findings 1/2/10
+assume; the mod's AoA block is the *only* alpha protection in the loop at card speeds.
+
 - **Align-channel rate lead** (v0.85, `Cfg.AlignRateLead`, default ON) — partial, orthogonal relief for
   finding 5 (`eAlign` is fixed-gain because EL has no roll-effectiveness estimator). The `phi/90` map
   was pure proportional; `phi` is now led by its measured rate with `Cfg.RollDamping` as the lead time.
@@ -251,6 +267,18 @@ exogenous, and arrived as a 2× step in loop gain. Occupancy 6.0% of `az30`, 1.6
 `effFloor` — which is what pre-C1 gave for free and what the v0.67 comment says it restores). Highest
 priority once the v0.82–v0.85 batch is flown.
 
+**Scope corrected 2026-07-30 (R32 audit), and the mechanism CONFIRMED at corpus scale.** "The branch
+is unreachable" is true **only of the self-probe path**, and must not be read as "`_pitchEff` never
+goes below 0.15". Over all 1 032 archived captures (627 110 rows, R28–R32): **28 209 rows (4.50%)**
+sit below `PEffRevThresh`, min **0.000**, in **89 captures on two fixed-wing airframes**
+(`Darkreach` 27 622 rows, `FastBomber1` 587) — genuine reversed-plant measurements, where the no-floor
+branch is the *correct* behaviour, not the defect. The defect's own signature is separately visible
+and unambiguous: **2 811 rows read exactly `0.150` and only 8 rows read anything above it up to
+0.152** — the LPF parking on its own target, exactly as the closed form predicts. So the `>=` → `>`
+change is worth making and cannot regress anything, but it moves **0.45%** of corpus rows, all of them
+at the boundary. Do not scope an experiment as "unlock a dormant branch" — it would be measuring a
+boundary case, and the batch would read as a null.
+
 ### 15. HIGH — `_yawWeak` measures "the error did not close", not "the rudder is weak" — OPEN (STRUCTURAL + MEASURED)
 **Answer to finding 13's `_yawWeak` question: it does not clear, and the reason is the v0.83 shape.**
 The premise (a heading error that will not close means the rudder failed) is true only against a
@@ -300,11 +328,81 @@ Two smaller siblings are recorded in the findings doc: `belowSuppress`'s residua
 not), and `_pitchEff × _alphaSchedFilt` compounding to **0.09** where each is documented as flooring
 at 0.30 — unfalsifiable on a corpus where `aoaLimiterActivePct` is 0 in every capture ever taken.
 
+### 18. HIGH — the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs — OPEN (MEASURED, R32)
+
+**The clearest one-law violation in the corpus: a hardcoded constant, not a probed quantity, decides
+whether an airframe recovers.** Evidence: [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md)
+§6 (63 captures, 37 868 rows, `Darkreach` on `darkreach-05`, 18 departures, 3 dead pilots).
+
+**The constant.** `ChaseController.cs:1255`:
+
+```csharp
+const float utilStart = 0.6f, schedFloor = 0.3f, atkTau = 0.05f, relTau = 1.0f;
+float aoaUtil  = Mathf.Max(aoaPredUp, -aoaPredDn) / Mathf.Max(1f, aoaCeil);
+float schedRaw = Mathf.Lerp(1f, schedFloor, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
+...
+qSched = Mathf.Min(qSched, _alphaSchedFilt);            // :1260
+```
+
+`aoaUtil` is correctly relative (live predicted AoA over the **probed** ceiling — the pattern this
+file holds up as right). **`schedFloor` is not.** It is an absolute 0.3 that terminates the
+schedule's range at the same place for a 27° ceiling on an 8.7 t `Fighter1` and a 10° ceiling on a
+105 t `Darkreach`. `qSched` scales `pErrTerm` only (`:1928`), so at the floor the law is still
+committing 30% of its proportional pitch demand into a plant delivering **7.7× the commanded rate
+in the opposite direction** (R32 median on departed captures; p90 13.0×, max 28.2×).
+
+Measured: over the 2 314 R32 rows past |AoA| 20°, `qSched` is **exactly 0.300 on 100.0%**. Over the
+whole batch it is railed on 16.7% of rows and on 13–91% of every departed capture, against **0.0%**
+on all 31 clean pre-onset replicates of the same card and airframe.
+
+**Its two siblings are the same shape**, and finding 10 already lists `schedFloor` as a WATCH item —
+R32 promotes it, because "not shown to cost anything" is no longer true:
+
+- `:1152` `qSched = Mathf.Clamp(qRatio, 0.3f, 1f)` — this one is **defensible**: it deliberately
+  mirrors the game's own `:64861` clamp, so it is a reconstruction of a game constant, not a mod
+  constant. Leave it. Note it never bound in R32 (`qRatio` = 2.03 at the entry condition).
+- `:1296` `omegaMax *= Mathf.Max(0.3f, aoaGateUp)` — the v0.67 AoA-margin turn cap, floored "so a
+  wing AT the ceiling still holds a sustained turn (mirrors the qSched floor)". Same hardcoded 0.3,
+  same absence of an airframe-relative basis, and it is a floor on the *achievability cap*, i.e. it
+  guarantees the law keeps demanding a turn a departed wing cannot make.
+
+**And the term that is supposed to be the exception is scaled away too.** `:1557`
+`if (!_collective) aoaRecover *= _pitchEff;` — the recovery bias, documented at `:1543` as "the term
+that flies the nose back INSIDE the envelope", multiplied by an estimator reading **0.036–0.144** for
+the entire duration of the departure. The comment's reasoning ("If the plant is not following, adding
+command is pumping") is sound against a *reversed* plant and R32's plant genuinely is reversed — so
+this is not a coding error. It is the completion of the pattern: **every one of the five terms that
+respond to a non-responding plant reduces authority, and there is no sixth term that does anything
+else.** `pErrTerm *= _pitchEff` below `PEffRevThresh` (`:1927`) is the fifth.
+
+**What a fix has to be, to satisfy the rule.** Not a bigger number. The floor is currently the
+answer to "how much demand is still safe at the ceiling", asked with no reference to the airframe;
+the probed quantities to key it off are already in hand two blocks away — `omegaMax` (probed
+`gLimit`/`V`, and after `:1296` also alpha-margin-aware), `_fbwMaxPitchVel`, the measured `_pitchEff`
+and the alpha ceiling that `aoaUtil` already normalises by. A floor expressed as a fraction of what
+the plant can currently deliver keys off measurement; 0.3f does not.
+
+**Do not fix this before the precursor is understood.** R32 §4 shows the schedule railing is
+*downstream* of a roll-to-align event (34–56° of `targetBank` at <5° of `azErr`) that finding 16 is
+the standing candidate for. Fixing the stand-down first would make a departed airframe recover
+sometimes, which is worse than a departure that is legible.
+
+**Do NOT reach for a mod-side G-limiter as the fix** — see R32 §9. The over-G is a *readout* of the
+departure, it damages only the pilot (`Pilot.TakeGForceDamage`, `:85779`, 20 g threshold, one part
+index), and clipping it removes the most visible failure signal while changing nothing about the
+authority problem. It would also be a sixth de-authorizing term on a law whose defect is that it
+already has five.
+
 ## Suggested order of attack
 
 0. **Finding 14** — one comparison, no new constant, closed-form proof plus a measured 3.07 s
-   episode, and it cannot make anything else worse because the branch it repairs is currently
-   unreachable. Do it first, behind its own checkbox, **after** v0.82–v0.85 have been flown.
+   episode, and it cannot make anything else worse because the branch it repairs is unreachable *from
+   the self-probe path*. Do it first, behind its own checkbox, **after** v0.82–v0.85 have been flown.
+   **But budget it as hygiene, not as an experiment**: it moves 0.45% of corpus rows (see the R32
+   scope correction under finding 14), so an A/B commissioned to measure it will report a null.
+0b. **Finding 18** — the largest measured law defect currently open, and the first genuine *law*
+   defect since the instrument fixes. Blocked on understanding the precursor first (finding 16 is the
+   candidate); see the note at the end of 18.
 1. Get an **Ifrit recording** (blocks finding 3; the fix is cheap once confirmed).
 2. **Measured pitch effectiveness** (finding 2) — the FBW rate pair is already being read; this
    is the highest-leverage generic signal and feeds findings 1 and 4.
