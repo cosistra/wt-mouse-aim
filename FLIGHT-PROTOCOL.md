@@ -374,8 +374,14 @@ This is also where v0.78/v0.83 can first be seen at all: above the rail their ro
 
 ### E3 — the AoA ceiling (`alpha-sweep`)
 
-`aoaLimiterActivePct` is **0 in every capture ever taken**, against a ONE-LAW rule that explicitly
-requires "a loaded jet mushing near its alpha limit above corner speed".
+The ONE-LAW rule explicitly requires "a loaded jet mushing near its alpha limit above corner speed",
+and neither `alpha-*` card has ever been flown.
+
+> **CORRECTED 2026-07-31.** This read *"`aoaLimiterActivePct` is **0 in every capture ever taken**"*.
+> **False:** non-zero on **66** (run, airframe, tag) cells, **23** with no railed segment anywhere,
+> topped by **R33 `Darkreach·obDR6` — 100.0%, `railed = 0`, n = 4**, `aoaPeakDeg` 7.38–7.59° against a
+> 10° `alphaLimiter`. `LAW-CHARACTERIZATION.md` §1 supersedes this section (see the note at the top of
+> that file); it is kept here only as the record of how the instrument was validated.
 
 - **Gate on `aoaAboveCeilingPct > 0` at all.** If it is 0, **the card failed, not the law** — raise
   `startAlt` and refly. 8000 m is a reasoned choice, not a validated one.

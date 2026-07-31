@@ -12,9 +12,20 @@ Reproduce: `python debugtests/loopaudit.py --selftest` (the closed forms, no dat
 **Corpus.** The 11 complete `fixedwing-v2` captures (R12-02, R13-01..04, R18-02/03, R19-01..04,
 v0.72–v0.77) + the 10 `fixedwing-sweep` replicates (R21, v0.79) + the v0.71/v0.75 runs that carry
 the `pEff` episodes. All KR-67 Ifrit (`Multirole1`), one entry condition.
-**Coverage holes, stated up front:** `aoaLimiterActivePct` is **0 in every capture ever taken**, only
-2 of the 4 required airframe classes have ever flown, and the corpus has no low-q / near-alpha-ceiling
-/ rotorcraft flight at all. Nothing below claims MEASURED support in those regimes.
+**Coverage holes, stated up front — as they were at the time of the audit (R21-era corpus):**
+`aoaLimiterActivePct` was 0 in every capture *this audit read*, only 2 of the 4 required airframe
+classes had flown, and there was no low-q / near-alpha-ceiling / rotorcraft flight at all. Nothing
+below claims MEASURED support in those regimes.
+
+> **CORRECTED 2026-07-31 — the AoA hole is closed and the corpus is 30× larger.** *"0 in every
+> capture ever taken"* was a corpus-wide claim and it is **false**: `aoaLimiterActivePct` is non-zero
+> on **66** (run, airframe, tag) cells across R1–R33, **23** of them with no railed segment anywhere.
+> The clean one is **R33 `Darkreach·obDR6` — 100.0% occupancy, `railed = 0`, n = 4**, `aoaPeakDeg`
+> 7.38–7.59° vs a 10° `alphaLimiter`, `authorityUsedFrac` 0.717–0.748. R29 `trainer·obUL12` (11.9% on
+> 8 of 8, unrailed) was the first activation of any size. The corpus is now **1 681 captures / 10
+> airframes on cards**, so "only 2 of the 4 airframe classes" is also stale — 3 of 4 are covered; the
+> hovering helo is not. **F1, F6 and F7 below are re-readable against real data; where the text says
+> "unfalsifiable on the present corpus", read "unfalsifiable on the corpus this audit had".**
 
 ---
 
@@ -322,11 +333,17 @@ ceiling), each documented as flooring at 0.30. They **multiply**: at both floors
 scaled by **0.09**, i.e. 91% removed where each mechanism was designed to remove 70%. Inside the
 fine cone a third scaling (`fineGain`'s boost is also gated by `_alphaSchedFilt`) stacks on top.
 
-Corpus check: min `pEff` across the whole v0.6x/v0.7x corpus is 0.0, but `aoaLimiterActivePct` is
-**0 in every capture**, so the two have never been low *at the same time* in any recorded flight.
-This is a compounding-gates finding, not a loop, and it is unfalsifiable on the present corpus —
-which is itself the report. It is the first thing to look at in the loaded-jet capture that F1 also
-needs.
+Corpus check *as audited* (v0.6x/v0.7x): min `pEff` is 0.0, but `aoaLimiterActivePct` read 0 in every
+capture then available, so the two had never been low at the same time in any recorded flight. This
+is a compounding-gates finding, not a loop.
+
+> **CORRECTED 2026-07-31 — "unfalsifiable on the present corpus" is RETIRED.** The AoA half of the
+> pair is measurable today: 66 cells non-zero, **23 fully unrailed**, headed by **R33
+> `Darkreach·obDR6` at 100.0%, `railed = 0`, n = 4** (`aoaPeakDeg` 7.38–7.59 vs a 10° limiter). That
+> is a cell where `_alphaSchedFilt` is demonstrably active *and* the actuator is off its stop
+> (`authorityUsedFrac` 0.717–0.748), which is precisely the condition this finding needs. The
+> remaining unknown is whether `_pitchEff` is simultaneously at its floor there — a `rows`-level
+> question, so `index-captures.py --with-rows R33` first. **F6 is now testable, not theoretical.**
 
 ---
 
@@ -369,7 +386,7 @@ Not empty cells — each of these was checked against the same question and has 
 | `_aimAzRateFilt`, `_aimRateFilt`, `_settleOK` | world | derived from the **marker alone**. Structurally unmovable by any mod output — the cleanest signals in the file, and the model for what a gate should look like. |
 | `hdgConf` | world | an exact deprojection (`cos(pitch)`), not a threshold; multiplicative and applied after the clamp so the bounds scale coherently. |
 | `qSched` (q half) | physical | airspeed. The command bleeds airspeed on a ~10 s timescale (R21: −15.4 m/s / 30 s), three decades below the control bandwidth. |
-| `omegaMax`, `aoaGateUp/Dn`, `aoaRecover` | body/probed | genuine **negative** feedback, with the v0.57 predictive-lead asymmetry as documented hysteresis. Never exercised in the corpus (`aoaLimiterActivePct` = 0 everywhere) — cleared on structure, not on data. |
+| `omegaMax`, `aoaGateUp/Dn`, `aoaRecover` | body/probed | genuine **negative** feedback, with the v0.57 predictive-lead asymmetry as documented hysteresis. **Cleared on structure, not on data** — but "never exercised in the corpus (`aoaLimiterActivePct` = 0 everywhere)" is **corrected 2026-07-31**: it is non-zero on 66 cells, 23 fully unrailed, up to **100.0% on R33 `Darkreach·obDR6`** (n=4, `railed = 0`). The gates *have* been exercised; nobody has yet scored what they did there. |
 | `_pitchEff` under plant **saturation** | ratio | scale-invariant: `ach/cmd` is unchanged by scaling `cmd`, so the self-reference has loop gain ≈0 for a linear plant. Under rate saturation it solves to `_pitchEff = √(ω_plant/(K·e))` — a unique, stable, bounded fixed point, i.e. a convergent soft de-rater. **This half of `_pitchEff` is well designed; F1 is the gate around it, not the ratio.** |
 | `_rollRateFilt` | body | proper derivative term on the roll axis. |
 | `fineBlend`, `bigTurn`, `brakeGate`, `azRamp`, `pullTaper` | invariant | all functions of error magnitude gating commands that reduce error magnitude — ordinary negative feedback. GATE-CHATTER already tested these for chatter against sham gates and returned a clean negative; nothing here changes that verdict. |
@@ -402,8 +419,14 @@ loadout at 160–180 m/s, `fixedwing-v2`, 4 replicates per arm, ABBA-interleaved
 
 Pass/fail signals, in priority order:
 
-1. `aoaLimiterActivePct` > 0 **at all** — until one capture achieves that, three de-rating
-   subsystems (`aoaGateUp/Dn`, `aoaRecover`, `_alphaSchedFilt`) have never been observed working.
+1. ~~`aoaLimiterActivePct` > 0 **at all** — until one capture achieves that, three de-rating
+   subsystems (`aoaGateUp/Dn`, `aoaRecover`, `_alphaSchedFilt`) have never been observed working.~~
+   **ACHIEVED 2026-07-31, and the requested capture is not the one that did it.** R33
+   `Darkreach·oblique-6-c`: `obDR6` **100.0%**, `obDL6` 76.8%, `obUL6` 46.5%, `obUR6` 25.4% — n = 4
+   each, **`railed = 0`**, `authorityUsedFrac` 0.476–0.748. Not a heavy loadout at 160–180 m/s but a
+   **95 m/s** entry (v0.96's #41 corner-speed fix, down from 171 m/s in R29) on a 105 t airframe with
+   a 10° `alphaLimiter` — i.e. low q was the lever, not load. Signals 2–4 below are still open and
+   this is the capture to run them against.
 2. `pEff` and `qSched` **simultaneously** at their floors → the 0.09 product of F6 is real; if they
    never coincide, F6 downgrades to theoretical.
 3. `pEffLatchPct` from `loopaudit.py` — the prediction is that it rises sharply from the 0.2%

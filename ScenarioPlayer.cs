@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
 using UnityEngine;
@@ -1417,24 +1418,113 @@ namespace NuclearOptionMouseAim
         // A rigid transform destroys nothing, needs no frame staging, and works identically in simple
         // or complex physics: merged parts share the root's Rigidbody and are skipped by the identity
         // check below, so there is no physics-mode branch at all.
+        //
+        // v0.96.1 — AND IT CHECKS ITSELF AFTERWARDS, because a part the loop does not reach is not a
+        // cosmetic miss: it is a DETACHED part one fixed step later. `AeroPart.CheckAttachment`
+        // (decompile :74158-74174) detaches purely on GEOMETRY — 0.5 m between a part's transform and
+        // the pose recorded at Awake, measured in its parent part's frame, no force and no damage
+        // anywhere in the test — and `UnitPart.TakeDamage`'s detach clause explicitly excludes
+        // AeroParts (`&& !(this is AeroPart)`, :84095), so for an aircraft, whose `partLookup` is
+        // ALL AeroPart (only AeroPart and ShipPart derive from UnitPart, :73900/:81119, and
+        // SetComplexPhysics casts every entry unconditionally, :61278), that geometric test is the
+        // ONLY way a part can leave. R33 caught one: Darkreach shed a part (ratio 0.029 = 1/35) two
+        // fixed steps after a placement, off four byte-identical replicates. It reads as
+        // intermittent because the detector is a SAMPLER — `Aircraft.PartChecker` (:59984-60005,
+        // driven from LocalSimFixedUpdate :61803) checks ONE part per fixed step, round-robin — so a
+        // short-lived excursion is caught with probability ~k/N and missed the rest of the time.
+        //
+        // The skip below assumes a part that shares the root body (zero mass, or merged) RIDES the
+        // root's transform. That holds only while it is still a descendant of it, and
+        // `AeroPart.CreateRB` (:74227) unparents every part it hands a body to — so the assumption is
+        // about hierarchy shape, which is prefab data this code cannot see. Rather than reason about
+        // it, re-impose the map on the outcome: snapshot every part's pose in the ROOT's frame before
+        // the move (a frame the rigid map leaves unchanged BY DEFINITION, so this is the same
+        // definition of the move, not a second one), then put back anything that did not follow.
+        // The warning line is the measurement: if it never fires, nothing is being left behind and
+        // the excursion has some other source; if it fires, it names how many parts and how far.
+        //
+        // ponytail: the pre-existing joint stretch is carried through the move rather than removed.
+        // It is millimetres in level flight against a 0.5 m threshold; revisit only if the line below
+        // starts reporting errors it did not cause.
+        private const float PartSnapTol = 0.10f;   // 5x inside the game's 0.5 m; ~4x above the float
+                                                   // grain at the 60-100 km world coords a lane flies
         internal static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
                                           Vector3 dPos, Quaternion rot1, Vector3 vel)
         {
             var parts = ac.partLookup;
-            if (parts != null)
-                for (int i = 0; i < parts.Count; i++)
-                {
-                    var pr = parts[i] != null ? parts[i].rb : null;
-                    if (pr == null || pr == rb) continue;          // root, or merged onto it
-                    pr.position        = pivot + dRot * (pr.position - pivot) + dPos;
-                    pr.rotation        = dRot * pr.rotation;
-                    pr.velocity        = vel;                      // rigid + zero spin => one velocity everywhere
-                    pr.angularVelocity = Vector3.zero;
-                }
+            int n = parts != null ? parts.Count : 0;
+
+            // Pose in the root's frame, BEFORE the move. The audit below reads own-body parts only
+            // (see there), and this reads a part's own body wherever it has one, so the two never
+            // compare a pose taken from one source against a pose taken from the other.
+            Quaternion inv0 = Quaternion.Inverse(rb.rotation);
+            Vector3[]    lp = n > 0 ? new Vector3[n]    : null;    // once per replicate, not a hot path
+            Quaternion[] lr = n > 0 ? new Quaternion[n] : null;
+            for (int i = 0; i < n; i++)
+            {
+                var p = parts[i]; var x = p != null ? p.xform : null;
+                if (x == null) continue;
+                var pr = p.rb;
+                bool own = pr != null && pr != rb;
+                lp[i] = inv0 * ((own ? pr.position : x.position) - rb.position);
+                lr[i] = inv0 *  (own ? pr.rotation : x.rotation);
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                var pr = parts[i] != null ? parts[i].rb : null;
+                if (pr == null || pr == rb) continue;          // root, or merged onto it
+                pr.position        = pivot + dRot * (pr.position - pivot) + dPos;
+                pr.rotation        = dRot * pr.rotation;
+                pr.velocity        = vel;                      // rigid + zero spin => one velocity everywhere
+                pr.angularVelocity = Vector3.zero;
+            }
             rb.position        = pivot + dPos;
             rb.rotation        = rot1;
             rb.velocity        = vel;
             rb.angularVelocity = Vector3.zero;
+
+            // DID EVERY PART COME WITH US? Fail-soft around the whole pass: an aircraft that has been
+            // moved but not audited is still a correctly placed aircraft, and this must never be the
+            // thing that throws into a fixed step.
+            try
+            {
+                int snapped = 0; float worst = 0f;
+                for (int i = 0; i < n; i++)
+                {
+                    var p = parts[i]; var x = p != null ? p.xform : null;
+                    if (x == null) continue;
+                    var pr = p.rb;
+                    // OWN-BODY PARTS ONLY, and that is not a narrowing — it is what keeps the warning
+                    // below a DISCRIMINATOR. A part sharing the root body rides the root transform,
+                    // which Unity has not written yet (rb.position propagates to the transform at
+                    // Physics.SyncTransforms, three lines down), so reading x.position here would
+                    // measure the move we just made and report every such part as left behind on
+                    // every placement. Nothing is lost: SetComplexPhysics gives EVERY partLookup
+                    // entry its own body (decompile :61278 -> AeroPart.CreateRB :74227), so this
+                    // skips nothing in the mode a card places in; and in simple physics
+                    // AeroPart.CheckAttachment (:74160) early-returns, so there is no detachment to
+                    // prevent there in the first place.
+                    if (pr == null || pr == rb) continue;
+                    Vector3 tgt = rb.position + rot1 * lp[i];
+                    float err = (pr.position - tgt).magnitude;
+                    if (err <= PartSnapTol) continue;
+                    // Absolute target from the pre-move snapshot, so the pass is idempotent rather
+                    // than order-dependent.
+                    pr.position = tgt; pr.rotation = rot1 * lr[i];
+                    pr.velocity = vel; pr.angularVelocity = Vector3.zero;
+                    snapped++; if (err > worst) worst = err;
+                }
+                if (snapped > 0)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[place] {snapped} of {n} part(s) did not follow the assembly move (worst {worst:0.00} m) "
+                        + "— snapped back. Left alone, AeroPart.CheckAttachment detaches at 0.50 m.");
+            }
+            catch (Exception e)
+            {
+                WTMouseAimPlugin.Log.LogWarning("[place] assembly audit failed (placement itself stands): " + e.Message);
+            }
+
             Physics.SyncTransforms();                              // parts hang off transforms, not body poses
         }
 

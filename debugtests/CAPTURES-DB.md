@@ -108,7 +108,7 @@ Notable `sc_*` (all fail-soft on the mod side, so a NULL is "could not read it",
 **`sc_maxSpeed` is `aircraftParameters.maxSpeed`, a NORMALIZER that reads a flat 600 for every fast
 jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
 
-### `segments` — one row per (capture, segment) (61 columns: 12 fixed + 49 dynamic metrics)
+### `segments` — one row per (capture, segment) (62 columns: 12 fixed + 50 dynamic metrics)
 
 | column | type | provenance |
 |---|---|---|
@@ -124,7 +124,7 @@ jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
 | `unknown_tag` | INTEGER | the tag matched no `TAG_TYPE_RULES` entry → scored with the generic set only (2 rows) |
 | `warnings` | TEXT | scorecard's RAILED/SLACK/unknown-tag prose, newline-joined. NULL = clean. **Match on the flags above, never on this prose** |
 | `skipped` | TEXT (JSON) | `{metric: reason}` for metrics that could not be computed. See [NULL idiom 3](#3-not-applicable-vs-not-measured--segmentsskipped) |
-| 49 metric columns | REAL | **`scorecard.score_run()`**, named exactly as scorecard names them |
+| 50 metric columns | REAL | **`scorecard.score_run()`**, named exactly as scorecard names them |
 
 ### `rows` — raw recorder rows, opt-in
 
@@ -151,7 +151,7 @@ a number below the type's `n` means it exists but was skipped or is conditional.
 
 | metric (group) | oblique_step<br>4894 | sustained_turn<br>241 | micro/az/el_step<br>299 | fine_track<br>16 | reversal/astern<br>25 | unknown<br>124 | arm<br>1482 |
 |---|---|---|---|---|---|---|---|
-| `aoaPeakDeg` `gPeak` `gSustained` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
+| `aoaPeakDeg` `gPeak` `gSustained` `gJitterG` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
 | `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` `authBank` `authAoa` `authStick` `authorityUsedFrac` | all | all | all | all | all | 120–124¹ | — |
 | `blendRailPct` | all | 217¹ | 64¹ | — ¹ | — ¹ | 1¹ | — |
 | `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` | all | all | all | all | all | all | — |
@@ -427,3 +427,9 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
    reword away from silently marking the corpus clean.
 10. Assuming a metric column exists. It is created only when some capture produced it; `no such
     column` means "never flown", not "typo".
+11. Comparing replicate spread across batches without checking `gJitterG` first. The game's world
+    origin follows the OPERATOR'S CAMERA (`OriginShift`, decompile `:19361`), and a lane's physics
+    jitter — which is the dominant term in `terminalOffDeg` scatter (r = 0.886 over 9 lanes,
+    `R33-FINDINGS.md`) — moves with it, **mid-batch, without warning and in opposite directions on
+    different lanes**. Check the per-*replicate* series, not the mean: R33's flip is invisible in a
+    lane average. A noise floor quoted without its `gJitterG` is one session's camera position.

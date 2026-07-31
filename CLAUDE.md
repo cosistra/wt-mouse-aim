@@ -281,6 +281,35 @@ Machine-specific paths are written as placeholders:
     is deferred to end-of-frame, so a FixedUpdate caller still simulates with live stretched joints,
     and destroying components silently invalidates anything the game cached (Unity reports a destroyed
     object as `null` without throwing).
+    **v0.96.1 — AND `MoveAssembly` AUDITS ITSELF, because a part it does not reach is a DETACHED part
+    one fixed step later.** Know this before touching that loop. For an aircraft, every `partLookup`
+    entry is an `AeroPart` (only `AeroPart` and `ShipPart` derive from `UnitPart` — `:73900`/`:81119` —
+    and `SetComplexPhysics` casts each entry unconditionally, `:61278`), and an `AeroPart` has exactly
+    **one** way to leave: `AeroPart.CheckAttachment` (`:74158-74174`), a **purely geometric** test —
+    0.5 m between the part's transform and the pose recorded at `Awake`, in its parent part's frame,
+    with no force, no damage and no joint break anywhere in it. The damage route is closed to it by
+    construction (`UnitPart.TakeDamage`: `… && !(this is AeroPart)`, `:84095`), and so is over-G:
+    `Pilot` is **not** a `UnitPart` (`:85409`) and is not in `partLookup`, so `TakeGForceDamage` cannot
+    move the detached ratio at all. **So "the airframe shed a part" is always a POSITION bug, never a
+    load one.** It reads as intermittent because the detector is a **sampler**: `Aircraft.PartChecker`
+    (`:59984-60005`, driven from `LocalSimFixedUpdate` `:61803`) checks **one part per fixed step,
+    round-robin**, so an excursion lasting *k* steps is caught with probability ≈ *k*/N — which is why
+    four byte-identical Darkreach replicates in R33 produced exactly one abort (ratio 0.029 = 1/35, two
+    fixed steps after the placement) and why 30 batches saw nothing: nothing read the ratio before
+    v0.96. The skip in the loop (`pr == rb` ⇒ "it rides the root's transform") is an **assumption about
+    prefab hierarchy shape that this code cannot check** — `AeroPart.CreateRB` (`:74227`) unparents
+    every part it hands a body to — so rather than reason about it, the move re-imposes itself on the
+    outcome: snapshot every part's pose in the **root body's frame** first (a frame the rigid map
+    leaves unchanged BY DEFINITION, so it is the same definition of the move, not a second one), then
+    snap back anything past `PartSnapTol` = **0.10 m** (5× inside the game's 0.5 m; ~4× above the float
+    grain at the 60–100 km world coordinates a drone lane flies at). A part with its own body is moved
+    by `rb.position/rotation`; one sharing the root's is moved by its **transform**, which is the only
+    handle it has. The whole pass is wrapped — an unaudited placement is still a correct placement, and
+    this must never throw into a fixed step. **The warning line is the measurement, not decoration**:
+    `[place] N of M part(s) did not follow the assembly move (worst X.XX m) — snapped back.` If it
+    never fires, nothing is being left behind and a future shed part has a different cause; grep
+    `[place]` before theorising. Deliberately NOT fixed here: the pre-existing joint stretch is still
+    carried through the move (millimetres in level flight, against a 0.5 m threshold).
     **v0.84 — `PlaceOnCondition` is a full RESET, and the harness interleaves A/B arms.** Ten identical
     replicates of one card came out non-exchangeable (`terminalOffDeg` vs run index r = −0.824; a
     first-half/second-half split of one *unchanged* arm beat its own detection threshold, i.e. doing
@@ -757,6 +786,12 @@ cp bin/Release/NuclearOption-MouseAim.dll "<game>/BepInEx/plugins/WTMouseAim/"  
 Diagnostics are **instrument-first** — the mod tells you what it did rather than you guessing:
 - **Anomaly log.** When a commanded stick output looks wrong the mod writes one compact line to
   `LogOutput.log`. Grep it after a flight for `[anomaly]`, `[anomaly:trail]`, and `[maneuver]`.
+- **`[place]` — the safe teleport reporting on itself (v0.96.1).** One line, only when it fires:
+  `[place] N of M part(s) did not follow the assembly move (worst X.XX m) — snapped back.` Shared by
+  the card reset and the F4 sandbox, since both go through `MoveAssembly`. **Grep this before
+  theorising about a shed part**: an aircraft's parts can only detach on geometry (see the
+  `ScenarioPlayer.cs` bullet), so this line is the difference between "the placement left something
+  behind" and "something else moved it".
   Leave `AnomalyLogging` **on**; it's cheap and it's the primary bug-report artifact.
 - **Verbose trace.** `DebugLogging` dumps per-tick detail — very noisy; turn it on only when
   chasing a specific issue, off otherwise.
@@ -791,7 +826,18 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   same `warnings` channel — whole-capture, not per-segment (detachment is permanent, so a per-segment
   form would just repeat itself), naming the max ratio, the first segment and the `t` it appeared at.
   An absent column (every capture on disk predates it) and the −1 "could not read it" sentinel never
-  warn. **An unrecognised tag prints a WARNING** —
+  warn.
+  **`gJitterG` (added by R33) is the metric to read BEFORE any cross-batch comparison of replicate
+  spread**: mean |Δg| between consecutive samples, per segment, deliberately orthogonal to
+  `gPeak`/`gSustained`. It is not an aero quantity — the game's `Aircraft.gForce` is
+  `|v − vPrev|/(dt·9.81)` off the COCKPIT PART's rigidbody (`:61804`), so it carries the joint
+  solver's noise, and that noise is the **dominant term in `terminalOffDeg` replicate scatter**
+  (r = 0.886, log-log slope 0.82, over 9 lanes and in both directions —
+  [`debugtests/R33-FINDINGS.md`](debugtests/R33-FINDINGS.md)). It is a property of the **session, not
+  the airframe**: the game's world origin follows the OPERATOR'S CAMERA (`OriginShift`, `:19361`),
+  and R33 caught it flipping mid-batch at one instant, widening six lanes 2.2–12x while narrowing
+  four. Read the per-*replicate* series — the flip is invisible in a lane mean — and park the camera
+  for a batch that has to be compared with another. **An unrecognised tag prints a WARNING** —
   never ignore it: the tag vocabulary lives in `ScenarioPlayer.cs` **and in `cards/*.json`**, while the
   tag→metric table lives in `scorecard.py`, with no compile-time link between them. That pair silently
   drifted once already (v0.71: 19 of 21 segments scored as "unknown" with no output at all).
@@ -1111,10 +1157,13 @@ imports `scorecard.py` and reads method bodies out of `Cfg.cs` / `ScenarioPlayer
   asserts the `private static Seg X(…)` factory set is still exactly `{Hold, Walk}` — a third factory
   would carry tags the scan cannot see. This is the half `scorecard.py --selftest` could never cover,
   because that one scans `cards/*.json` only.
-- **Seven source invariants that compile fine when broken.** `SampleFrameTime` called from `Update()`
+- **Eight source invariants that compile fine when broken.** `SampleFrameTime` called from `Update()`
   and **not** `FixedUpdate` (v0.92.1, R27's 223,899 identical rows); `OnPilotStep`'s
   `d.LastStep == Time.fixedTime` guard existing **and** sitting *after* the `p.dead || p.ejected`
-  despawn (v0.90.1, R26); no file calling `MoveAssembly` without `ResetGLoadTrackers`; the
+  despawn (v0.90.1, R26); no file calling `MoveAssembly` without `ResetGLoadTrackers`; **`MoveAssembly`
+  still containing its `PartSnapTol` self-audit, positioned after the root `rb.position` write and
+  before `Physics.SyncTransforms` (v0.96.1, R33 — a part the move misses is a detached part one fixed
+  step later, and neither the removal nor the reorder shows up in a capture)**; the
   `ApplyOverrides → ApplyArm → StartCard` order in `Tick` plus `RestoreOverrides` after `_rec.Stop` in
   **both** `Finish` and `NextCard`; every `.startSpeed` read routing through `ResolveStartSpeed`
   (v0.93; exempting the resolver itself and `Preview`'s deliberate pair-carry); `ForgetState` called

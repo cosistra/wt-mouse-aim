@@ -200,12 +200,25 @@ Across all six cards and all eight airframes:
 
 | mechanism | measured | verdict |
 |---|---|---|
-| AoA limiter | `aoaLimiterActivePct` **0.0 %** on 7 airframes (Darkreach 7.9–15.8 %) | dormant — still never fired on a healthy airframe, in any capture ever taken |
+| AoA limiter | `aoaLimiterActivePct` **0.0 %** on 7 airframes (Darkreach 7.9–15.8 %) | dormant **in this batch**. ⚠ The verdict originally written here — *"still never fired on a healthy airframe, in any capture ever taken"* — is **RETRACTED**, see below |
 | AoA gates | `aoaGU` = `aoaGD` = **1.000** on every sampled segment | never close |
 | AoA recovery bias | `aoaRec` **0.000** on all sampled healthy segments except EW1/FastBomber1 `obDR12` | effectively dormant |
 | below-nose suppression | `bSup` **0.000–0.06**, incl. all four `oblique-below` legs at −20° | dormant even on the card built to exercise it |
 | bank clamp | **0.0 %** on 7 airframes | never reached |
 | **roll-to-align bank pipeline** | `bWt` **median 0.000 on every card, every healthy airframe** | **dormant** — see below |
+
+> **RETRACTION 2026-07-31 — the AoA-limiter row's verdict, not its measurement.** The 0.0% / 7
+> airframes / Darkreach 7.9–15.8% figures are correct **for R28**. The verdict attached to them —
+> *"never fired on a healthy airframe, in any capture ever taken"* — was a corpus-wide claim this
+> batch could not support, and it is false. It was already contradicted **within its own row**
+> (Darkreach at 7.9–15.8%, reclassified away as "not healthy") and then directly by R29 §4.3
+> (`trainer·obUL12`, 11.9% on 8 of 8 replicates, unrailed). Corpus-wide today:
+> `aoaLimiterActivePct` is non-zero on **66** (run, airframe, tag) cells, **23 of them with no railed
+> segment anywhere**, topped by **R33 `Darkreach·obDR6` at 100.0%** (n = 4, `railed = 0`,
+> `aoaPeakDeg` 7.38–7.59 vs a 10° limiter, `authorityUsedFrac` 0.717–0.748). Reproduce:
+> `index-captures.py --query "… GROUP BY run_tag, airframe, tag HAVING avg(aoaLimiterActivePct) > 0"`.
+> **Read this section as a per-batch measurement, which is what it is; the generalisation was the
+> error.** See `LAW-CHARACTERIZATION.md` §1 and `LAW-LEDGER.md` X7.
 
 The bank pipeline is the significant one. Max `bWt` by card, worst case across the seven:
 

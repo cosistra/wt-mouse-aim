@@ -12,32 +12,123 @@ actually know.
 
 ## 1. Where we actually are
 
-> We have 19 test cards. **One** has ever been flown. It was flown on **one** airframe. And that
-> card is **saturated**, so it measures the airframe, not the law.
+**REWRITTEN 2026-07-31 against `debugtests/captures.db`. The paragraph that stood here — *"19 cards,
+one ever flown, on one airframe, and it is saturated"* — described the project as of R21 and was
+still being read as current fifteen batches later. Every number below is `index-captures.py --stats`
+or a query named in place; re-derive rather than trusting this table's age.**
 
 | | |
 |---|---|
-| cards in `cards/` + built-ins | **19** |
-| cards ever flown | **1** (`fixedwing-sweep`) |
-| airframes ever flown *on a card* | **1** (`Multirole1` = KR-67 Ifrit) |
-| airframes the ONE-LAW rule names | **4** (light jet at high q, loaded jet near α, STOL trainer, hovering helo) |
+| cards in `cards/` + built-ins | **34** (31 on disk + `fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) |
+| cards ever flown | **24** distinct ids — **19 of the 31** disk cards, 3 built-ins, 2 ad-hoc recordings |
+| disk cards never flown | **12** — both `alpha-*`, all five `e*`, `oblique-above-c`, both `rotor-*`, both `stol-*` |
+| captures / scored segments / recorder rows | **1 681 / 5 903 / 999 942** across **26** tagged batches R1–R33 |
+| airframes ever flown *on a card* | **10** (every fixed-wing key in `AIRFRAMES.md`; `AttackHelo1` has one hand-flown capture and no card) |
+| airframes the ONE-LAW rule names | **4** (light jet at high q, loaded jet near α, STOL trainer, hovering helo) — **3 of 4 covered**; the hovering helo is still §4 Batch 5, still blocked |
+| segments RAILED corpus-wide | **285 of 5 903 = 4.8%**, and they concentrate in five cards |
 
-And on that one card, in that one regime, three of the law's own mechanisms are measurably **inert**:
+**Saturation is no longer the project's defining constraint — it is a property of five cards.**
+Per-card mean over every scored segment (`GROUP BY card`, `excluded = 0`):
 
-| mechanism | measured | meaning |
+| card | segs | railed | `blendRailPct` | `bankClampActivePct` |
+|---|---|---|---|---|
+| `fixedwing-sweep` | 99 | **86** | 68.2 | 86.7 |
+| `sweep-lowq` | 32 | **32** | 96.3 | 88.6 |
+| `darkreach-05` | 250 | **74** | 30.3 | 26.7 |
+| `sweep-slow` / `sweep-creep` / `sweep-step` | 160 | **0** | **0.0** | **0.0** |
+| the whole `oblique-*-c` family (R29+R33) | 1 772 | **6** | ≤ 2.7 | ≤ 1.3 |
+
+§5's prediction — *"`sweep-slow` is the workhorse, `fixedwing-sweep` was saturated"* — is confirmed:
+`blendRailPct` is exactly 0.0 on all 160 `sweep-slow`/`-creep`/`-step` segments. **The unsaturated
+data Q3 and Q4 were waiting on exists.** What is now scarce is not clean captures, it is *attribution*
+— five of the twelve never-flown cards are the `e*` A/B set.
+
+**The three "inert mechanism" claims, re-checked:**
+
+| mechanism | the old claim | status today |
 |---|---|---|
-| bank pipeline weight | `blendRailPct` **93–100%** | `lateralHold` rails, `blendWeight = 1`, so `eFine` weight is exactly zero |
-| fine integrator | `iPitch` **±0.001** vs a 0.12 cap, for a whole 30 s turn | the anti-residual term never winds |
-| AoA path | `aoaLimiterActivePct` **0 in every capture ever taken** | the turn-rate cap binds first; the α machinery has never fired |
-| actuator | `bankClampActivePct` **96.9%**, `turnRateCapActivePct` **96.9%** | at the stop; a gain change *physically cannot* move the metrics |
+| bank pipeline weight | `blendRailPct` 93–100% | **true only of `fixedwing-sweep`/`sweep-lowq`.** Corpus-wide it is 0.0 on the modern oblique/sweep families — #21's rail is *dormant*, not permanent. R28: 0 of 1 344 healthy segments; R29: 0 of 1 740 |
+| fine integrator | `iPitch` ±0.001 vs a 0.12 cap | **unchanged** (R21, 30 s turn) — but v0.83's `IntegralStallGate` was the fix for it and has never been A/B-ed unsaturated (`e*` set, never flown) |
+| AoA path | *"`aoaLimiterActivePct` **0 in every capture ever taken**"* | **FALSE — see below.** This is the correction that reopens Batch 3 |
 
-That last row is the one that matters most. **A saturated segment cannot show a gain change.** Every
-A/B we have run — v0.83's `RelativeTurnLead`, crewed and on the drone — was run against an actuator
-at its stop. Those results are real but they measure the *clamp*, not the loop.
+Only the fourth row of the old table survives intact, and only where it applies: on a **railed**
+segment a gain change physically cannot move the metrics, so read `RAILED` before any number.
 
-So the honest state is: we have a validated instrument, a nearly complete card grid, and almost no
-data. What was missing was the ability to run the grid unattended. **That landed in v0.90.** The
-suite below is not new work to invent — it is the grid that already exists, finally runnable.
+### The AoA path has fired, repeatedly, and once cleanly
+
+`aoaLimiterActivePct` is non-zero on **66** (run, airframe, tag) cells. Of those, **23 contain no
+railed segment at all**; **32** have *some* unrailed segment — see the note on the two counts below.
+Highest-occupancy unrailed cells:
+
+| run | airframe · tag | `aoaLimiterActivePct` | n | cell fully unrailed |
+|---|---|---|---|---|
+| **R33** | **`Darkreach` · `obDR6`** | **100.0%** | 4 | **yes** |
+| R26 | `FastBomber1` · `turn360` | 82.4% | 4 of 8 | no — other 4 railed |
+| R33 | `Darkreach` · `obDL6` | 76.8% | 4 | **yes** |
+| R11 / R18 | `trainer` / `Multirole1` · `az150` | 55.8% / 55.4% | 1 / 2 | yes |
+| R33 | `Darkreach` · `obUL6` | 46.5% | 4 | **yes** |
+| R29 | `Darkreach` · `obDL12` | 37.1% | 2 | yes |
+| R29 | `trainer` · `obUL12` | 11.9% on **8 of 8** replicates | 8 | yes |
+
+**The 23-vs-32 distinction, because both numbers are correct and they answer different questions.**
+`WHERE railed = 0 GROUP BY (run, airframe, tag)` keeps the *unrailed segments of a partly-railed
+cell* and returns **34** — **32** excluding the two legacy no-sidecar `unsegmented` cells (R1, R2),
+which is where the 32 came from. `GROUP BY … HAVING max(railed) = 0` demands the whole cell be clean
+and returns **23**. Prefer **23** when the question is "is there a cell an A/B could run in" — a cell
+whose sibling replicates railed is not a usable comparison group — and 32 when the question is "how
+much unrailed evidence exists at all". The R26/R27 `turn360` family (79–99%) is in the 32 and not in
+the 23, and its loud numbers are *no signal*: bank clamp 79–97%, `authorityUsedFrac` 0.95–1.08.
+
+**R33 produced the first clean, high-occupancy, unsaturated live-AoA capture in the project's
+history.** `Darkreach` on `oblique-6-c`, 4 complete replicates, **0 railed segments in the entire
+77-capture batch**, and a monotone gradient across the diamond that repeats to within 3%:
+
+```
+obDR6  100.0%      aoaPeak 7.38-7.59   authUsed 0.717-0.748   terminalOff 0.205-0.315
+obDL6   72.7-84.4%                     authUsed 0.543-0.554
+obUL6   44.5-51.6%                     authUsed 0.538-0.549
+obUR6   25.0-26.6%                     authUsed 0.476-0.484
+```
+
+(The lane's 5th replicate aborted on `airframe damage (detached ratio 0.029)`; it is excluded above.
+`R29 trainer·obUL12` at 11.9% was the first unrailed activation of any size — R29 §4.3 — but it is
+too small to A/B against. 100% on four replicates is not.)
+
+**Why it appeared now, mechanistically — this is not luck and it is repeatable.** v0.96 closed #41:
+`startSpeedCorner` now resolves against the FBW's `cornerSpeed` instead of the AI's, which dropped
+`Darkreach`'s entry on this card from **171 m/s (R29) to 95 m/s (R33)** — 0.556×, the largest move on
+the roster — at the same 6° demand. Low q, same demand, so the wing reaches its 10° alpha ceiling
+before anything else binds. `trainer` moved 152 → 123.5 m/s the same way.
+
+**What this unblocks: §4 Batch 3 is no longer gated on "can we provoke the regime at all".** It can
+be. Batch 3's stated worry — *"if AoA still never approaches the limiter, that is the finding"* — is
+**answered in the negative**: it does approach it, on a fixed-wing airframe, unrailed, reproducibly.
+The cheap first move is not `alpha-steps` (never flown, 8 000 m, unvalidated) but **re-flying
+`oblique-6-c` on `Darkreach` with more replicates**, because it already lands the regime unrailed at
+a known entry condition.
+
+**One caveat on reading those metrics.** `alpha_metrics` — `aoaAboveCeilingPct`, `qSchedMin`,
+`gateMinUp/Dn`, `commandIntoCeilingPct`, `aoaRecoverActivePct` — is computed **only for
+`alpha_step` / `alpha_hold` segments** (`scorecard.py:1143`). `obDR6` is an `oblique_step`, so none
+of them exist on the very capture that provoked the regime. `aoaLimiterActivePct` and `aoaPeakDeg`
+(from `aoa_g_metrics`, which runs on every segment) are all the corpus currently has there. Either
+give the re-fly an `alpha*` tag, or widen the gate — but do not read "no `aoaAboveCeilingPct`" as
+"the ceiling was not crossed".
+
+**One thing NOT corrected, because it is true.** CLAUDE.md's Conventions section states that the
+**game FBW's** alpha limiter is gated `if (num2 < 1f)` (decompile `:64860`) and is therefore inactive
+above corner q. That is verified and stands. It is a different object: `aoaLimiterActivePct` is a
+**mod-side** metric reading the mod's OWN ceiling gates (`aoaGU`/`aoaGD` below 0.999,
+`scorecard.py:534-537`). The two are compatible and were being conflated — the mod's AoA block firing
+at 100% while the game's is inactive is exactly CLAUDE.md's point that *"the mod's own AoA block is
+the ONLY alpha protection in the loop at card speeds"*, now with a capture behind it.
+
+### What the honest state is now
+
+A validated instrument, a 31-card grid of which 19 have flown, ~1 700 captures, 10 airframes, and the
+unsaturated baseline Q1/Q2 asked for. **The bottleneck moved from "we cannot fly the grid" to "we
+have not run the attribution set."** All five `e*` cards exist, declare their own arm and fleet, and
+have never been launched.
 
 ---
 
@@ -163,11 +254,26 @@ ScenarioCardSet alpha-steps, alpha-sweep
 ≈ 20 min. **Gate on `aoaAboveCeilingPct > 0` at all.**
 
 `alpha-steps` uses ±45° pitch *steps* — a demand the turn-rate cap does not bound — which is why it,
-not `alpha-sweep`, is the discriminating card. If AoA still never approaches the limiter, that is
-**not a card failure, it is the finding**: the law caps turn rate so far below the airframe's
-capability that a whole region of the envelope is unreachable by construction. On a 9 g airframe
-peaking at 7.7° of AoA against a 27° limiter, that is the most consequential thing this suite could
-turn up, and it would reframe the next month of work from "tune the loop" to "raise the ceiling".
+not `alpha-sweep`, is the discriminating card.
+
+**UPDATED 2026-07-31 — this batch is no longer gated on "can the regime be reached".** §1 shows it
+can: R33 `Darkreach·obDR6`, `aoaLimiterActivePct` **100.0%** on 4 unrailed replicates, `aoaPeakDeg`
+7.4–7.6° against a 10° limiter, at a 95 m/s entry. The old worry below — *"if AoA still never
+approaches the limiter, that is the finding"* — is **answered in the negative** and should no longer
+be carried as the batch's headline risk. What remains open is what the law *does* there, which is
+what `commandIntoCeilingPct` / `qSchedMin` / `gateMinUp`/`Dn` measure.
+
+Two consequences for how to run it:
+- **Cheapest first move is not `alpha-steps`.** Re-fly `oblique-6-c` on `Darkreach` with more
+  replicates — it already lands the regime unrailed, at an entry condition that has flown.
+- **`alpha_metrics` is gated to `alpha_step`/`alpha_hold` tags** (`scorecard.py:1143`), so the R33
+  evidence carries none of those metrics. Any re-fly meant to answer *this* batch's question needs an
+  `alpha*` segment tag, or the gate needs widening — decide before flying, not after.
+
+The original stake, retained because it is still the shape of the risk: were the limiter unreachable,
+the finding would be that the law caps turn rate so far below the airframe's capability that a whole
+region of the envelope is unreachable by construction, reframing the next month of work from "tune
+the loop" to "raise the ceiling". On the `Darkreach` at least, it is reachable.
 
 ### Batch 4 — ATTRIBUTION (A/B, **fleet-wide since v0.94/v0.96**)
 
@@ -193,8 +299,30 @@ no comparability — neither has ever been flown. `cards/TOMORROW.md` is the ord
 | E1b | `Control/AlignRateLead` | same | separate arm — it is also a 64% roll-damping change, unattributable if armed together |
 | E2 | `Control/RelativeTurnLead` | `sweep-slow` | the v0.83 A/B re-run *unsaturated*; the existing result measures the clamp |
 | E3 | `Control/MarkerRateFeedForward` | `sweep-slow`, `sweep-creep` | above the rail its roll contribution is identically 0.0000 |
-| E4 | **#21** roll-to-align channel (`lateralHold` ⇒ `blendWeight`) as the arm — the **precursor** | `darkreach-05` geometry | R32 §4: 34–56° of `targetBank` at \|`azErr`\| < 5° on a card whose largest step is 0.35°, on **0 of recs 01–31** and **12 of recs 32–63**. Those 31 clean replicates are the baseline, on the same airframe and card. **Fly this before E5** — see #45. |
+| E4 | **#21** roll-to-align channel (`lateralHold` ⇒ `blendWeight`) as the arm — the **precursor** | `darkreach-05` geometry | R32 §4: 34–56° of `targetBank` at \|`azErr`\| < 5° on a card whose largest step is 0.35°, on **0 of recs 01–31** and **12 of recs 32–63**. Those 31 clean replicates are the baseline, on the same airframe and card. **Fly this before E5** — see #45. **⚠ AS WRITTEN THIS CANNOT RETURN A RESULT — see the note below.** |
 | E5 | **#45** `schedFloor`, expressed relative to a probed quantity | same | Only after E4. Fixing the stand-down first makes *some* departures survivable, which is worse than a departure that is legible. |
+
+> **E4 is broken as specified (verified 2026-07-31, `captures.db`). Do not fly it expecting a
+> result; it needs a redesign that is deliberately NOT attempted here.**
+>
+> E4 arms the roll-to-align channel on `darkreach-05`, using recs 01–31 as the clean baseline. But
+> that channel is **already at zero weight** across the whole of that baseline:
+>
+> | `darkreach-05` | segs | RAILED | `blendRailPct` mean | max | `bankClampActivePct` |
+> |---|---|---|---|---|---|
+> | recs 01–31 (the "clean baseline") | 124 | **0** | **0.000** | **0.000** | **0.0** |
+> | recs 32–63 (post-onset) | 126 | **74** | 60.1 | 100.0 | 52.9 |
+>
+> `blendRailPct` is exactly 0.000 on **all 124** baseline segments — the arm would suppress a channel
+> contributing nothing, so arm A and arm B are the same flight and the A/B returns a null that reads
+> as "#21 is not the precursor". Meanwhile the half where the channel *is* live is the departed half:
+> **20 of its 32 captures** carry at least one railed segment (74 of 126 segments), and a railed
+> segment is no signal by the rule at the top of §6. There is no window in this card where the arm
+> both matters and is measurable.
+>
+> The measurement E4 actually wants is *the onset* — the transition between those two halves — and a
+> before/after A/B on a card that only departs after ~35 replicates is not the instrument for it.
+> Redesigning it is out of scope for this note; it is flagged so nobody spends a batch on it first.
 
 **#20 no longer has a row here, deliberately.** Its A/B was scoped as "unlock a dormant branch" and
 that scoping is retired (§7): the fix moves 0.45% of corpus rows, all at the boundary, so an A/B

@@ -3,6 +3,61 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.96.1
+
+**The placement now checks that the whole aircraft came with it.** One file, one method, **no
+control-law change** — captures stay comparable with 0.96.0.
+
+### The reset was shedding parts (backlog #51)
+
+R33 aborted a Darkreach replicate on its **first sample** with `airframe damage (detached ratio
+0.029)` = **1 part of 35**, two fixed steps after `PlaceOnCondition`, off four byte-identical
+replicates that flew clean at 1.0–2.1 g and 7.8° AoA. The user's in-game report is the same event seen
+from the cockpit: *"they're dropping out of the sky like flies… their engines are kind of falling
+out."*
+
+**What the mechanism is, from the decompile.** For an aircraft, everything in `partLookup` is an
+`AeroPart` (only `AeroPart` and `ShipPart` derive from `UnitPart` — `:73900`/`:81119` — and
+`SetComplexPhysics` casts every entry unconditionally, `:61278`), and an `AeroPart` has exactly **one**
+way to detach: `AeroPart.CheckAttachment` (`:74158-74174`), a **purely geometric** test — 0.5 m between
+the part's transform and the pose recorded at `Awake`, measured in its parent part's frame. No force,
+no damage, no joint break is involved. The damage route is closed to it by construction:
+`UnitPart.TakeDamage`'s detach clause reads `&& !(this is AeroPart)` (`:84095`). So this class of
+failure is **not** an over-G, a stall, or a joint spike — it is one part being in the wrong *place*.
+
+**Why it looked intermittent.** `Aircraft.PartChecker` (`:59984-60005`, driven from
+`LocalSimFixedUpdate` `:61803`) checks **one part per fixed step, round-robin**. It is a sampler: an
+excursion lasting *k* steps is caught with probability ≈ *k*/N and missed otherwise. Four identical
+placements producing exactly one abort is that distribution, not four different placements. It also
+explains 30 batches of silence — nothing read the detached ratio before 0.96.0 added `dmgFrac`, and a
+drone that shed a part simply kept flying and wrote a capture that scored fine.
+
+**The change.** `MoveAssembly` now **audits itself**. It snapshots every part's pose in the **root
+body's frame** before the move — a frame the rigid map leaves unchanged *by definition*, so this is the
+same definition of the move rather than a second one — and afterwards puts back anything that did not
+follow, above `PartSnapTol` = 0.10 m (5× inside the game's 0.5 m, ~4× above the float grain at the
+60–100 km world coordinates a drone lane flies at). It covers the case the skip below it cannot see:
+a part that shares the root rigidbody (zero mass, or merged in simple physics) is skipped on the
+assumption that it rides the root's *transform*, which holds only while it is still a descendant of it
+— and `AeroPart.CreateRB` (`:74227`) unparents every part it hands a body to. That is prefab-shape
+data the mod cannot read, so the fix is outcome-based instead of structural. Fail-soft: the audit is
+wrapped, and a throw leaves the placement itself standing.
+
+**The warning line is the measurement.** `[place] N of M part(s) did not follow the assembly move
+(worst X.XX m) — snapped back.` If it never fires, nothing is being left behind and the excursion has
+another source; if it fires, it names how many parts and how far. Both callers of the safe-teleport
+pair get it — it lives in the shared primitive, not in either caller.
+
+**Not changed, deliberately:** the pre-existing joint stretch is still carried through the move (it is
+millimetres in level flight against a 0.5 m threshold); no per-airframe anything; no G-limiter (see
+Conventions — over-G damages the pilot, never the airframe, so it cannot produce a detached ratio at
+all: `Pilot` is not a `UnitPart` (`:85409`) and is not in `partLookup`).
+
+- `check-architecture.py` gains the invariant: `MoveAssembly` must contain the `PartSnapTol` pass, and
+  it must sit **after** the root `rb.position` write (the pose it measures against) and **before**
+  `Physics.SyncTransforms` (so a healed part reaches PhysX in the same call). Both orderings compile
+  fine when broken and neither shows up in a capture. `--selftest` covers removal and reordering.
+
 ## 0.96.0
 
 **The harness can now tell a broken airframe from a broken control law, the corner-relative entry

@@ -334,6 +334,32 @@ def source_invariants(sources: dict) -> list:
                 f"both halves were learned by destroying the airframe (see ScenarioPlayer.cs)."
             )
 
+    # ...and MoveAssembly must AUDIT ITSELF afterwards (v0.96.1). A part the move does not reach is
+    # not a cosmetic miss: AeroPart.CheckAttachment detaches purely on geometry (0.5 m from the pose
+    # recorded at Awake, in the parent part's frame — no force, no damage), and it samples ONE part
+    # per fixed step round-robin, so a miss shows up as an intermittent shed part rather than a
+    # reproducible one (R33: Darkreach, ratio 0.029 = 1/35, two fixed steps after a placement, off
+    # four byte-identical replicates). The audit must sit AFTER the root write — that is the pose it
+    # measures against — and BEFORE Physics.SyncTransforms, so a healed part is pushed to PhysX in
+    # the same call. Both orderings compile fine when broken and neither shows up in a capture.
+    mv = method_body(scen, r"internal static void MoveAssembly\([^)]*\)")
+    if mv is None:
+        p.append("ScenarioPlayer.MoveAssembly not found — has the safe-teleport primitive moved?")
+    else:
+        i_root, i_tol, i_sync = mv.find("rb.position"), mv.find("PartSnapTol"), mv.find("Physics.SyncTransforms")
+        if i_tol < 0:
+            p.append(
+                "ScenarioPlayer.MoveAssembly no longer checks that every part followed the move "
+                "(the PartSnapTol pass is gone). A part left behind is a DETACHED part one fixed "
+                "step later — AeroPart.CheckAttachment detaches on 0.5 m of geometry alone."
+            )
+        elif not (0 <= i_root < i_tol < i_sync):
+            p.append(
+                "ScenarioPlayer.MoveAssembly's part audit is out of order. It must run AFTER the "
+                "root rb.position write (the pose it measures against) and BEFORE "
+                "Physics.SyncTransforms (so a healed part reaches PhysX in the same call)."
+            )
+
     # --- 4. card setup order in Tick ----------------------------------------------------------
     # ApplyOverrides -> ApplyArm -> StartCard, and RestoreOverrides AFTER _rec.Stop. Arm second so
     # the sweep beats a card that pins its own swept knob; both before the recorder opens (and the
@@ -724,6 +750,15 @@ def selftest() -> int:
             StartCard(ac);
         }
 
+        internal static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
+                                          Vector3 dPos, Quaternion rot1, Vector3 vel)
+        {
+            ResetGLoadTrackers(ac);
+            rb.position = pivot + dPos;
+            if (err > PartSnapTol) { pr.position = tgt; }
+            Physics.SyncTransforms();
+        }
+
         private void Finish(string reason)
         {
             _rec.Stop(reason);
@@ -768,6 +803,11 @@ def selftest() -> int:
                   'if (d.LastStep == Time.fixedTime) return;\n            if (p.dead || p.ejected) { Despawn(d, "x"); return; }') == 1
     # 3. half the safe-teleport primitive.
     assert broken("PlayerSpawn.cs", "ResetGLoadTrackers(ac); ", "") == 1
+    # 3b. MoveAssembly's self-audit: removed, and moved out of order (v0.96.1).
+    assert broken("ScenarioPlayer.cs", "if (err > PartSnapTol) { pr.position = tgt; }\n", "") == 1
+    assert broken("ScenarioPlayer.cs",
+                  "rb.position = pivot + dPos;\n            if (err > PartSnapTol) { pr.position = tgt; }",
+                  "if (err > PartSnapTol) { pr.position = tgt; }\n            rb.position = pivot + dPos;") == 1
     # 4. card setup order, both halves.
     assert broken("ScenarioPlayer.cs", "ApplyOverrides(_card);\n            ApplyArm();",
                   "ApplyArm();\n            ApplyOverrides(_card);") == 1

@@ -541,8 +541,21 @@ def aoa_g_metrics(rows, cols):
         gs = [r.get("g", 0.0) for r in rows]
         m["gPeak"] = max(gs)
         m["gSustained"] = statistics.median(gs)  # median: robust to brief peaks, unlike a mean
+        # gJitterG — mean |dg| between consecutive SAMPLES. Not an aero quantity: the game's
+        # `Aircraft.gForce` is |v - vPrev| / (fixedDeltaTime * 9.81) taken off the COCKPIT PART's
+        # rigidbody (decompile :61804-61806), so under complex physics it carries whatever the
+        # multi-rigidbody joint solver is doing, and the recorder samples it at ~15-20 Hz — well
+        # under any structural rate — so this is an ALIASED read of high-frequency solver noise,
+        # not a spectrum. It is here because that noise is the dominant term in replicate scatter
+        # and it is NOT a property of the airframe or the flight condition: R33 measured it
+        # changing 12x on one lane, at one instant, with entry speed / AoA / authority unmoved,
+        # and per-lane replicate stdev followed it in both directions (r = 0.886 over 9 lanes,
+        # log-log slope 0.82 — debugtests/R33-FINDINGS.md). Read it as "how noisy was this lane's
+        # physics while this segment flew", i.e. whether the cell can support an A/B at all.
+        m["gJitterG"] = (statistics.fmean([abs(gs[i] - gs[i - 1]) for i in range(1, len(gs))])
+                         if len(gs) >= 2 else None)
     else:
-        skipped["gPeak"] = skipped["gSustained"] = "missing column: g"
+        skipped["gPeak"] = skipped["gSustained"] = skipped["gJitterG"] = "missing column: g"
     return m, skipped
 
 
@@ -857,11 +870,25 @@ BLEND_RAILED = 0.999   # bWt at/above this = lateralHold railed, eFine weight 0 
 def alpha_metrics(rows, cols, fbw):
     """Did the card reach the AoA ceiling, and what did the law do there? (metrics, skipped).
 
-    This block exists because `aoaLimiterActivePct` was 0 in EVERY segment of every card ever run
-    (INSTRUCTOR-LOOP.md §3) — the "loaded jet mushing near its alpha limit above corner speed" case
-    the ONE-LAW rule demands has never been exercised, so nothing downstream of it has ever been
-    measured either. On an alpha_* segment `aoaLimiterActivePct == 0` is not a good score, it means
-    THE CARD FAILED TO PROVOKE THE REGIME and every number here is about some other flight.
+    This block was written on the premise that `aoaLimiterActivePct` was 0 in EVERY segment of every
+    card ever run (INSTRUCTOR-LOOP.md §3). THAT PREMISE IS FALSE and was corrected 2026-07-31: the
+    metric is non-zero on 66 (run, airframe, tag) cells, 23 of them with no railed segment anywhere,
+    topped by R33 `Darkreach.obDR6` at 100.0% on 4 unrailed replicates (aoaPeakDeg 7.4-7.6 vs a 10
+    limiter, at a 95 m/s entry). See LAW-CHARACTERIZATION.md 1.
+
+    THE DESIGN SURVIVES THE CORRECTION, and deliberately was not changed with the comment: the
+    alpha_* cards still need these eight metrics, nothing here reads the false premise as an input,
+    and the block is correct wherever it runs. Only the justification was wrong.
+
+    WHAT THE CORRECTION DOES EXPOSE, for whoever touches this next: the block is called ONLY for
+    alpha_step / alpha_hold (see compute_segment), and the regime is in fact being provoked on
+    oblique_step. So on the one clean capture that reached the ceiling, none of these metrics exist
+    — aoa_g_metrics' aoaLimiterActivePct / aoaPeakDeg are all there is. Either tag the re-fly
+    alpha*, or widen the gate. Do NOT read a missing aoaAboveCeilingPct as "the ceiling was not
+    crossed"; on a non-alpha segment it was never computed.
+
+    On an alpha_* segment `aoaLimiterActivePct == 0` still means THE CARD FAILED TO PROVOKE THE
+    REGIME and every number here is about some other flight — that reading is unaffected.
       aoaCeilDeg            - the ceiling the mod itself uses, mirrored from ChaseController.Apply
                               (alphaLimiter - min(4, 0.15*alphaLimiter)), so "past the ceiling" here
                               means the same thing it means in the law. Skipped pre-v0.55 (no header).
@@ -1339,9 +1366,17 @@ def selftest():
     assert abs(m["aoaPeakDeg"] - 12.0) < 1e-9, m
     assert abs(m["aoaLimiterActivePct"] - 25.0) < 1e-9, m   # 1 of 4 rows gated
     assert abs(m["gPeak"] - 8.0) < 1e-9 and abs(m["gSustained"] - 4.5) < 1e-9, m
+    # gJitterG = mean |dg| over the 3 consecutive pairs: |8-3|, |4-8|, |5-4| -> (5+4+1)/3 = 10/3.
+    assert abs(m["gJitterG"] - 10.0 / 3.0) < 1e-9, m
+    # A perfectly smooth g at the SAME peak/median must read 0 — the point of the metric is that it
+    # is orthogonal to gPeak/gSustained, which is why a lane can get noisier at an unchanged load.
+    sm, _ = aoa_g_metrics([{"aoa": 1.0, "g": 4.5} for _ in range(4)], {"aoa", "g"})
+    assert sm["gJitterG"] == 0.0, sm
+    assert aoa_g_metrics([{"aoa": 1.0, "g": 4.5}], {"aoa", "g"})[0]["gJitterG"] is None
     assert skipped == {}, skipped
     m2, skipped2 = aoa_g_metrics(rows, {"aoa"})
     assert "aoaLimiterActivePct" in skipped2 and "gPeak" in skipped2, skipped2
+    assert "gJitterG" in skipped2, skipped2
 
     # cfg_params: numeric knobs off the '# config' line; non-numeric values must be absent, not crash.
     cp = cfg_params({"cfg": "law=EvolvedLegacy sens=3.0 maxBank=72 leadT=0.65 mrFF=1 trGain=0.92"})

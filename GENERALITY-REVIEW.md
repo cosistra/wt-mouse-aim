@@ -326,7 +326,18 @@ the v0.85 flight test knowing `AlignRateLead` is a 64% damping change, not only 
 Two smaller siblings are recorded in the findings doc: `belowSuppress`'s residual `bigTurn` loop
 (inert below `off` = 19.3°, live above — so v0.85's `elDn` hang at 6.92° is safe and its *entry* is
 not), and `_pitchEff × _alphaSchedFilt` compounding to **0.09** where each is documented as flooring
-at 0.30 — unfalsifiable on a corpus where `aoaLimiterActivePct` is 0 in every capture ever taken.
+at 0.30.
+
+> **CORRECTED 2026-07-31.** That last item used to read "*unfalsifiable on a corpus where
+> `aoaLimiterActivePct` is 0 in every capture ever taken*". **The premise is false and the item is
+> falsifiable today.** `aoaLimiterActivePct` is non-zero on **66** (run, airframe, tag) cells in
+> `captures.db`, **23** of which contain no railed segment at all. The usable one is **R33
+> `Darkreach·obDR6`: 100.0% occupancy, `railed = 0`, n = 4**, `aoaPeakDeg` 7.38–7.59° against a 10°
+> `alphaLimiter`, `authorityUsedFrac` 0.717–0.748 — i.e. the α machinery is live and the actuator is
+> *not* at its stop, which is exactly the pair this finding needs. R27's `turn360loq` family (78.7–
+> 97.7% on four airframes) also qualifies on occupancy but is RAILED, so read it as no signal.
+> The regime appeared because v0.96's #41 fix dropped `Darkreach`'s entry on `oblique-6-c` from
+> 171 → 95 m/s. Do not carry "unfalsifiable" forward; the capture exists.
 
 ### 18. HIGH — the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs — OPEN (MEASURED, R32)
 

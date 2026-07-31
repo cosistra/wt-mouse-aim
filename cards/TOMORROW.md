@@ -146,10 +146,20 @@ feed-forward never firing.
 
 ## 6–7. `alpha-*` — the AoA ceiling, never once exercised
 
-Two launches, ~11 min, 128 captures. `aoaLimiterActivePct` is **0 in every capture this project has
-ever taken**, while the ONE-LAW rule explicitly names "a loaded jet mushing near its alpha limit above
-corner speed". Both cards fly at **8000 m**: thin air is the airframe-agnostic lever that makes the
-wing hit its alpha ceiling before its g-limit. Same eight-key fleet as the `e*` set.
+Two launches, ~11 min, 128 captures. The ONE-LAW rule explicitly names "a loaded jet mushing near its
+alpha limit above corner speed" and neither card has ever been flown. Both fly at **8000 m**: thin air
+is the airframe-agnostic lever that makes the wing hit its alpha ceiling before its g-limit. Same
+eight-key fleet as the `e*` set.
+
+> **CORRECTED 2026-07-31 — and it changes the priority of these two batches.** The premise here was
+> *"`aoaLimiterActivePct` is 0 in every capture this project has ever taken"*. **False:** non-zero on
+> **66** (run, airframe, tag) cells, **23** fully unrailed, topped by **R33 `Darkreach·obDR6` at
+> 100.0%** (n = 4, `railed = 0`). So the regime is already reachable on a *shipped, flown* card —
+> `oblique-6-c` at the v0.96 corner-relative entry (95 m/s on `Darkreach`). **Cheaper than either
+> batch below: re-fly `oblique-6-c` on `Darkreach` with more replicates first.** Caveat if you do:
+> `alpha_metrics` only runs on `alpha_step`/`alpha_hold` tags, so an `oblique_step` capture carries
+> `aoaLimiterActivePct`/`aoaPeakDeg` and **none** of `aoaAboveCeilingPct`, `qSchedMin`, `gateMinUp/Dn`,
+> `commandIntoCeilingPct`. Decide the tagging before flying.
 
 > **No hand-matched global here any more.** Both cards now declare `"repeat": 8` themselves, so the
 > run board should read `repeat 8 [from card]` and `Scenario/ScenarioRepeat` is irrelevant to these two

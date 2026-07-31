@@ -216,9 +216,16 @@ any other segment**, the clearest cross-fighting case in 162 captures).
 
 **Two coverage holes the ONE-LAW rule already forbids** and no capture has ever closed:
 
-- `aoaLimiterActivePct` is **0 in every segment of every card ever run**. The "loaded jet mushing
-  near its alpha limit above corner speed" case the rule explicitly demands is untested.
-- Only two airframes have ever been flown (Ifrit, Multirole1). The rule names four cases.
+- ~~`aoaLimiterActivePct` is **0 in every segment of every card ever run**. The "loaded jet mushing
+  near its alpha limit above corner speed" case the rule explicitly demands is untested.~~
+  **CORRECTED 2026-07-31 — FALSE, and this line is the origin `scorecard.py` cited.** The metric is
+  non-zero on **66** (run, airframe, tag) cells across R1–R33, **23** of them with no railed segment
+  anywhere, topped by **R33 `Darkreach·obDR6` at 100.0%** (n = 4, `railed = 0`, `aoaPeakDeg`
+  7.38–7.59° vs a 10° limiter). The *loaded* jet case is still untested — a card cannot set a loadout
+  — but "the α machinery has never fired" is not true. `LAW-CHARACTERIZATION.md` §1.
+- ~~Only two airframes have ever been flown (Ifrit, Multirole1).~~ **Stale: 10 airframes have flown a
+  card** (every fixed-wing key in `AIRFRAMES.md`), across 1 681 captures. 3 of the rule's 4 cases are
+  covered; the hovering helo is not.
 
 ---
 

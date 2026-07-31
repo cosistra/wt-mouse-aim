@@ -133,9 +133,17 @@ that checkable rather than assumed.
 
 ### AoA ceiling — the never-once-exercised case (2 cards, 1.2 min)
 
-`aoaLimiterActivePct` is 0 in every capture ever taken, yet the ONE-LAW rule explicitly names "a
-loaded jet mushing near its alpha limit above corner speed". Both cards fly at **8000 m**: thin air
-is the airframe-agnostic lever that makes the wing hit its alpha ceiling before its g-limit.
+The ONE-LAW rule explicitly names "a loaded jet mushing near its alpha limit above corner speed", and
+neither card has ever been flown. Both fly at **8000 m**: thin air is the airframe-agnostic lever
+that makes the wing hit its alpha ceiling before its g-limit.
+
+> **CORRECTED 2026-07-31.** This paragraph used to open *"`aoaLimiterActivePct` is 0 in every capture
+> ever taken"*. **False.** It is non-zero on **66** (run, airframe, tag) cells, **23** of them fully
+> unrailed — topped by **R33 `Darkreach·obDR6` at 100.0%** (n = 4, `railed = 0`, `aoaPeakDeg`
+> 7.38–7.59° vs a 10° limiter). Low q got there, not load: v0.96's #41 fix put that lane's entry at
+> **95 m/s**. The α regime is reachable *without* these cards — which makes them cheaper to justify,
+> not harder, since the open question is now what the law *does* at the ceiling rather than whether it
+> ever gets there. See `LAW-CHARACTERIZATION.md` §1.
 
 | card | isolates | pass / fail |
 |---|---|---|
