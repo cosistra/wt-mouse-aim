@@ -1,0 +1,43 @@
+{
+  "name": "oblique-05-c",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "note": "CORNER-SPEED TWIN of 'oblique-05' — identical geometry, identical replicate count; the ONLY difference is the entry condition, which is 0.95x each lane airframe's OWN corner speed instead of a flat 250 m/s. That is what lets all ten fixed-wing keys fly one card: at 250 m/s CAS1 and COIN are refused pre-spawn (above 0.95x Vmax) and the roster is 8. 0.95 rather than 1.00 because CAS1's published cornerSpeed (200) is itself above 0.95x its Vmax (195.3). startSpeed 250 is retained as the fail-soft fallback ONLY: if the envelope cannot be read the resolver warns and degrades to exactly the 'oblique-05' condition, a known-good state, rather than to something novel. Rung 0 of the oblique ladder: 0.5 deg steps, onset |azErr| 0.35 deg. Measured on 25 fixedwing-v2 captures, NO bank is commanded at all below 0.5 deg of azErr (targetBank > 0.5 deg on 0.0% of samples), so this card probes the pure fine yaw capture and the v0.65 settle micro-bank - NOT roll/yaw allocation, which does not exist here. Expect both stick channels under the 0.02 analysis deadband: read terminalOffDeg, settleOn and rollCmdMedian, not rollYawOpposedPct. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 8,
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 0.35
+    },
+    {
+      "tag": "obDR05",
+      "dur": 8,
+      "az": 0.35,
+      "el": 0
+    },
+    {
+      "tag": "obDL05",
+      "dur": 8,
+      "az": 0,
+      "el": -0.35
+    },
+    {
+      "tag": "obUL05",
+      "dur": 8,
+      "az": -0.35,
+      "el": 0
+    },
+    {
+      "tag": "obUR05",
+      "dur": 8,
+      "az": 0,
+      "el": 0.35
+    }
+  ]
+}

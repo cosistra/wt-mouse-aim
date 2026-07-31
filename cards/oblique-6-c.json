@@ -1,0 +1,43 @@
+{
+  "name": "oblique-6-c",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "note": "CORNER-SPEED TWIN of 'oblique-6' — identical geometry, identical replicate count; the ONLY difference is the entry condition, which is 0.95x each lane airframe's OWN corner speed instead of a flat 250 m/s. That is what lets all ten fixed-wing keys fly one card: at 250 m/s CAS1 and COIN are refused pre-spawn (above 0.95x Vmax) and the roster is 8. 0.95 rather than 1.00 because CAS1's published cornerSpeed (200) is itself above 0.95x its Vmax (195.3). startSpeed 250 is retained as the fail-soft fallback ONLY: if the envelope cannot be read the resolver warns and degrades to exactly the 'oblique-6' condition, a known-good state, rather than to something novel. ONE test per card: 6 deg oblique steps, exactly AT the FineAngle=6 knee where the fine servo hands over to the roll-to-align blend. Same diamond geometry as oblique-2/-12, radius 4.24 deg. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 8,
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 4.24
+    },
+    {
+      "tag": "obDR6",
+      "dur": 8,
+      "az": 4.24,
+      "el": 0
+    },
+    {
+      "tag": "obDL6",
+      "dur": 8,
+      "az": 0,
+      "el": -4.24
+    },
+    {
+      "tag": "obUL6",
+      "dur": 8,
+      "az": -4.24,
+      "el": 0
+    },
+    {
+      "tag": "obUR6",
+      "dur": 8,
+      "az": 0,
+      "el": 4.24
+    }
+  ]
+}

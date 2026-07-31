@@ -2,10 +2,11 @@
   "name": "oblique-05",
   "cls": "Plane",
   "step": 0.02,
-  "airframe": "",
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
   "note": "Rung 0 of the oblique ladder: 0.5 deg steps, onset |azErr| 0.35 deg. Measured on 25 fixedwing-v2 captures, NO bank is commanded at all below 0.5 deg of azErr (targetBank > 0.5 deg on 0.0% of samples), so this card probes the pure fine yaw capture and the v0.65 settle micro-bank - NOT roll/yaw allocation, which does not exist here. Expect both stick channels under the 0.02 analysis deadband: read terminalOffDeg, settleOn and rollCmdMedian, not rollYawOpposedPct. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
   "startSpeed": 250,
   "startAlt": 4000,
+  "repeat": 8,
   "segments": [
     { "tag": "arm",    "dur": 6, "az": 0,     "el": 0.35 },
     { "tag": "obDR05", "dur": 8, "az": 0.35,  "el": 0 },

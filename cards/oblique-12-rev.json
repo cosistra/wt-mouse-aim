@@ -1,0 +1,43 @@
+{
+  "name": "oblique-12-rev",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, FastBomber1",
+  "note": "ORDER CONTROL for the R28 down-step penalty (F1 in R28-FINDINGS.md): stepping the nose DOWN leaves 1.2-17.9x the terminal error of the mirrored UP step, universal on 7 of 8 airframes at 20-1000x the noise floor. Every oblique card in the grid traverses N->E->S->W->N, so the two DOWN legs are ALWAYS segments 2-3 and the two UP legs ALWAYS 4-5 -- direction is perfectly confounded with position in the card. R28 could exclude energy and elevation but NOT order. This pair breaks the confound by flying the identical diamond in both traversal directions in ONE batch, same session, same airframes. THIS IS THE REVERSED ARM: the same diamond traversed S->W->N->E->S, so the UP legs come first and the DOWN legs land in card-positions 4-5. If the penalty is about DIRECTION it survives here unchanged; if it is about POSITION it INVERTS and the up legs become the bad ones. Tags are deliberately the same as 'oblique-12' -- compare-runs.py keys on (airframe, card, arm), so the card name keeps them apart and scorecard.py needs no new tag.",
+  "startSpeed": 250,
+  "startAlt": 4000,
+  "repeat": 8,
+  "armToggle": "BelowAlignSuppress",
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": -8.49
+    },
+    {
+      "tag": "obUL12",
+      "dur": 8,
+      "az": -8.49,
+      "el": 0
+    },
+    {
+      "tag": "obUR12",
+      "dur": 8,
+      "az": 0,
+      "el": 8.49
+    },
+    {
+      "tag": "obDR12",
+      "dur": 8,
+      "az": 8.49,
+      "el": 0
+    },
+    {
+      "tag": "obDL12",
+      "dur": 8,
+      "az": 0,
+      "el": -8.49
+    }
+  ]
+}
