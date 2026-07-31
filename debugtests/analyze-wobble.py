@@ -351,6 +351,15 @@ def convergence(rows):
 # format ever shows up.
 MIN_ROWS = 20
 
+# Per-signal dead-bands analyze() scans for oscillation episodes: |signal| below `dead` is noise
+# around zero, not a swing. SHARED, not private: scorecard.py held a byte-identical copy (its
+# WOBBLE_SIGNALS) because this was an inline literal, and two copies of a detector threshold is two
+# tools quietly answering the same question differently. The dependency runs scorecard -> here (it
+# already exec_module()s this file for episodes()/crossings()), so the definition has to live on
+# THIS side; importing scorecard from here would close the cycle.
+WOBBLE_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05),
+                  ("aoa", 2.0))
+
 
 def analyze(path):
     meta, rows = load(path)
@@ -423,8 +432,7 @@ def analyze(path):
     # hard maneuvering, the same pp on a 10-deg Trainer is a blow-through cycle.
     lim = fbw.get("alphaLimiter") or 12.5
     pump_pp, pump_pp_grow = max(10.0, 0.8 * lim), max(6.0, 0.5 * lim)
-    for name, dead in (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05),
-                       ("aoa", 2.0)):
+    for name, dead in WOBBLE_SIGNALS:
         for e in episodes(ts, col(name), dead):
             print(f"  [{name:7s}] t {e['t0']:.1f}-{e['t1']:.1f} ({e['dur']:.1f}s) "
                   f"{e['freq']:.2f} Hz  pp {e['pp']:.2f}  {e['trend']}")

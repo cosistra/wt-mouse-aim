@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """gatechatter.py — does REGRESSING tick density spike at ChaseController gate boundaries?
 
+CLOSED INVESTIGATION, kept for reproduction only — do not reach for this to score a batch. The
+hypothesis below was answered in v0.85 (the below-nose roll-to-align positive feedback loop, see
+`debugtests/GATE-CHATTER-FINDINGS.md` §5a) and fixed behind `BelowAlignSuppress`/`AlignRateLead`.
+Its durable half — the cross-fight measurement — was folded into flightscore.py's lever block as
+`xfightPct` (off the shared `flightscore.opposed()`), which is what a routine batch should use;
+this tool survives so §5a's numbers can be regenerated from the same captures.
+
 Tests INSTRUCTOR-LOOP.md §5: "Apply allocates the pointing error across roll/yaw/pitch
 through several independent gates and blends, each deciding 'am I active' per tick with no
 hysteresis; independent thresholds chatter at their boundaries and the chatter presents as
@@ -28,6 +35,7 @@ Four measurements, on the existing captures only — no new flying:
                  reporting a stick that chatters for some other reason.
 
     python debugtests/gatechatter.py <rec.csv> [...] [--win 0.20] [--cone 0.2] [--json]
+                                     [--perm 399] [--skip 0.0] [--bytag]
     python debugtests/gatechatter.py --selftest
 
 Reads the recorder CSV + its `# config` line only. Imports flightscore.py read-only for the
@@ -61,8 +69,6 @@ CFG_DEFAULTS = {"fineAng": 6.0, "align": 25.0, "bankDz": 2.5, "alignHold": 5.0,
                 "pullRel": 2.0, "maxBank": 72.0}
 
 RECORDED_GATES = ("bigTurn", "bankBlend", "assist", "qSched", "aoaGU", "aoaGD", "settleOn")
-DERIVED_GATES = ("lateralHold", "fineBlend", "blendWeight", "azRamp", "predFloor",
-                 "eAlignLat", "phiWrap", "pullTaper")
 NEED = ("t", "off", "azErr", "phi", "outR", "outY")
 
 
@@ -346,10 +352,9 @@ def analyse(path, win=WIN_S, cone=CONE_DEG, skip=0.0, bytag=False):
             # roll fully committed to align while the turn-rate demand is still ramping in
             "alignVsAzRamp": [1.0 if g["blendWeight"][i] >= 1 - RAIL_EPS and 0 < g["azRamp"][i] < 1
                               else 0.0 for i in range(lo, hi)],
-            # roll and yaw commanding OPPOSITE azimuth corrections, both out of deadband
-            "rollYawAnti": [1.0 if abs(run["outR"][i]) > fs.STICK_DEADBAND
-                            and abs(run["outY"][i]) > fs.STICK_DEADBAND
-                            and (run["outR"][i] > 0) != (run["outY"][i] > 0) else 0.0
+            # roll and yaw commanding OPPOSITE azimuth corrections, both out of deadband —
+            # flightscore.opposed() is the one definition, shared so xfightPct and this agree
+            "rollYawAnti": [1.0 if fs.opposed(run["outR"][i], run["outY"][i]) else 0.0
                             for i in range(lo, hi)],
         }
         out.append(b)

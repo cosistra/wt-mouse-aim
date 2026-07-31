@@ -490,17 +490,27 @@ def _cell(sp):
 
 
 def _sat_cell(metrics):
-    """The WORST rail on this segment as `<name><pct>%`, or 'none' / '-'. One column: the four are
-    alternatives, not additives -- any single one near 100% already means a gain change cannot move
-    this segment (see scorecard.rail_warning, which thresholds the same numbers). The three cases are
-    kept distinct on purpose: a named rail, 'none' (rails measured, all idle) and '-' (not measured
-    at all, e.g. a pre-v0.85 capture with no bWt column) are three different findings, and naming
-    whichever rail happens to sort last when they are all 0.0% would read as the first."""
+    """The WORST rail on this segment as `<name><pct>%`, or the AUTHORITY USED when no rail is live,
+    or 'none' / '-'. One column: the four rails are alternatives, not additives -- any single one near
+    100% already means a gain change cannot move this segment (see scorecard.rail_warning, which
+    thresholds the same numbers). The cases are kept distinct on purpose: a named rail, `auth<pct>%`,
+    'none' (rails measured, all idle, authority not measured) and '-' (nothing measured at all, e.g. a
+    pre-v0.85 capture with no bWt column) are four different findings, and naming whichever rail
+    happens to sort last when they are all 0.0% would read as the first.
+
+    Two questions, one column, because they are the two halves of ONE question: a railed row's
+    metrics cannot move, and a low-authority row's metrics are the ones most worth moving. A row that
+    is on no stop has a free column by definition, so this costs nothing and saves the reader
+    cross-referencing scorecard's SLACK warnings back to 40 summary rows by hand."""
     live = [(metrics[k]["mean"], lbl) for lbl, k in SUMMARY_RAILS if k in metrics]
-    if not live:
-        return "-"
-    v, lbl = max(live)
-    return f"{lbl}{v:.0f}%" if v >= 0.5 else "none"
+    if live:
+        v, lbl = max(live)
+        if v >= 0.5:
+            return f"{lbl}{v:.0f}%"
+    au = metrics.get("authorityUsedFrac")
+    if au:
+        return f"auth{100.0 * au['mean']:.0f}%"
+    return "none" if live else "-"
 
 
 def _trunc(s, w):
@@ -515,7 +525,7 @@ def print_summary(groups):
     if w:
         print(f"WARNING: {w}")
     hdr = (f"{'airframe':<11} {'card':<20} {'tag':<10} {'arm':>3} {'n':>3} {'dur':>6} "
-           f"{'worstRail':>9}  " + "".join(f"{lbl:<16}" for lbl, _ in SUMMARY_ALWAYS) + "type-specific")
+           f"{'rail/auth':>9}  " + "".join(f"{lbl:<16}" for lbl, _ in SUMMARY_ALWAYS) + "type-specific")
     print(hdr)
     print("-" * len(hdr))
     for g in groups:
@@ -809,6 +819,14 @@ def selftest():
     assert _sat_cell({"blendRailPct": {"mean": 0.0}, "bankClampActivePct": {"mean": 0.0}}) == "none"
     assert _sat_cell({"blendRailPct": {"mean": 100.0}, "bankClampActivePct": {"mean": 96.0}}) == "blend100%"
     assert _sat_cell({}) == "-"
+    # ...and with no rail live the column answers the MIRROR question instead (scorecard's SLACK
+    # side): how much of the available authority the law used. A live rail still wins the cell --
+    # "this segment cannot move" outranks "it moved this far".
+    assert _sat_cell({"blendRailPct": {"mean": 0.0},
+                      "authorityUsedFrac": {"mean": 0.31}}) == "auth31%"
+    assert _sat_cell({"blendRailPct": {"mean": 100.0},
+                      "authorityUsedFrac": {"mean": 0.31}}) == "blend100%"
+    assert _sat_cell({"authorityUsedFrac": {"mean": 0.9}}) == "auth90%"   # no rails measured at all
     # a lone run still gets a line: in a 300-file batch a group that prints nothing reads as "that
     # card was never flown", which is a different (and wrong) finding from "it was flown once".
     with contextlib.redirect_stdout(io.StringIO()) as buf:

@@ -1,0 +1,7 @@
+# index-captures.py's SQLite index (rebuildable in ~30 s from <game>/BepInEx; 6 MB, or ~500 MB
+# once --with-rows materializes a batch). Derived data, never a source of truth — the CSVs are.
+# Archive directories written by --archive land under debugtests/<tag>-<date>/ and are already
+# covered by the root .gitignore's `debugtests/*/`.
+*.db
+*.db-wal
+*.db-shm

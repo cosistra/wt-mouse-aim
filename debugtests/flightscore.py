@@ -63,6 +63,18 @@ DEFAULTS = {"aircraftGLimit": 7.0, "cornerSpeed": 180.0, "maxPitchAngularVel": 0
 BINS = ("REGRESSING", "STALLED", "WORKING", "NEAR_OPTIMAL")
 CLASSES = ("ON_TARGET", "AIRFRAME_LIMITED") + BINS
 
+
+def opposed(r, y):
+    """Roll and yaw commanding OPPOSITE azimuth corrections, both clear of the deadband.
+
+    THE single definition of a cross-fight. It lived inline in three places (here, gatechatter's
+    `rollYawAnti`, scorecard's `rollYawOpposedPct`) against two spellings of the same 0.02 —
+    STICK_DEADBAND and scorecard's ALLOC_DEADBAND — so "is this a fight" was three answers waiting
+    to diverge on the next threshold tweak. flightscore is the definition site because it owns the
+    constant and imports nothing but stdlib, so every other tool can reach it without a cycle.
+    """
+    return abs(r) > STICK_DEADBAND and abs(y) > STICK_DEADBAND and (r > 0) != (y > 0)
+
 # ---- v0.83 / v0.85 lever columns --------------------------------------------------
 # Five columns the mod records on BOTH sides of their config toggle, so a capture can tell
 # "the fix fired and helped" from "the fix never fired" — both of which read as a smaller
@@ -408,12 +420,11 @@ def levers(run, ticks, cfg):
     if aza is not None and dz is not None and hold:
         out["rSham"] = pearson(aza, [max(0.0, min(1.0, (a - dz) / hold)) for a in aza])
 
-    # CROSS-FIGHTING — roll and yaw commanding OPPOSITE azimuth corrections. Same definition
-    # gatechatter.py uses (`rollYawAnti`), so the two tools cannot disagree about what a fight
+    # CROSS-FIGHTING — roll and yaw commanding OPPOSITE azimuth corrections. gatechatter.py calls
+    # the same opposed() for its `rollYawAnti`, so the two tools cannot disagree about what a fight
     # is. Needs no new column, hence the --levers flag to get it on the old corpus too.
     oR, oY = col("outR"), col("outY")
-    anti = [abs(r) > STICK_DEADBAND and abs(y) > STICK_DEADBAND and (r > 0) != (y > 0)
-            for r, y in zip(oR, oY)]
+    anti = [opposed(r, y) for r, y in zip(oR, oY)]
     out["xfightPct"] = wpct(anti)
     sus, j = [False] * len(anti), 0
     while j < len(anti):

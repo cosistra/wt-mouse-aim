@@ -1,0 +1,429 @@
+# `captures.db` — the flight-capture index, for an agent who has never seen this repo
+
+`debugtests/captures.db` is a SQLite index over every recorder CSV the mod has ever written
+(1604 captures / 7081 segments / ~954k recorder rows as of R32). It exists so a question spanning
+batches — *"does this effect hold in R28, R29 AND R30?"* — is one `GROUP BY`, not three tool runs
+stitched into prose.
+
+It is **derived and gitignored**. The CSVs under `<game>/BepInEx` are the source of truth; the `.db`
+is rebuilt in ~30 s and re-indexed warm in ~0.3 s over the whole corpus.
+
+```bash
+python debugtests/index-captures.py "<game>/BepInEx"   # build / refresh (idempotent, ~0.3 s warm)
+python debugtests/index-captures.py --stats            # WHAT IS IN HERE — run this first
+python debugtests/index-captures.py --check R29        # is that batch complete and intact?
+python debugtests/index-captures.py --query "SELECT …" # read-only by default
+```
+
+## The two rules
+
+1. **Every metric in here comes from `scorecard.py`.** `index-captures.py` imports it and stores what
+   `score_run()` returns. Nothing is re-derived — not a metric, not the RAILED threshold, not the
+   tag→type rule. If a metric changes there, re-index and the database follows. Do **not** "fix" a
+   number with SQL; fix it in `scorecard.py`.
+2. **Metrics are SPARSE by segment type, and columns are DYNAMIC.** A corpus-wide `avg(metric)`
+   silently averages whatever handful of rows happen to have it. See
+   [the matrix](#the-metric--segment-type-matrix) and [the NULL idioms](#the-three-null-idioms) —
+   both traps return a plausible number rather than an error.
+
+---
+
+## Start here: the three built-in commands
+
+| Command | Answers |
+|---|---|
+| `--stats` | Totals, one row per batch (mod version, captures, airframes, cards, aborts, `n_cols` era, whether raw rows are materialized), an `n_cols` histogram, per-airframe counts, parse-warning count. |
+| `--check [RUNTAG]` | Is a batch what you think it is: per-(airframe) capture counts with an **outlier flag**, `rec`-number gaps, aborted captures **with their stop reasons**, parse warnings, unknown segment tags. With no RUNTAG it scans every batch and prints only flagged lanes. |
+| `--diff RUNA RUNB [--metric M] [--tag T]` | Per `(airframe, card, tag)`: `mean ± stdev%` in both runs and the ratio B/A. Railed and `arm` segments excluded. This is the question the index was built for. |
+
+`--check` exists because a dead lane is invisible in every aggregate view. Real example — R29 flew ten
+lanes; nine flew 48 captures each and one did not:
+
+```
+=== R29 ===  captures 441  airframes 10  cards 6  aborted 1  rec 1..441  v0.93.0  2026-07-30 20:00
+airframe       caps  cells  min/cell  max/cell  firstRec  lastRec  abort  flag
+-------------  ----  -----  --------  --------  --------  -------  -----  --------------------------------
+Darkreach      9     6      1         2         10        90       1      ** 9 vs median 48 (19%)  ** STOPPED EARLY: last rec 90 of 441
+CAS1           48    6      8         8         6         438      0
+…
+  aborted captures:
+Darkreach  oblique-2-c  90   abort: aircraft gone
+```
+
+Any query that groups R29 by airframe will happily report a `Darkreach` mean over 30 segments
+next to nine 192-segment lanes. Run `--check` before trusting a batch.
+
+---
+
+## Tables
+
+### `captures` — one row per CSV (86 columns today; the `sc_`/`entry_`/`ov_` ones are dynamic)
+
+Idempotency key is `file` (the basename). Re-indexing a capture keeps its `id`, so a `rows` foreign
+key stays meaningful.
+
+| column | type | provenance |
+|---|---|---|
+| `id` | INTEGER PK | synthetic |
+| `file` | TEXT UNIQUE | CSV basename — **the idempotency key** |
+| `path` | TEXT | absolute path at index time (may be stale if `<game>` moved) |
+| `mtime`, `size` | REAL, INTEGER | `os.stat` — the (mtime, size) pair that makes a warm re-index free |
+| `run_tag` | TEXT | CSV header `run=` (normalised to `R29`), else `-(R\d+)-` in the filename. **NULL on 63 legacy captures.** |
+| `mod_version` | TEXT | CSV header line (`# mouseaim recording  v0.94.0 …`) |
+| `session` | TEXT | CSV header `session=` — the process; `rec` restarts per session |
+| `rec` | INTEGER | CSV header `rec=` — per-process file counter, orders captures **in time** |
+| `drone` | INTEGER | `# drone N` header line — the lane. **NULL = hand-flown** (175 captures) |
+| `replicate` | INTEGER | **COMPUTED** — ordinal within `(session, drone, card)` by `rec`. Not in any artifact: `ScenarioPlayer.RunIndex` is never written to the CSV. |
+| `airframe` | TEXT | **sidecar** `jsonKey` — what `compare-runs.py` groups on and refuses to pool across. NULL without a sidecar (119 captures) |
+| `aircraft` | TEXT | `# aircraft 'FS-12'` — the unit NAME, not the key. Do not group on this. |
+| `card` | TEXT | `# card` header. NULL on 122 hand-flown/ad-hoc captures |
+| `arm` | INTEGER | regex `arm=(\d+)` off the `# config` line. **NULL when the capture is not part of an A/B** (only 107 captures have one) |
+| `arm_knob` | TEXT | regex `armKnob=` off `# config` — which lever the ABBA schedule swept |
+| `started` | TEXT | `# started` wall clock, LOCAL. The only reliable **time ordering** across batches |
+| `utc` | TEXT | sidecar `utc` |
+| `n_rows` | INTEGER | **COMPUTED** — sum of segment `samples` |
+| `n_cols` | INTEGER | **COMPUTED** — fields in the CSV header line. **This is the recorder-era key** (see below) |
+| `stop` | TEXT | the `# stop` footer, verbatim (carries the abort reason) |
+| `aborted` | INTEGER | scorecard's `provenance()` |
+| `config` | TEXT | the `# config` line verbatim — the law's knobs **as flown** |
+| `entry_note` | TEXT | the `# entry` line verbatim — the per-replicate reset provenance |
+| `ov_note` | TEXT | the `# override` line verbatim — knobs **the card** pinned for itself. **0 real captures today** (no shipped card uses `config`); covered by the selftest only |
+| `parse_warn` | TEXT | scorecard's own stderr for this file. **NULL on every row today** — a non-NULL here means dropped rows |
+| `sc_*` (45) | mixed | **sidecar** `<capture>.airframe.json` scalars, key-for-key. Absent → NULL |
+| `entry_*` (9) | mixed | parsed out of `# entry`. `a->b` becomes `_from`/`_to` |
+| `ov_*` | mixed | parsed out of `# override`; `/` in the key becomes `_` (`Control/BelowAlignSuppress` → `ov_Control_BelowAlignSuppress`) |
+
+Dynamic columns are declared `NUMERIC`, so SQLite's affinity keeps `0.35` a REAL and `true` a TEXT.
+They are added **on demand**: a new sidecar or entry field appears as a column on the next index run
+instead of silently vanishing. The flip side is that **a column only exists if some indexed capture
+produced it** — `no such column` from a query is usually "nothing in the corpus has that yet".
+
+Notable `sc_*` (all fail-soft on the mod side, so a NULL is "could not read it", never zero):
+`sc_massKg`, `sc_cornerSpeed`, `sc_turningRadius`, `sc_aircraftGLimit`, `sc_maxThrustN`,
+`sc_fuelKg`, `sc_wingAreaTotal`, `sc_dragAreaTotal`, `sc_alphaLimiter`, `sc_gLimitPositive`,
+`sc_maxPitchAngularVel`, `sc_infoStallSpeed`, `sc_infoMaxSpeed`, `sc_loadoutCount`,
+`sc_loadoutMassKg` (both **computed** from the loadout array), `sc_loadout` / `sc_fbwParameters`
+(JSON text — use `json_extract`). The Cl/Cd curves (`airfoils`, `airfoilAlphaDeg`) are dropped.
+
+**`sc_maxSpeed` is `aircraftParameters.maxSpeed`, a NORMALIZER that reads a flat 600 for every fast
+jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
+
+### `segments` — one row per (capture, segment) (61 columns: 12 fixed + 49 dynamic metrics)
+
+| column | type | provenance |
+|---|---|---|
+| `capture_id` | INTEGER FK → `captures.id` | `ON DELETE CASCADE` |
+| `seg_index` | INTEGER | order within the capture (PK is the pair) |
+| `tag` | TEXT | the `segTag` column — the card's own tag (53 distinct) |
+| `type` | TEXT | `scorecard.infer_type(tag)` via `TAG_TYPE_RULES`. **Decides which metrics exist** |
+| `samples` | INTEGER | rows in the segment |
+| `duration_s` | REAL | last `t` − first `t` |
+| `excluded` | INTEGER | `type = 'arm'` — the settling window, **no metrics at all** (1482 of 7081 rows) |
+| `railed` | INTEGER | `scorecard.is_railed()` — sat on a limit ≥90% of samples. **Its metrics are no signal, not a score** (285 rows) |
+| `slack` | INTEGER | scorecard's mirror flag: nothing railed, under 50% of available authority — *the law is the limit* (8 rows; sustained turns only) |
+| `unknown_tag` | INTEGER | the tag matched no `TAG_TYPE_RULES` entry → scored with the generic set only (2 rows) |
+| `warnings` | TEXT | scorecard's RAILED/SLACK/unknown-tag prose, newline-joined. NULL = clean. **Match on the flags above, never on this prose** |
+| `skipped` | TEXT (JSON) | `{metric: reason}` for metrics that could not be computed. See [NULL idiom 3](#3-not-applicable-vs-not-measured--segmentsskipped) |
+| 49 metric columns | REAL | **`scorecard.score_run()`**, named exactly as scorecard names them |
+
+### `rows` — raw recorder rows, opt-in
+
+`--with-rows RUNTAG` materializes ONE batch. Columns: `capture_id`, `i` (row ordinal), then one
+column per CSV column (66 today). Everything else stays in CSV: all ~1.1M rows would be ~500 MB of
+mostly-unread steady state. **Today only R30 is materialized** (48 captures / 29,199 rows) — check
+`--stats`'s `--with-rows` column before writing a `rows` query, and materialize what you need.
+
+### `cards`, `card_airframes` — the card grid, opt-in
+
+`--cards cards/` loads `cards/*.json` as dimension tables so *"which grid cells have we NEVER
+flown?"* is a `LEFT JOIN`. `cards.card` is the **file basename** (the id the mod binds and the
+`# card` header carries), so it joins straight to `captures.card`. `card_airframes` expands the
+comma-list `airframe` field, one row per lane — and **only for cards whose list is real jsonKeys**:
+an empty field means "whatever `Cfg.DroneAirframe` says" and prose means the card predates v0.90.
+`cards.problems` carries `scorecard.card_setup_problems()`; NULL is clean.
+
+---
+
+## The metric × segment-type matrix
+
+Counts are live (`--stats` totals). `—` means **the metric does not exist for that type at all**;
+a number below the type's `n` means it exists but was skipped or is conditional.
+
+| metric (group) | oblique_step<br>4894 | sustained_turn<br>241 | micro/az/el_step<br>299 | fine_track<br>16 | reversal/astern<br>25 | unknown<br>124 | arm<br>1482 |
+|---|---|---|---|---|---|---|---|
+| `aoaPeakDeg` `gPeak` `gSustained` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
+| `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` `authBank` `authAoa` `authStick` `authorityUsedFrac` | all | all | all | all | all | 120–124¹ | — |
+| `blendRailPct` | all | 217¹ | 64¹ | — ¹ | — ¹ | 1¹ | — |
+| `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` | all | all | all | all | all | all | — |
+| `overshootAzDeg` `overshootElDeg` | partial² | partial² | partial² | all | partial² | partial² | — |
+| `settleBandDeg` `demandDeg` `riseTime90` `settleTime` `overshootDeg` | partial² | **—** | partial² | **—** | settle/overshoot only | **—** | — |
+| `meanTurnRateDegS` `deltaTAS` `deltaEnergyHeightM` | **—** | all | **—** | **—** | **—** | **—** | — |
+| `stickFlipRate{P,R,Y}` `wobbleEpisodes*` | all | **—** | **—** | all | all | **—** | — |
+| `wobbleFreqHz*` | rare² | **—** | **—** | rare² | rare² | **—** | — |
+| `rollCmdMedian` `yawCmdMedian` `bothActivePct` `rollYawOpposedPct` `rollYawAllocFrac` `rollBlendMean` | all | **—** | **—** | **—** | **—** | **—** | — |
+| `pitchAuthorityMedian` `pitchAuthorityAntiPhaseFrac` | **—** | **—** | **—** | **—** | 24 of 25 | **—** | — |
+
+¹ era / missing column — see NULL idiom 2 and 3.  ² conditional on the segment's own shape (no
+overshoot happened; the step was too short; `wobble_scan` only emits a frequency when it finds an
+episode). Both are legitimate NULLs; `count()` them.
+
+**Segment types with metric columns that do not exist yet**, because nothing has flown them:
+`alpha_step` / `alpha_hold` (`aoaAboveCeilingPct`, `aoaCeilDeg`, `aoaPeakOverCeiling`,
+`aoaRecoverActivePct`, `commandIntoCeilingPct`, `qSchedMin`, `gateMinUp`, `gateMinDn`),
+`hover_hold` (`positionRMSM`, `driftRateMS`), `bobup` / `translate` (`demandM`, `overshootM`),
+`transition` (`altExcursionM`). Those cards exist in `cards/` and have never been run — see
+[cookbook Q10](#q10-which-grid-cells-have-we-never-flown-needs---cards). `aoaAboveCeilingPct` is one
+of scorecard's four RAIL_METRICS, so `segments.railed` already accounts for it; you just cannot
+`SELECT` it today.
+
+### The idiom this matrix exists to force
+
+```sql
+-- ALWAYS: count(metric) beside avg(metric), never avg() alone.
+SELECT s.type, count(*) segs, count(s.meanTurnRateDegS) scored, avg(s.meanTurnRateDegS) mean
+  FROM segments s GROUP BY 1;
+```
+
+`avg()` ignores NULLs. `count(*)` counts rows. If the two disagree, the mean is over a subset —
+and a corpus-wide `avg(meanTurnRateDegS)` is 241 sustained turns hiding inside 7081 segments. The
+`scored` column is the difference between an answer and a coincidence.
+
+---
+
+## The three NULL idioms
+
+### 1. Sparse by segment type
+Covered above. Filter `s.type = …` or `s.tag = …` **explicitly**; never let the GROUP BY decide for
+you which types happened to have the column.
+
+### 2. Recorder era — filter on `captures.n_cols`
+The CSV grew from 38 to 64 columns across the corpus, and a metric needing a column that did not
+exist yet is simply absent:
+
+| `n_cols` | captures | mod versions | runs |
+|---|---|---|---|
+| 38 | 63 | (pre-run-tag) | — |
+| 44 | 20 | 0.64.0 | R1 |
+| 45 | 36 | 0.65.0–0.67.0 | R2, R3 |
+| 54 | 2 | 0.69.0 | R10 |
+| 56 | 25 | 0.71.0–0.76.0 | R11–R18 |
+| 57 | 5 | 0.77.0 | R19 |
+| 58 | 11 | 0.79.0 | R20, R21 |
+| **64** | **1442** | 0.87.0–0.94.0 | R22–R32 |
+
+```sql
+-- The trap and the fix in one query: 423 old segments contribute nothing to this mean.
+SELECT c.n_cols >= 64 modern, count(*) segs, count(s.blendRailPct) scored,
+       round(avg(s.blendRailPct), 2) mean
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.excluded = 0 GROUP BY 1;
+--  modern  segs  scored  mean
+--  0       423   0       None      <- pre-v0.85: no bWt column, so no blendRailPct at all
+--  1       5176  5176    5.57
+```
+
+`n_cols >= 64` is the practical "modern capture" filter. One caveat: `frameMs` exists from v0.86 but
+**means the fixed step, not the frame, until v0.92.1** — captures from R22–R27 read a constant
+16.70 ms. Filter `mod_version >= '0.92.1'` for anything about frame hitches.
+
+### 3. Not-applicable vs not-measured — `segments.skipped`
+When scorecard *could not* compute a metric it records why, as JSON, per segment. 423 segments carry
+one today:
+
+```sql
+SELECT json_extract(s.skipped, '$.blendRailPct') why, count(*) n,
+       group_concat(DISTINCT c.run_tag) runs
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE json_extract(s.skipped, '$.blendRailPct') IS NOT NULL GROUP BY 1;
+--  missing column: bWt (pre-v0.85 capture)  423  R1,R2,R3,R10,…,R21
+```
+
+Reasons seen in the corpus: `missing column: bWt (pre-v0.85 capture)` (423),
+`missing column(s): aoaGU/aoaGD` (63), `no cornerSpeed/gLimit on the '# fbw' header (pre-v0.55
+capture)` (8), `segment too short (<2 samples)` (1). **A NULL metric with an entry in `skipped` is a
+measurement that could not be taken; a NULL with no entry is a metric that does not apply.** Only the
+first is worth chasing.
+
+---
+
+## The six `sc_` twins — which one to join on
+
+Six sidecar scalars duplicate a fixed column. **Always use the fixed one:**
+
+| fixed (use this) | `sc_` twin | why the fixed one |
+|---|---|---|
+| `run_tag` | `sc_run` | `run_tag` is normalised `'R29'`; `sc_run` is the integer `29`. `WHERE sc_run = 'R29'` matches nothing |
+| `mod_version` | `sc_modVersion` | comes from the CSV header, so it survives a **missing sidecar** |
+| `session` | `sc_session` | same |
+| `rec` | `sc_rec` | same, and it is typed INTEGER |
+| `airframe` | `sc_jsonKey` | identical values (`airframe` is copied from it), but `airframe` is what's indexed and what `compare-runs.py` groups on |
+| `utc` | `sc_utc` | same value; `utc` is the documented one |
+
+**119 captures have no sidecar at all** (R1–R3 and the untagged legacy set): every `sc_*` is NULL
+there, and so is `airframe`. `session` still works on all 119 and `mod_version`/`rec` on 56 of them,
+because those come from the CSV header — the 63 oldest (`n_cols = 38`) predate the header carrying
+them. `sc_csv` is the sidecar's own record of its CSV name — not a join key, use `file`.
+
+---
+
+## Cookbook
+
+Every query below was **run against the live DB and works today** unless marked otherwise. Paste
+them into `--query "…"` (read-only) or `sqlite3 debugtests/captures.db`.
+
+`stdev(x)` and `median(x)` are registered by `index-captures.py` — SQLite ships neither. `stdev` is
+the **SAMPLE** standard deviation (n−1), matching `compare-runs.py`'s `statistics.stdev` exactly, and
+returns NULL below n=2. They are **not available in a bare `sqlite3` shell**; use `--query` for
+anything using them.
+
+#### Q1. Orientation — *works today*
+```bash
+python debugtests/index-captures.py --stats
+python debugtests/index-captures.py --check          # every batch, flagged lanes only
+```
+
+#### Q2. Rank airframes by a metric within one batch — *works today*
+```sql
+SELECT c.airframe, count(s.terminalOffDeg) n, round(avg(s.terminalOffDeg),4) mean,
+       round(stdev(s.terminalOffDeg),4) sd
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R29' AND s.type = 'oblique_step' AND s.railed = 0
+ GROUP BY 1 ORDER BY mean;
+--  trainer 192 0.0622 … SmallFighter1 192 0.2926 … Darkreach 30 2.605  <- n=30: the dead lane
+```
+
+#### Q3. Does the effect hold across batches? — *works today*
+```sql
+SELECT c.run_tag, c.mod_version, count(s.terminalOffDeg) n,
+       round(avg(s.terminalOffDeg),4) mean, round(median(s.terminalOffDeg),4) med
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.tag = 'obUL12' AND s.railed = 0
+ GROUP BY 1,2 ORDER BY min(c.started);        -- ORDER BY started, NOT run_tag: 'R10' < 'R2'
+```
+`min(c.started)` is the only correct chronological order — run tags sort lexicographically.
+
+#### Q4. A/B one lever inside a batch, by arm — *works today*
+```sql
+SELECT c.arm_knob, c.arm, s.tag, count(*) n, round(avg(s.terminalOffDeg),4) mean,
+       round(stdev(s.terminalOffDeg),4) sd
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R31' AND c.airframe = 'Fighter1'
+   AND c.arm IS NOT NULL AND s.excluded = 0 AND s.railed = 0
+ GROUP BY 1,2,3 ORDER BY s.tag, c.arm;
+```
+`s.excluded = 0` is not optional — without it every `arm` window shows up as a row with `n=0` and a
+NULL mean. Never pool across `airframe`: `compare-runs.py` refuses to, and so should you.
+
+#### Q5. Noise floor per cell — *works today*
+```sql
+SELECT c.airframe, c.card, s.tag, count(*) n, round(avg(s.terminalOffDeg),4) mean,
+       round(100.0*stdev(s.terminalOffDeg)/abs(avg(s.terminalOffDeg)),1) sd_pct
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R30' AND s.excluded = 0 AND s.railed = 0
+ GROUP BY 1,2,3 HAVING n >= 3 ORDER BY sd_pct DESC;
+```
+This is the number an A/B has to beat. `--diff RUNA RUNB` is the two-run form.
+
+#### Q6. Railed cells — where a gain change physically cannot move anything — *works today*
+```sql
+SELECT c.run_tag, c.airframe, s.tag, count(*) n,
+       round(avg(s.bankClampActivePct),1) bank, round(avg(s.turnRateCapActivePct),1) turn
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.railed = 1 GROUP BY 1,2,3 ORDER BY n DESC LIMIT 20;
+```
+
+#### Q7. Slack segments — the law, not the airframe, is the limit — *works today*
+```sql
+SELECT c.run_tag, c.airframe, s.tag, count(*) n, round(avg(s.authorityUsedFrac),3) used
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.slack = 1 GROUP BY 1,2,3;
+--  R27  trainer  turn360creep  8  0.462
+```
+Read a SLACK row as "look here", never as a verdict — its 0.5 threshold is uncalibrated
+(`scorecard.py`, `SLACK_FRAC`).
+
+#### Q8. Why is this metric NULL? — *works today*
+```sql
+SELECT json_extract(s.skipped, '$.blendRailPct') why, count(*) n,
+       group_concat(DISTINCT c.run_tag) runs
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE json_extract(s.skipped, '$.blendRailPct') IS NOT NULL GROUP BY 1;
+```
+
+#### Q9. Entry-condition provenance across batches — *works today*
+```sql
+SELECT run_tag, count(*) n, round(avg(entry_snapBackM),1) snapback,
+       round(max(entry_snapBackM),1) worst
+  FROM captures WHERE entry_snapBackM IS NOT NULL GROUP BY 1 ORDER BY worst DESC;
+```
+`entry_*` is what the per-replicate reset had to undo. A batch whose `snapBackM` is climbing is a
+batch whose replicates were drifting further apart before each reset.
+
+#### Q10. Which grid cells have we NEVER flown? — *needs `--cards cards/` first*
+```bash
+python debugtests/index-captures.py --cards cards/
+```
+```sql
+SELECT ca.card, group_concat(ca.airframe) never_flown
+  FROM card_airframes ca
+  LEFT JOIN captures c ON c.card = ca.card AND c.airframe = ca.airframe
+ WHERE c.id IS NULL GROUP BY 1 ORDER BY 1;
+--  alpha-steps   Fighter1,Multirole1,SmallFighter1,trainer,VTOLTrainer1,EW1,FastBomber1,Darkreach
+--  oblique-05    CAS1,COIN
+```
+
+#### Q11. Frame hitches — *needs `--with-rows`; only R30 is materialized today*
+```bash
+python debugtests/index-captures.py --with-rows R30
+```
+```sql
+SELECT c.run_tag, c.airframe, r.segTag, count(*) rows_over_25ms, round(max(r.frameMs),1) worst
+  FROM rows r JOIN captures c ON c.id = r.capture_id
+ WHERE r.frameMs > 25 GROUP BY 1,2,3 ORDER BY rows_over_25ms DESC;
+```
+Only meaningful for `mod_version >= '0.92.1'` — before that `frameMs` recorded the fixed step, a
+constant. The drone launch stagger exists precisely so a hitch does not land on the same segment in
+every lane; this is how you check it did not.
+
+#### Q12. What did a card pin for itself? — *works, but 0 rows today*
+```sql
+SELECT run_tag, card, count(*) n, ov_note FROM captures
+ WHERE ov_note IS NOT NULL GROUP BY 1,2,4;
+```
+Empty because no shipped card uses `config`. The parsing path is covered by
+`index-captures.py --selftest` only — if you write a card with `config` overrides, re-index and this
+becomes the record of which knobs the *card* (not the operator) chose.
+
+#### Q13. Which columns can I even select? — *works today*
+```bash
+python debugtests/index-captures.py --query "SELECT * FROM segments LIMIT 0" --format csv
+python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --format csv
+```
+
+---
+
+## `--query` behaviour
+
+- **Read-only by default** (`file:…?mode=ro`). A write is refused with a line naming `--write`, not a
+  traceback. The db costs ~30 s over 344 MB to rebuild; a mistyped query should not be able to cost
+  that.
+- **`--format table|csv|json`** — `csv` and `json` are the machine-readable forms.
+- **`--limit N`** — default 1000, `0` for no cap. Truncation prints a loud `*** TRUNCATED` line on
+  stderr; a silently truncated result set is a wrong answer that looks right.
+
+## Gotchas, condensed
+
+1. `avg()` without `count()` beside it — the whole of rule 2.
+2. `ORDER BY run_tag` — lexicographic, so `R10 < R2`. Use `min(started)`.
+3. Forgetting `s.excluded = 0` — 1482 `arm` windows with no metrics, silently in your GROUP BY.
+4. Forgetting `s.railed = 0` — 285 segments whose numbers are limits, not scores.
+5. Pooling across `airframe` — `compare-runs.py` refuses to; the grouping is `(airframe, card, tag)`.
+6. `s.tag` alone as a key — tags are unique per card **by convention only**, and it already leaks
+   (`hover`/`bobup` are shared by the rotor disk cards and the built-in `rotorcraft-v2`). Group by
+   `(card, tag)`.
+7. `sc_maxSpeed` is a normalizer (flat 600). Use `sc_infoMaxSpeed`.
+8. `aircraft` is the unit name, `airframe` is the jsonKey. Group on `airframe`.
+9. Matching on `segments.warnings` prose instead of the `railed`/`slack`/`unknown_tag` flags — a
+   reword away from silently marking the corpus clean.
+10. Assuming a metric column exists. It is created only when some capture produced it; `no such
+    column` means "never flown", not "typo".

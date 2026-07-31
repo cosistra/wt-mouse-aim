@@ -29,8 +29,8 @@ segment's "skipped" dict — never a crash.
 SEGMENTATION: consecutive rows sharing the same `segTag` form one segment; a CSV with no segTag
 column at all becomes a single segment named "unsegmented". The segment TYPE is inferred from the
 tag via TAG_TYPE_RULES (az_step, el_step, oblique_step, fine_track, sustained_turn, alpha_step,
-alpha_hold, reversal, astern_wrap, micro_step, hover_hold, translate, bobup, transition, arm);
-anything else — including "unsegmented"
+alpha_hold, reversal, astern_wrap, micro_step, hover_hold, translate, bobup, transition, untagged,
+arm); anything else — including "unsegmented"
 — gets the generic metric set (the AoA/G discipline block, the only metrics that need no
 segment-type logic). `arm` segments are reported (tag/type/count/duration) but carry no metrics —
 the plan marks the post-spawn arm window excluded from scoring. A tag that matches nothing in
@@ -46,11 +46,15 @@ _spec = _ilu.spec_from_file_location("analyze_wobble", os.path.join(_HERE, "anal
 aw = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(aw)
 
-G0 = 9.81  # m/s^2, for energy-height Eh = alt + V^2/2g (plan #4)
+# flightscore owns the cross-fight predicate and its deadband (see flightscore.opposed). Loaded the
+# same way rather than by `import` because scorecard is itself exec_module'd from other dirs
+# (index-captures.py, test-spec-grammar.py), where debugtests/ is not on sys.path. No cycle:
+# flightscore imports stdlib only.
+_fspec = _ilu.spec_from_file_location("flightscore", os.path.join(_HERE, "flightscore.py"))
+fs = _ilu.module_from_spec(_fspec)
+_fspec.loader.exec_module(fs)
 
-# Same per-signal dead-bands analyze-wobble's analyze() scans for oscillation episodes — kept as a
-# local literal (that tuple isn't a module-level constant there) rather than editing that file.
-WOBBLE_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05), ("aoa", 2.0))
+G0 = 9.81  # m/s^2, for energy-height Eh = alt + V^2/2g (plan #4)
 
 # Demand-scaled settle band for angular steps (see step_response_metrics). 10% of the step,
 # floored at 0.05 deg (~0.9 mil — tighter than gun dispersion, so "settled" still means settled)
@@ -89,6 +93,21 @@ TAG_TYPE_RULES = [
                                                        # this is a second tag on one type, not a new type.
     (re.compile(r"translate"),  "translate"),          # planned (Appendix A) -- no card emits it yet
     (re.compile(r"transition"), "transition"),         # planned (Appendix A) -- no card emits it yet
+    # The two built-in tags this table did NOT cover until check-architecture.py started resolving
+    # ScenarioPlayer.cs's tags against it (scorecard's own --selftest only ever scanned cards/*.json,
+    # so a tag that exists solely in C# was invisible to it -- the v0.71 outage's exact shape, one
+    # level up). Both are real segTags a capture can carry:
+    #   `rec`  -- StopRecord's single track segment, the whole of a card RECORDED from a human flight
+    #             (ScenarioPlayer.cs StopRecord). It is a continuous demand track, so it scores as
+    #             fine tracking: wobble scan + pointing error, which is what a replayed human
+    #             maneuver is asking about.
+    #   `segN` -- Validate's fallback for a disk-card segment whose author left `tag` empty. There is
+    #             genuinely nothing to teach the table here: the CARD did not say what the segment
+    #             tests, so the honest score is the generic AoA/G + saturation + pointing block and
+    #             no warning telling the reader to go add a rule that cannot exist.
+    (re.compile(r"rec$"),       "fine_track"),
+    (re.compile(r"seg\d+"),     "untagged"),           # generic metrics only -- compute_segment has no
+                                                       # branch for this type, which IS the intent.
     # --- the disk cards in cards/ (installed into <game>/BepInEx/config/wtmouseaim-cards/) ---
     # Everything above is emitted by a BUILT-IN card in ScenarioPlayer.cs; everything below by a
     # shipped JSON card. Same rule either way: a tag with no entry here scores as "unknown".
@@ -102,11 +121,12 @@ TAG_TYPE_RULES = [
 ]
 
 
-# --- card SETUP validation (v0.90) ----------------------------------------------------------------
-# A card now carries its own run configuration -- `repeat`, `armToggle`, and a `config` list of knobs
-# pinned for its duration -- so that the operator ticks one checkbox and presses the spawn key. That
-# moves three ways to misconfigure a batch out of the operator's hands and INTO the card file, where
-# nothing at runtime rejects them: JsonUtility ignores what it can't parse, and ScenarioPlayer's
+# --- card SETUP validation (v0.90, extended v0.91) ------------------------------------------------
+# A card now carries its whole run configuration -- `repeat`, `armToggle`, a `config` list of knobs
+# pinned for its duration, and since v0.91 the fleet itself (`airframe` as a comma list, `count`) --
+# so that the operator ticks one checkbox and presses the spawn key, touching nothing in F1. That
+# moves every way to misconfigure a batch out of the operator's hands and INTO the card file, where
+# nothing at runtime rejects them: the deserializer ignores what it can't map, and ScenarioPlayer's
 # apply path is fail-soft by design (one warning per bad override, then it flies anyway). A card that
 # is quietly wrong still produces a capture that scores fine and answers a different question, which
 # is the failure this whole release exists to remove -- so the check has to be here, offline, where
@@ -115,8 +135,14 @@ TAG_TYPE_RULES = [
 
 def split_spec(spec):
     """('Section', 'Key') for a config spec, or None if it's malformed. Mirrors
-    ScenarioPlayer.SplitSpec exactly: bare keys default to section 'Control', at most one slash, and
-    neither half may be empty ('/Foo' and 'Foo/' are typos, not bare keys)."""
+    ScenarioPlayer.SplitSpec: bare keys default to section 'Control', at most one slash, and
+    neither half may be empty ('/Foo' and 'Foo/' are typos, not bare keys).
+
+    debugtests/test-spec-grammar.py runs the shipped C# and this function over ONE shared case
+    table, so keep the two in step: a copy that is stricter on something that DOES resolve would
+    flag cards that fly perfectly well, and one that is looser would pass a card whose override the
+    mod silently drops. (The multi-slash rule was this copy's alone until v0.96 tightened the C# to
+    match -- refusing before the batch flies beats a resolve warning after it.)"""
     if not isinstance(spec, str):
         return None
     spec = spec.strip()
@@ -138,10 +164,37 @@ def card_setup_problems(card):
     # Encyclopedia jsonKey never contains whitespace, so whitespace means the field is still being
     # written as documentation -- which the mod now heals at load, but silently enough that a night of
     # unattended runs would fly the wrong airframe. Human descriptions go in `note`.
+    #
+    # v0.91: the field is a COMMA LIST (one jsonKey per drone lane, wrapping), so the test is per
+    # TOKEN and mirrors ScenarioPlayer.Validate exactly -- "Fighter1, Multirole1" is a two-airframe
+    # fleet, "any jet at the fixedwing-v2 entry condition" is still prose. Mirroring matters more than
+    # being strict here: a rule TIGHTER than the mod's flags cards that fly perfectly well, and a
+    # false alarm in the one offline check for this is how the check stops being read.
     af = card.get("airframe", "")
-    if not isinstance(af, str) or af != af.strip() or any(ch.isspace() for ch in af):
-        out.append("airframe %r is not a spawnable jsonKey (no whitespace) or \"\" -- "
-                   "put the description in 'note'" % (af,))
+    if not isinstance(af, str) or any(any(ch.isspace() for ch in tok.strip()) for tok in af.split(",")):
+        out.append("airframe %r is not a comma list of spawnable jsonKeys (no whitespace inside a "
+                   "key) or \"\" -- put the description in 'note'" % (af,))
+
+    # `count` is the fleet size (v0.91), 0 = "as many as `airframe` names, else Cfg.DroneCount". Same
+    # rationale as `repeat` below: the C# CLAMPS to 1..16, so a card asking for 40 flies 16 and no
+    # artifact says so. A count that is not a multiple of the airframe list is legal and deliberate --
+    # lanes wrap, so it just loads the early lanes -- and compare-runs.py groups by airframe anyway.
+    cnt = card.get("count", 0)
+    if not isinstance(cnt, int) or isinstance(cnt, bool) or not 0 <= cnt <= 16:
+        out.append("count %r is not an integer in 0..16 (0 = as many as `airframe` names, "
+                   "else Cfg.DroneCount)" % (cnt,))
+
+    # `startSpeedCorner` (v0.93) is the entry speed as a multiple of the LANE AIRFRAME's own corner
+    # speed, and it WINS over `startSpeed` when set. Nothing at runtime bounds it: the mod multiplies
+    # whatever it finds, and the only backstop is v0.92's envelope gate, which refuses the lane --
+    # so a typo'd 10.0 does not read as "10x", it reads as a whole batch of refused lanes and no
+    # captures at all. 0.5..3.0 spans the roster's usable band (corner is 90..200 m/s, Vstall/corner
+    # runs from 0.4 to 0.6 and 0.95*Vmax/corner reaches ~2.5 on the fastest jets), so anything
+    # outside it is a mistake rather than an aggressive test point.
+    ssc = card.get("startSpeedCorner", 0)
+    if not isinstance(ssc, (int, float)) or isinstance(ssc, bool) or not (ssc == 0 or 0.5 <= ssc <= 3.0):
+        out.append("startSpeedCorner %r is not 0 (unset -- use startSpeed) or a multiple in 0.5..3.0 "
+                   "of the lane airframe's corner speed" % (ssc,))
 
     rep = card.get("repeat", 0)
     # 0 means "fall back to Cfg.ScenarioRepeat", so it is legal; the C# side CLAMPS to 1..20, which
@@ -500,6 +553,16 @@ def cfg_params(meta):
     return {m.group(1): float(m.group(2)) for m in re.finditer(r"(\w+)=([-\d.]+)", meta.get("cfg", ""))}
 
 
+def aoa_ceiling(fbw):
+    """The AoA ceiling the mod ITSELF uses, mirrored from ChaseController.Apply
+    (alphaLimiter - min(4, 0.15*alphaLimiter)) — so "fraction of the ceiling" here means the same
+    thing it means in the law. None on a pre-v0.55 capture (no alphaLimiter on the '# fbw' header).
+    Hoisted out of alpha_metrics because saturation_metrics needs the same number on EVERY segment
+    type, not just alpha_*; two copies of this formula is exactly how the two would drift apart."""
+    lim = fbw.get("alphaLimiter")
+    return lim - min(4.0, 0.15 * lim) if lim else None
+
+
 def saturation_metrics(rows, cols, cfg, fbw):
     """Is the LAW at a limit, or the PLANT? (metrics, skipped), same shape as aoa_g_metrics.
 
@@ -527,6 +590,29 @@ def saturation_metrics(rows, cols, cfg, fbw):
                               LATCHED side, where roll does not participate. A segment that
                               straddles it is two regimes averaged together, so read this before
                               pooling anything. Absent pre-v0.85 (bWt is a v0.85 column).
+      authBank / authAoa /
+      authStick             - THE MIRROR QUESTION. Every metric above detects the airframe being the
+                              limit; none of them detects the LAW being the limit, which is the case
+                              that is actually fixable. Each is the mean of one authority axis over
+                              the authority available on it: mean|bank|/maxBank, mean|aoa|/the AoA
+                              ceiling aoa_ceiling() gives, and max over the three axes of
+                              mean|outP|/|outR|/|outY| (stick is already normalised to +-1, so its
+                              own full deflection IS the denominator). authStick is a MAX over axes,
+                              not a sum: a pure-pitch segment using all of the elevator is at its
+                              limit whatever the rudder is doing.
+      authorityUsedFrac     - max(the three above, turnRateDemandRatio). Which is to say: of every
+                              authority we can measure, how much did the MOST-used one use? A MAX,
+                              because these are alternatives exactly the way the rails are -- one
+                              axis at its stop is a saturated segment however idle the others are, so
+                              a mean over axes would let three quiet ones hide it. Low with nothing
+                              railed = the law left performance on the table; see rail_warning's
+                              SLACK case, which is the only thing that thresholds this.
+                              A TERM WITH NO INPUTS IS DROPPED, NOT DEFAULTED (a 0.0 stand-in for an
+                              unmeasurable axis would drag the max down and manufacture SLACK) -- and
+                              dropped SILENTLY rather than into `skipped`, because every term is
+                              derived: whatever is missing was already reported by the block that
+                              owns it, and its absence here IS the record. Count the terms present to
+                              know how much the max is worth; rail_warning does.
 
     AoA-gate occupancy is deliberately NOT re-added here — aoa_g_metrics already reports it as
     aoaLimiterActivePct on the same segments.
@@ -577,6 +663,25 @@ def saturation_metrics(rows, cols, cfg, fbw):
         m["blendRailPct"] = 100.0 * sum(1 for r in rows if r.get("bWt", 0.0) >= BLEND_RAILED) / n if n else 0.0
     else:
         skipped["blendRailPct"] = "missing column: bWt (pre-v0.85 capture)"
+
+    # --- the low side: how much of the available authority did the law USE? (see docstring) -------
+    # turnRateDemandRatio is REUSED off `m`, not recomputed -- it is already exactly this quantity for
+    # the turn axis (demanded omega over achievable omega) and a second derivation of the omegaMax
+    # chain is the drift this file keeps warning about.
+    auth = {k: v for k, v in (("turnRateDemandRatio", m.get("turnRateDemandRatio")),) if v is not None}
+    if max_bank and "bank" in cols:
+        auth["authBank"] = statistics.fmean(abs(r.get("bank", 0.0)) for r in rows) / max_bank
+    ceil = aoa_ceiling(fbw)
+    if ceil and ceil > 0 and "aoa" in cols:
+        auth["authAoa"] = statistics.fmean(abs(r.get("aoa", 0.0)) for r in rows) / ceil
+    stick = [statistics.fmean(abs(r.get(c, 0.0)) for r in rows) for c in ("outP", "outR", "outY") if c in cols]
+    if stick:
+        auth["authStick"] = max(stick)
+    for k, v in auth.items():
+        if k != "turnRateDemandRatio":     # already in `m`; don't publish the same number twice
+            m[k] = v
+    if auth:
+        m["authorityUsedFrac"] = max(auth.values())
     return m, skipped
 
 
@@ -589,9 +694,59 @@ RAILED_PCT = 90.0
 # near 100% is already enough to make the segment's other numbers unresponsive.
 RAIL_METRICS = ("bankClampActivePct", "turnRateCapActivePct", "blendRailPct", "aoaAboveCeilingPct")
 
+# --- the mirror flag: SLACK -----------------------------------------------------------------------
+# Below this fraction of available authority, with nothing railed, the LAW is the limit rather than
+# the airframe -- the case that is actually fixable, and the one nothing in this file could see.
+# 0.5 IS A GUESS. Nothing has calibrated it: it says "the most-used authority axis averaged under
+# half of what was there", which is a plausible reading of "left performance on the table" and
+# nothing more. What would calibrate it: a batch where we ALREADY know the law under-flew — the R21
+# fixedwing-sweep corpus (bank clamped at 72 deg while g sat at 5.4 of 9) scored against a capture of
+# the same card+airframe flown at the real limit (hand-flown, or after the fix that lifts it) — with
+# the threshold set just under the authority the good run used. Until then read a SLACK line as
+# "look here", never as a verdict.
+SLACK_FRAC = 0.5
+
+# ...and it only means anything on a segment whose CARD is asking for sustained near-limit
+# performance. Measured over R27 (v0.90.1, four airframes): sustained turns run authorityUsedFrac
+# 0.53-1.07, while every oblique/micro step runs 0.04-0.23 — because a 0.5 deg step needs 0.5 deg
+# worth of authority, so "used 4% of the airframe" there is the CARD's demand, not the law's failure.
+# Ungated, this warning would fire on most of a batch's segments and on almost none of its turns,
+# which is the detector inverted. A step's authority question is about the TRANSIENT anyway, and a
+# mean over a settle-dominated window cannot answer it (that would need a peak/rise-window statistic,
+# not this one). authorityUsedFrac is still emitted for every segment type — only the flag is gated.
+SLACK_TYPES = ("sustained_turn", "alpha_hold")
+
+# The terms authorityUsedFrac maxes over (turnRateDemandRatio doubles as the turn term). The max is
+# over the terms that COULD be computed, so with one term it is a lower bound on the real number, and
+# "the law didn't use the authority available" is not a claim a lower bound can support -- a capture
+# merely missing a column would read as slack. Two is the least that can.
+AUTH_TERMS = ("turnRateDemandRatio", "authBank", "authAoa", "authStick")
+AUTH_MIN_TERMS = 2
+
+
+def railed_metrics(seg):
+    """The RAIL_METRICS this segment is pinned on, as a list of "name=value%" strings (empty = clean).
+
+    Split out of rail_warning() so a caller can ask the QUESTION without parsing the ANSWER.
+    index-captures.py wants a per-segment boolean for a database column and was reduced to sniffing
+    " is RAILED:" out of the warning prose -- which is a reword away from silently marking a whole
+    corpus un-railed, and "railed" is precisely the flag that decides whether a number is a score or
+    no signal at all. One definition, two readers: the warning string is built from this, so they
+    cannot disagree.
+    """
+    mv = lambda k: (seg["metrics"].get(k) or {}).get("value")
+    return [f"{k}={seg['metrics'][k]['value']:.1f}%" for k in RAIL_METRICS
+            if mv(k) is not None and seg["metrics"][k]["value"] >= RAILED_PCT]
+
+
+def is_railed(seg):
+    """True if this segment sat on a limit for >= RAILED_PCT of its samples -- i.e. its metrics are
+    NO SIGNAL, not a score. The predicate form of railed_metrics(); use this, not a string match."""
+    return bool(railed_metrics(seg))
+
 
 def rail_warning(seg):
-    """None, or the RAILED warning for one scored segment (compute_segment()'s dict).
+    """None, or the RAILED / SLACK warning for one scored segment (compute_segment()'s dict).
 
     All four numbers below have been computed for a while and NOTHING thresholded them, so a segment
     pinned against the bank clamp for 100% of its samples printed exactly like a healthy one — same
@@ -603,12 +758,28 @@ def rail_warning(seg):
 
     Threshold is deliberately blunt (>= 90%, a literal like the rest of this file's read thresholds):
     it separates "on the stop" from "worked hard", and a capture can always be re-read with another.
+
+    THE OTHER HALF, and the one worth acting on: nothing railed AND the law used under SLACK_FRAC of
+    the authority the airframe was offering. Railed says "no signal here, don't bother"; SLACK says
+    "the signal is here, the law is what's holding it back". Same warnings channel on purpose -- they
+    are the two answers to one question ("law or airframe?") and reading them apart is the whole job.
+    The two are mutually exclusive by construction (this only runs when `hits` is empty), so no
+    segment can ever be labelled both.
     """
-    hits = [f"{k}={seg['metrics'][k]['value']:.1f}%" for k in RAIL_METRICS
-            if seg["metrics"].get(k) and seg["metrics"][k]["value"] is not None
-            and seg["metrics"][k]["value"] >= RAILED_PCT]
+    mv = lambda k: (seg["metrics"].get(k) or {}).get("value")
+    hits = railed_metrics(seg)
     if not hits:
-        return None
+        used, terms = mv("authorityUsedFrac"), [k for k in AUTH_TERMS if mv(k) is not None]
+        if (used is None or used >= SLACK_FRAC or len(terms) < AUTH_MIN_TERMS
+                or seg.get("type") not in SLACK_TYPES):
+            return None
+        # The per-axis breakdown is not decoration: a bare max nobody can attribute is un-actionable,
+        # and WHICH axis came closest is the whole diagnosis (bank-limited by the 72 deg clamp reads
+        # nothing like AoA-limited, and both read nothing like a stick the law never deflects).
+        why = ", ".join(f"{k}={mv(k):.2f}" for k in terms)
+        return (f"segment '{seg['tag']}' is SLACK: used {100.0 * used:.0f}% of available authority, "
+                f"nothing railed -- the LAW is the limit, not the airframe ({why}). "
+                f"Its metrics CAN move: this segment is worth an A/B, unlike a railed one.")
     # An alpha_* card exists to PUT the airframe past the ceiling — there, aoaAboveCeilingPct near
     # 100 is the card succeeding, and reading it as a defect would be the mirror of the mistake this
     # warning exists to prevent. Only say so when the AoA ceiling is the ONLY thing railed.
@@ -620,6 +791,41 @@ def rail_warning(seg):
     return (f"segment '{seg['tag']}' is RAILED: {', '.join(hits)} (>= {RAILED_PCT:.0f}% of samples). "
             f"A limit, not the control law, is flying that segment -- a gain change physically cannot "
             f"move its metrics, so read them as NO SIGNAL rather than as a score.{note}")
+
+
+def damage_warning(rows, cols):
+    """None, or the DAMAGED warning for a whole capture (the v0.96 `dmgFrac` column).
+
+    Per CAPTURE, not per segment, unlike RAILED/SLACK: once a part has fallen off it stays off, so
+    the fact is about the airframe for the rest of the run and would otherwise be repeated on every
+    remaining segment. What matters is the worst it got and WHERE it started, since that is the
+    segment whose numbers first stopped describing the airframe the other replicates flew.
+
+    Three readings of the column and they are all different:
+      absent  -- every capture written before v0.96. Not a warning: silence about damage is not a
+                 claim of damage, and warning here would fire on the entire existing corpus.
+      -1      -- the recorder could not read Aircraft.partDamageTracker. Also not a warning, for the
+                 same reason, and emphatically not 0 (see Recording.cs's header comment).
+      > 0     -- a part detached. ANY detachment: ScenarioPlayer aborts the run on the same test, so
+                 a capture reaching here at all is either an abort's last rows or a hand-flown one.
+    """
+    if "dmgFrac" not in cols:
+        return None
+    worst, first_tag, first_t = 0.0, None, None
+    for r in rows:
+        v = r.get("dmgFrac")
+        if v is None or v <= 0.0:
+            continue
+        if first_tag is None:
+            first_tag, first_t = r.get("segTag") or "unsegmented", r.get("t")
+        if v > worst:
+            worst = v
+    if first_tag is None:
+        return None
+    when = f" at t={first_t:.1f}s" if first_t is not None else ""
+    return (f"capture is DAMAGED: dmgFrac reached {worst:.3f} ({100.0 * worst:.1f}% of parts detached), "
+            f"first seen in segment '{first_tag}'{when}. This is not the airframe the other replicates "
+            f"flew -- drop it rather than pool it.")
 
 
 def norm_warning(w):
@@ -638,11 +844,13 @@ GATE_BITING = 0.5      # aoaGU/aoaGD below this = the ceiling gate is at least h
 CMD_DEADBAND = 0.05    # |tgtPRaw| below this is noise around zero, not a command (the 0.05
                        # analyze-wobble's crossings() and wobble_scan use). Fine for the alpha
                        # segments, where the pitch command is near the rail.
-ALLOC_DEADBAND = 0.02  # ...but NOT fine for roll/yaw allocation on small steps: measured median
-                       # |outR| is 0.006-0.017 on micro segments, so a 0.05 gate reports "no
-                       # cross-fighting" for a segment that never cleared the gate. 0.02 is
-                       # flightscore.py's STICK_DEADBAND — same number, so the two tools' answers
-                       # are comparable — and allocation_metrics reports the occupancy WITH it.
+ALLOC_DEADBAND = fs.STICK_DEADBAND  # ...but NOT fine for roll/yaw allocation on small steps:
+                       # measured median |outR| is 0.006-0.017 on micro segments, so a 0.05 gate
+                       # reports "no cross-fighting" for a segment that never cleared the gate.
+                       # IMPORTED, not respelled as 0.02: it is the same threshold flightscore's
+                       # opposed() applies below, and two spellings of one number are two tools
+                       # answering differently after the next tweak. allocation_metrics reports the
+                       # occupancy WITH it.
 BLEND_RAILED = 0.999   # bWt at/above this = lateralHold railed, eFine weight 0 (see saturation)
 
 
@@ -677,8 +885,8 @@ def alpha_metrics(rows, cols, fbw):
     m, skipped = {}, {}
     n = len(rows)
     lim = fbw.get("alphaLimiter")
-    if lim and "aoa" in cols:
-        ceil = lim - min(4.0, 0.15 * lim)
+    ceil = aoa_ceiling(fbw)                      # one definition, shared with saturation_metrics
+    if ceil and "aoa" in cols:
         peak = max(abs(r.get("aoa", 0.0)) for r in rows)
         m["aoaCeilDeg"] = ceil
         m["aoaAboveCeilingPct"] = 100.0 * sum(1 for r in rows if abs(r.get("aoa", 0.0)) > ceil) / n if n else 0.0
@@ -761,7 +969,10 @@ def allocation_metrics(rows, cols):
         both = [r for r in rows
                 if abs(r.get("outR", 0.0)) > ALLOC_DEADBAND and abs(r.get("outY", 0.0)) > ALLOC_DEADBAND]
         m["bothActivePct"] = 100.0 * len(both) / n if n else 0.0
-        m["rollYawOpposedPct"] = 100.0 * sum(1 for r in both if r["outR"] * r["outY"] < 0) / n if n else 0.0
+        # flightscore.opposed() is THE definition of a cross-fight (and owns the deadband above), so
+        # this metric, its `rollYawAnti` and gatechatter's cannot answer differently.
+        m["rollYawOpposedPct"] = 100.0 * sum(
+            1 for r in rows if fs.opposed(r.get("outR", 0.0), r.get("outY", 0.0))) / n if n else 0.0
         m["rollYawAllocFrac"] = mr / (mr + my) if (mr + my) > 1e-9 else None
     else:
         for k in ("rollCmdMedian", "yawCmdMedian", "bothActivePct", "rollYawOpposedPct", "rollYawAllocFrac"):
@@ -786,7 +997,7 @@ def wobble_scan(t, rows, cols, dur):
         if axis in cols:
             cnt = len(aw.crossings(None, [r.get(axis, 0.0) for r in rows], 0.05))
             m[f"stickFlipRate{lbl}"] = cnt / dur if dur > 0 else 0.0
-    for name, dead in WOBBLE_SIGNALS:
+    for name, dead in aw.WOBBLE_SIGNALS:  # the detector's own dead-bands, not a copy of them
         if name not in cols:
             continue
         eps = aw.episodes(t, [r.get(name, 0.0) for r in rows], dead)
@@ -947,6 +1158,9 @@ def score_run(path):
         for w in (_tag_warning(tag, seg_type), rail_warning(seg)):
             if w:
                 warnings.append(w)
+    dw = damage_warning(rows, cols)   # whole-capture, so outside the per-segment loop
+    if dw:
+        warnings.append(dw)
     return {"provenance": prov, "segments": segments, "warnings": warnings}
 
 
@@ -1180,6 +1394,40 @@ def selftest():
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateCapActivePct"] == 100.0
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateDemandRatio"] > 1.9
 
+    # authorityUsedFrac — the mirror of those rails, built to exact arithmetic. maxBank 72 and the
+    # alphaLimiter-20 ceiling (17) give round fractions: mean|bank| 36 -> 0.5, mean|aoa| 8.5 -> 0.5.
+    # The rows are SIGN-ALTERNATING on every axis, so a mean that forgot the abs() would read 0.0.
+    authcfg = {"maxBank": 72.0}
+    authfbw = {"cornerSpeed": 160.0, "gLimit": 9.0, "alphaLimiter": 20.0}
+    authcols = {"bank", "aoa", "outP", "outR", "outY", "spd", "bankTR", "targetBank"}
+    auth_rows = [{"bank": 36.0, "aoa": 8.5, "outP": -0.4, "outR": 0.1, "outY": 0.0,
+                  "spd": 266.0, "bankTR": 10.0, "targetBank": 10.0},
+                 {"bank": -36.0, "aoa": -8.5, "outP": 0.4, "outR": -0.1, "outY": 0.0,
+                  "spd": 266.0, "bankTR": 10.0, "targetBank": 10.0}]
+    aum, auskip = saturation_metrics(auth_rows, authcols, authcfg, authfbw)
+    assert abs(aum["authBank"] - 0.5) < 1e-9, aum
+    assert abs(aum["authAoa"] - 0.5) < 1e-9, aum
+    assert abs(aum["authStick"] - 0.4) < 1e-9, aum        # MAX over axes (pitch), not their sum/mean
+    assert abs(aum["authorityUsedFrac"] - 0.5) < 1e-9, aum
+    # the turn term is the same turnRateDemandRatio already published, and it can WIN the max: at
+    # bankTR 81.75 the demand is 0.762 of omegaMax while bank/aoa/stick are unchanged at 0.5/0.5/0.4.
+    hot, _ = saturation_metrics([dict(r, bankTR=81.75, targetBank=60.0) for r in auth_rows],
+                                authcols, authcfg, authfbw)
+    assert abs(hot["authorityUsedFrac"] - hot["turnRateDemandRatio"]) < 1e-9, hot
+    assert abs(hot["authorityUsedFrac"] - 0.762) < 0.005, hot
+    # A term with no inputs is DROPPED, not defaulted: a 0.0 stand-in for an unmeasurable axis would
+    # drag the max down and manufacture SLACK out of a missing column.
+    no_aoa, _ = saturation_metrics(auth_rows, authcols - {"aoa"}, authcfg, authfbw)
+    assert "authAoa" not in no_aoa and abs(no_aoa["authorityUsedFrac"] - 0.5) < 1e-9, no_aoa
+    assert "authBank" not in saturation_metrics(auth_rows, authcols, {}, authfbw)[0]   # no maxBank=
+    assert "authAoa" not in saturation_metrics(auth_rows, authcols, authcfg, {})[0]    # pre-v0.55 fbw
+    # ...and dropped SILENTLY, never into `skipped` -- these are derived, so a skip entry here would
+    # re-report a missing column the owning block already reported (and would break the two
+    # graceful-degradation set-equality asserts below).
+    auth_keys = {"authorityUsedFrac", "authBank", "authAoa", "authStick"}
+    assert not (auth_keys & set(auskip)), auskip                       # all four computable here
+    assert not (auth_keys & set(saturation_metrics(auth_rows, set(), {}, {})[1])), "none computable"
+
     import tempfile, io, contextlib
     # rail_warning — the flag on top of those same numbers. A segment at the wall must SAY so, and
     # must name WHICH wall with its value; a hard-working but unsaturated one must stay silent (a
@@ -1210,6 +1458,48 @@ def selftest():
     assert "doing its job" not in rail_warning(          # not the ONLY rail -> no exemption
         dict(alpha_railed, metrics=dict(alpha_railed["metrics"],
                                         blendRailPct={"value": 100.0, "grade": None})))
+
+    # SLACK — the low side, and the three verdicts one function now has to keep apart. Same segment
+    # type and columns each time; ONLY how hard the law flew changes.
+    seg_of = lambda **kw: compute_segment(
+        "turn360", "sustained_turn",
+        [dict(r, t=i * 0.1, **kw) for i, r in enumerate(auth_rows * 8)],
+        authcols | {"t"}, {"cfg": authcfg, "fbw": authfbw})
+    # (1) RAILED: pinned on the 72 deg clamp. Every OTHER authority is near zero here on purpose --
+    # the two flags must be mutually exclusive even when both conditions look true, because "no
+    # signal" and "worth an A/B" are opposite instructions to the reader.
+    railed = seg_of(targetBank=72.0, bank=1.0, aoa=0.1, outP=0.01, outR=0.01, outY=0.0)
+    assert "RAILED" in rail_warning(railed) and "SLACK" not in rail_warning(railed), rail_warning(railed)
+    assert railed["metrics"]["authorityUsedFrac"]["value"] < SLACK_FRAC, railed["metrics"]
+    # (2) SLACK: nothing on any stop, ~10% of every axis used.
+    slack = seg_of(targetBank=10.0, bank=7.2, aoa=1.7, outP=0.05, outR=0.05, outY=0.0)
+    sw = rail_warning(slack)
+    assert sw is not None and "SLACK" in sw and "RAILED" not in sw, sw
+    assert "turn360" in sw and "used 10%" in sw, sw
+    assert "authBank=0.10" in sw and "authAoa=0.10" in sw, sw      # attributable, not a bare max
+    # (3) healthy: nothing railed, three quarters of the bank authority in use -> neither flag. A
+    # warning that fires on a segment doing its job is the failure mode both of these exist to avoid.
+    assert rail_warning(seg_of(targetBank=60.0, bank=54.0, aoa=12.0,
+                               outP=0.6, outR=0.2, outY=0.1)) is None
+    # exactly at the threshold is NOT slack (mirrors RAILED's >=); just under is.
+    slack_seg = lambda frac, **kw: dict({"tag": "turn360", "type": "sustained_turn", "metrics": {
+        "authorityUsedFrac": {"value": frac, "grade": None},
+        "authBank": {"value": frac, "grade": None},
+        "authStick": {"value": 0.01, "grade": None}}}, **kw)
+    assert rail_warning(slack_seg(SLACK_FRAC)) is None
+    assert "SLACK" in rail_warning(slack_seg(SLACK_FRAC - 0.01))
+    # one term is a LOWER bound on the max, so a capture merely missing columns must not read as slack.
+    assert rail_warning({"tag": "turn360", "type": "sustained_turn",
+                         "metrics": {"authorityUsedFrac": {"value": 0.1, "grade": None},
+                                     "turnRateDemandRatio": {"value": 0.1, "grade": None}}}) is None
+    # THE TYPE GATE (see SLACK_TYPES): a 0.5 deg oblique step uses ~4% of the airframe BY DESIGN --
+    # measured 0.04-0.23 across every step segment of R27 — so flagging it would invert the detector.
+    assert rail_warning(slack_seg(0.04, type="oblique_step")) is None
+    assert rail_warning(slack_seg(0.04, type="micro_step")) is None
+    assert "SLACK" in rail_warning(slack_seg(0.04, type="alpha_hold"))
+    # ...and an `arm` segment carries no metrics at all, so it can never be either.
+    assert rail_warning(compute_segment("arm", "arm", [dict(r, t=0.1 * i) for i, r in enumerate(auth_rows)],
+                                        authcols | {"t"}, {"cfg": authcfg, "fbw": authfbw})) is None
     # score_run's channel: the warning has to reach result["warnings"], where print_table, the
     # roll-up, the JSON and compare-runs.py all read from -- not just exist as a function.
     fd_r, rail_csv = tempfile.mkstemp(suffix=".csv")
@@ -1234,8 +1524,61 @@ def selftest():
         out = buf.getvalue()
         assert "11 file(s)" in out and "fixedwing-sweep x11" in out, out
         assert "[9/11 file(s)" in out and "RAILED" in out and "--verbose" in out, out
+        # SLACK rides the SAME channel and must dedup the same way -- the percentage in its text is
+        # the obvious thing that would defeat norm_warning, and ten replicates of one slack card is
+        # exactly the case the roll-up exists for.
+        c = "segment 'turn360' is SLACK: used 31% of available authority (authBank=0.31)."
+        d = "segment 'turn360' is SLACK: used 28% of available authority (authBank=0.28)."
+        assert norm_warning(c) == norm_warning(d), (norm_warning(c), norm_warning(d))
+        assert norm_warning(c) != norm_warning(a)                 # SLACK and RAILED never collapse
     finally:
         os.remove(rail_csv)
+
+    # ...and end to end through score_run: a turn360 that rails NOTHING and uses ~10% of bank/AoA/
+    # stick has to come out of the same result["warnings"] list a RAILED one does.
+    fd_s, slack_csv = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd_s, "w", newline="") as f:
+            f.write("# mouseaim recording v0.90.0 run=R1 rec=2 session=t\n"
+                    "# card fixedwing-sweep\n# config maxBank=72.0\n"
+                    "# fbw cornerSpeed=160 gLimit=9 alphaLimiter=20 maxPitchAngVel=0.75\n"
+                    "t,off,segTag,targetBank,bankTR,bWt,bank,aoa,outP,outR,outY,spd\n"
+                    + "".join(f"{i * 0.1:.1f},3.0,turn360,10.0,10.0,0.2,7.2,1.7,0.05,0.05,0.0,266.0\n"
+                              for i in range(20)))
+        sr_ = score_run(slack_csv)
+        assert any("SLACK" in w for w in sr_["warnings"]), sr_["warnings"]
+        assert not any("RAILED" in w for w in sr_["warnings"]), sr_["warnings"]
+    finally:
+        os.remove(slack_csv)
+
+    # --- DAMAGED (v0.96 dmgFrac) ----------------------------------------------------------------
+    # The four readings that must stay apart. The absent case is the one that matters most: every
+    # capture on disk predates the column, so a detector that treated "no column" as anything but
+    # silence would flag the entire corpus.
+    dmgcols = {"t", "segTag", "dmgFrac"}
+    def dmg_rows(vals):
+        return [{"t": 0.1 * i, "segTag": "az30" if i < 3 else "turn360", "dmgFrac": v}
+                for i, v in enumerate(vals)]
+    assert damage_warning(dmg_rows([0.0] * 6), {"t", "segTag"}) is None          # column absent
+    assert damage_warning(dmg_rows([0.0] * 6), dmgcols) is None                  # intact throughout
+    assert damage_warning(dmg_rows([-1.0] * 6), dmgcols) is None                 # unreadable != damaged
+    dw_ = damage_warning(dmg_rows([0.0, 0.0, 0.0, 0.0, 0.04, 0.08]), dmgcols)    # a part comes off mid-run
+    assert dw_ is not None and "DAMAGED" in dw_ and "0.080" in dw_ and "'turn360'" in dw_, dw_
+    # ...and the -1 sentinel must not become the max, nor make a clean run look damaged.
+    dw2 = damage_warning(dmg_rows([-1.0, -1.0, 0.0, 0.0, 0.04, 0.04]), dmgcols)
+    assert "0.040" in dw2 and "-1" not in dw2, dw2
+    # Same channel as RAILED: through score_run into result["warnings"].
+    fd_d, dmg_csv = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd_d, "w", newline="") as f:
+            f.write("# mouseaim recording v0.96.0 run=R1 rec=3 session=t\n"
+                    "# card fixedwing-sweep\n"
+                    "t,off,segTag,dmgFrac\n"
+                    + "".join(f"{i * 0.1:.1f},3.0,turn360,{0.0 if i < 15 else 0.06:.3f}\n" for i in range(20)))
+        dr = score_run(dmg_csv)
+        assert any("DAMAGED" in w for w in dr["warnings"]), dr["warnings"]
+    finally:
+        os.remove(dmg_csv)
 
     # graceful degradation, both halves independently: no '# config' line, and a pre-v0.55 '# fbw'.
     _, s_nocfg = saturation_metrics(sat_rows, satcols, {}, satfbw)
@@ -1317,6 +1660,13 @@ def selftest():
         "bobdn": "bobup",
         "alphabet": "unknown",     # NOT alpha_step: the rules are alphaHold / alpha(Pull|Push)
         "obscure": "unknown",      # NOT oblique_step: ob must be followed by a direction + digits
+        # The two C#-only tags this table missed until check-architecture.py started resolving
+        # ScenarioPlayer.cs's `tag = "..."` / Hold()/Walk() literals against it. Neither can appear
+        # in cards/*.json, so the loop at the bottom of this selftest could never have caught them.
+        "rec": "fine_track",       # StopRecord's recorded-demand track
+        "seg0": "untagged", "seg7": "untagged",   # Validate's fallback for an untagged disk segment
+        "recovery": "unknown",     # the `rec` rule is anchored: it is the whole tag, not a prefix
+        "segment": "unknown",      # ...and `seg` alone is not `seg<digits>`
     }
     for tag, expected in real_tags.items():
         assert infer_type(tag) == expected, (tag, infer_type(tag), expected)
@@ -1470,7 +1820,22 @@ def selftest():
     assert card_setup_problems({"name": "x", "repeat": -1})
     assert not card_setup_problems({"name": "x", "airframe": "Multirole1"})
     assert card_setup_problems({"name": "x", "airframe": "any jet at the fixedwing-v2 entry"})
-    assert card_setup_problems({"name": "x", "airframe": "Multirole1 "})
+    # v0.91 -- a comma list is a FLEET, and whitespace around the commas is formatting the mod trims.
+    # Prose is still caught, including one prose token hiding in an otherwise valid list.
+    assert not card_setup_problems({"name": "x", "airframe": "Fighter1, Multirole1"})
+    assert not card_setup_problems({"name": "x", "airframe": "Multirole1 "})
+    assert card_setup_problems({"name": "x", "airframe": "Fighter1, any jet will do"})
+    assert not card_setup_problems({"name": "x", "count": 4})
+    assert card_setup_problems({"name": "x", "count": 17})
+    assert card_setup_problems({"name": "x", "count": -1})
+    # v0.93 -- a corner multiple. 0 is "unset" (the absolute startSpeed stands); a typo'd 10.0 would
+    # otherwise fly as a refused lane per airframe with nothing saying it was a card bug.
+    assert not card_setup_problems({"name": "x", "startSpeedCorner": 0})
+    assert not card_setup_problems({"name": "x", "startSpeedCorner": 1.0})
+    assert not card_setup_problems({"name": "x", "startSpeedCorner": 2})       # ints are legal JSON floats
+    assert card_setup_problems({"name": "x", "startSpeedCorner": 10.0})
+    assert card_setup_problems({"name": "x", "startSpeedCorner": 0.1})
+    assert card_setup_problems({"name": "x", "startSpeedCorner": -1.0})
 
     print("selftest OK")
 
