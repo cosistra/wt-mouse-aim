@@ -7,6 +7,7 @@ Stdlib only (no pandas/numpy), reuses analyze-wobble.py's CSV/header parsing, ep
     python scorecard.py <recording.csv> [more.csv ...]        # human-readable table to stdout
     python scorecard.py --json score.json <recording.csv>     # write score.json (exactly 1 CSV)
     python scorecard.py --verbose <many.csv ...>              # per-file tables even past 10 files
+    python scorecard.py --deadscan <many.csv ...>             # which columns never varied (a report)
     python scorecard.py --selftest                             # in-memory asserts, no file needed
 
 OUTPUT VOLUME: the per-file table is ~15 lines, which is right for the 1-12 captures this was built
@@ -65,6 +66,51 @@ BAND_FRAC, BAND_MIN_DEG, BAND_MAX_DEG = 0.10, 0.05, 0.5
 # the ~16 Hz sample rate (alternating 0.050/0.067 s steps), enough to average out the 0.01 deg
 # column quantization without smearing in the approach.
 TERMINAL_WINDOW_S = 1.0
+
+# --- THE RESOLUTION FLOOR OF THE `off` COLUMN, and it is NOT the printed 0.01 deg -----------------
+# `off` is written "{off:0.00}" (Recording.cs) from Vector3.Angle(t.forward, aimDir)
+# (ChaseController.cs), i.e. acos(dot) evaluated in float32. Float32 spacing just below dot = 1.0 is
+# 5.96e-8, so the smallest NON-ZERO angle acos can return is sqrt(2 * 5.96e-8) rad = 0.0198 deg. The
+# print quantum is 0.01 deg; the MEASUREMENT quantum is twice that, so the column can only ever emit
+# 0.00 or >= 0.02 near boresight. That is not inference: across 279k R35 oblique rows the value 0.01
+# never occurs once, while 0.00 (43,285 rows) and 0.02 (15,122) both occur tens of thousands of times.
+#
+# Consequence, and the reason this constant exists: a pointing metric at or under it is FLOAT GRAIN,
+# not a score. R35 measured what that does to a ranking -- the six wrapped airframes ranked by
+# terminalOffDeg on their near lanes (0.6-24 km from the world origin) vs their far ones (68-98 km),
+# same batch, same card, same 30 s legs, 32 legs per cell: Spearman +0.03, i.e. nothing. The identical
+# cells ranked by rmsPointingErrorDeg, and by fixedWindowOffDeg below: +1.00 both. 94 of the 192
+# near-lane terminal windows read exactly 0.0000 and three airframes tied there. Anything that can
+# land here must be None'd or flagged, never published as a measurement -- see floor_warning.
+OFF_QUANTUM_DEG = 0.0198
+# ...and the test is TWO quanta, not one, because 0.02 is itself a floor reading: it is the FIRST
+# rung, so a sample -- or a mean -- sitting on it is indistinguishable from 0.0198 or 0.0395 and can
+# order nothing. ONE threshold, used by both the per-sample count (offFloorPct) and the
+# is-this-a-measurement test on a mean; a "sample floor" and a separate "mean floor" would be two
+# numbers for one fact and this corpus has enough of those.
+OFF_FLOOR_DEG = 2.0 * OFF_QUANTUM_DEG      # 0.0396 deg == the printed 0.00 and 0.02 rungs
+
+# --- fixedWindowOffDeg's window: anchored at segment START, never at its end ----------------------
+# The window that makes an 8 s leg and a 30 s leg comparable AT ALL. terminalOffDeg is anchored at the
+# END, so on an 8 s leg it scores a mid-transient and on a 30 s leg a settled residual -- two different
+# quantities under one column name. Measured over the R33 (8 s legs) / R35 (30 s legs) pair: terminal
+# vs terminal correlates +0.103 across the ten shared cells, while R33's terminal vs R35's off over
+# THIS window correlates +0.782. 7-8 s because it is the last full second of the corpus's own 8 s leg,
+# so the shortest scored leg is still measured over real samples rather than extrapolated. Nothing in
+# R35 settled before 9.0 s (384 legs, median 15.5 s), which is the same fact from the other side: an
+# 8 s leg cannot carry a settled value, so a window is all it can be compared on.
+#
+# CHANGING THESE CHANGES WHAT THE COLUMN MEANS for every capture at once, and the archived numbers do
+# not move until a re-index -- so bump it only with a corpus-wide re-score, never to fit one batch.
+FIXED_WINDOW_START_S, FIXED_WINDOW_END_S = 7.0, 8.0
+
+# settleTime95's band is max(BAND_MIN_DEG, SETTLE95_FRAC * terminalOffDeg), and it must be HELD to the
+# end of the segment for at least SETTLE95_HOLD_S. The hold is what makes the metric say "did not
+# settle" (None) on a leg that is still decaying when time runs out, instead of the plausible wrong
+# number terminalOffDeg gives there: a still-transient tail cannot sit inside 1.05x its own mean for a
+# whole second. BAND_MIN_DEG (0.05) is reused as the floor -- it already sits above OFF_FLOOR_DEG, so
+# "when did it settle" stays a resolvable question even where "what did it settle AT" is not.
+SETTLE95_FRAC, SETTLE95_HOLD_S = 1.05, 1.0
 
 # Tag -> metric-type mapping. The real tags are ScenarioPlayer.cs's, not free-form: the fixed-wing
 # card emits arm/az10/az30/az90/az150/elUp/elDn/fine/turn360/reversal/astern/micro1..micro10; the
@@ -290,7 +336,54 @@ def load_csv(path):
         print(f"WARNING: {path}: dropped {dropped}/{dropped + len(rows)} row(s) that failed to parse "
               f"(non-numeric value in a column outside STRING_COLS={sorted(aw.STRING_COLS)})",
               file=sys.stderr)
+    meta["dead"] = dead_columns(rows, cols)
+    cols = cols - set(meta["dead"])          # -> every "is this column here" guard already says no
     return meta, rows, cols
+
+
+# --- DEAD COLUMNS: a header that still prints the column after the code stopped filling it --------
+# THE INVARIANT: a metric derived from a column that is not being written must come out NULL, never
+# 0.0. Nothing here can tell the two apart from the CSV -- "0.0% of samples at the limit" and "the
+# recorder no longer supplies that signal" print the same character -- and the second one silently
+# clears a whole corpus. Three of these were live at once (R40):
+#   * `dmgFrac` is ALWAYS written and ALWAYS 0: ScenarioPlayer's damage abort runs BEFORE the row is
+#     written, so a damaged capture is truncated instead of carrying the flag. 641,555 indexed rows,
+#     0 non-zero, against 8 known damage aborts. damage_warning() therefore certified every capture
+#     in the corpus as intact, which is not a measurement, it is the column's shape.
+#   * `flyLevel` / `engP` / `engR` / `engY` / `heliBlend` -- features removed or fixed-wing-only.
+#   * `aoaRec`, on the batches where the recovery bias never armed.
+# The rule is deliberately ZERO-variance-at-zero, not zero-variance: `assist=1`, `thr=0.7`,
+# `aoaGD=1`, `bWt=1` are all constant over a whole capture and all mean something (bWt railed at 1
+# for a whole capture IS the R21 finding). A constant NON-zero column is reported by --deadscan but
+# not withdrawn, because there the value itself is the evidence and a 1.0 cannot be mistaken for an
+# unmeasured 0.0.
+# ponytail: per CAPTURE, not per corpus. A column dead in one batch and alive in the next is scored
+# per capture, which is the granularity the guards already work at. A corpus-wide sweep is
+# `--deadscan`, and it is a REPORT, not an input to scoring.
+
+def dead_columns(rows, cols):
+    """Sorted list of numeric columns present in the header that are 0.0 (or empty) on every row."""
+    want = set(cols) - aw.STRING_COLS
+    live = set()
+    for r in rows:
+        for k, v in r.items():
+            if v:                                   # non-zero, non-empty -> the column is alive
+                live.add(k)
+        if want <= live:                            # all of them have spoken; nothing left to find
+            break
+    return sorted(want - live)
+
+
+def dead_warning(meta):
+    """None, or the DEAD COLUMN warning for a whole capture. Fourth member of the RAILED / SLACK-was
+    / FLOOR / DAMAGED family, and the one that invalidates the others: a rail metric reading 0.0%
+    off a column nobody writes is not a clean segment, it is no measurement at all."""
+    d = meta.get("dead")
+    if not d:
+        return None
+    return (f"capture has DEAD COLUMN(S): {', '.join(d)} -- present in the header, identically 0.0 "
+            f"on every row. Every metric derived from them is reported as SKIPPED, not as 0.0: a "
+            f"column nobody writes cannot certify that the thing it measures never happened.")
 
 
 def sidecar_path(csv_path):
@@ -398,13 +491,63 @@ def signed_overshoot(vals):
     return max(abs(v) for v in tail) if tail else 0.0
 
 
+def settle_time_95(t, offs, terminal):
+    """Seconds from segment start to the LAST time `off` left the settle band -- i.e. the first
+    instant after which it stays inside for the whole remainder of the segment. None = did not
+    settle (see SETTLE95_HOLD_S); 0.0 = never left the band at all.
+
+    This is the quantity terminalOffDeg was being used as a proxy for, and the difference is that it
+    can say "not measurable here". A leg that is still decaying when the segment ends has no settled
+    value to be within 5% of, and this returns None rather than the last sample.
+    # ponytail: band from the terminal MEAN, not from a fitted steady state. Ceiling is a leg that
+    # settles onto a slow drift -- the band then tracks the drift's mean and the metric reads late.
+    # Fit a plateau only if that shows up in a capture."""
+    n = len(t)
+    if terminal is None or n < 2:
+        return None
+    band = max(BAND_MIN_DEG, SETTLE95_FRAC * terminal) + 1e-9   # same boundary epsilon as elsewhere
+    i = n - 1
+    while i >= 0 and offs[i] <= band:
+        i -= 1
+    j = i + 1                                  # first sample of the settled tail (0 = never left)
+    if j >= n or (t[-1] - t[j]) < SETTLE95_HOLD_S - 1e-9:
+        return None                            # the tail is too short to call it settled
+    return t[j] - t[0]
+
+
 def pointing_metrics(t, rows, cols):
     """Pointing-error metrics computed for EVERY segment type (not just fine_track). Same shape as
     aoa_g_metrics: (metrics, skipped).
       rmsPointingErrorDeg - RMS of `off` (unchanged definition; was fine_track-only, which hid a
                             steady ~9.4 deg azimuth lag through the whole 30 s turn360)
       minOffDeg           - best approach anywhere in the segment ("got there then drifted" vs "never got there")
-      terminalOffDeg      - mean `off` over the last TERMINAL_WINDOW_S ("how badly it missed when time ran out")
+      terminalOffDeg      - mean `off` over the last TERMINAL_WINDOW_S ("how badly it missed when time
+                            ran out"). KEPT AS IS, and UNRELIABLE in two ways the two metrics below
+                            exist to cover -- do not reach for it first:
+                            (a) it is anchored at the segment END, so an 8 s leg and a 30 s leg are
+                                not the same measurement (use fixedWindowOffDeg to compare them);
+                            (b) under OFF_FLOOR_DEG it is float grain, not a score (read offFloorPct
+                                beside it; floor_warning says so out loud).
+                            Not removed and not redefined: 5,692 archived segments and every existing
+                            analysis are keyed to it.
+      fixedWindowOffDeg   - mean `off` over the FIXED window [FIXED_WINDOW_START_S, FIXED_WINDOW_END_S]
+                            measured from segment START. The comparable-across-leg-lengths one. None
+                            (with a reason in `skipped`) when the segment is shorter than the window,
+                            or when the mean lands under OFF_FLOOR_DEG -- a short window and a
+                            resolution floor are both "not measured", never a smaller number.
+      settleTime95        - see settle_time_95(). None = did not settle inside the segment, which on
+                            an 8 s leg is the honest answer terminalOffDeg cannot give. NOT the same
+                            question as step_response_metrics' `settleTime`, and they will disagree
+                            by an order of magnitude on the same segment (R35 trainer obDR6: 1.88 vs
+                            10.9 s): that one is "when did it first get inside the DEMAND-scaled band"
+                            (0.5 deg on a 6 deg step -- an arrival time), this one is "when did it
+                            stop moving relative to where it ended up" (a settling time). Both are
+                            emitted; neither replaces the other.
+      offFloorPct         - % of samples with `off` under OFF_FLOOR_DEG. THE DENOMINATOR for
+                            every other number here, the way bothActivePct is for rollYawOpposedPct:
+                            at 100% the segment sat on the recorder's resolution and rms/min/terminal
+                            are all grain. Numeric on purpose -- filter on this, not on the warning
+                            prose.
       overshootAzDeg /
       overshootElDeg      - signed_overshoot() of azErr / elevErr (None = never crossed)
       entryAzSign         - sign of azErr in the FIRST sample. Exists for `astern`: that segment
@@ -421,8 +564,27 @@ def pointing_metrics(t, rows, cols):
         # window edge must not fall out of it on an IEEE754 rounding of the subtraction.
         tail = [o for ti, o in zip(t, offs) if ti >= t[-1] - TERMINAL_WINDOW_S - 1e-9]
         m["terminalOffDeg"] = statistics.fmean(tail) if tail else None
+        m["offFloorPct"] = 100.0 * sum(1 for o in offs if o < OFF_FLOOR_DEG) / len(offs)
+        m["settleTime95"] = settle_time_95(t, offs, m["terminalOffDeg"])
+        win = [o for ti, o in zip(t, offs)
+               if t[0] + FIXED_WINDOW_START_S - 1e-9 <= ti <= t[0] + FIXED_WINDOW_END_S + 1e-9]
+        if t[-1] - t[0] < FIXED_WINDOW_END_S - 1e-9 or not win:
+            # A SHORT WINDOW IS NOT A SMALLER NUMBER. Silently averaging whatever samples exist would
+            # put a 3 s micro-step's early transient in the same column as a 30 s leg's 7-8 s slice.
+            skipped["fixedWindowOffDeg"] = (
+                "segment shorter than the fixed window (%.0f-%.0f s)" % (FIXED_WINDOW_START_S,
+                                                                         FIXED_WINDOW_END_S))
+        else:
+            w = statistics.fmean(win)
+            if w < OFF_FLOOR_DEG:
+                skipped["fixedWindowOffDeg"] = (
+                    "under the `off` column's resolution floor (%.4f deg)" % OFF_FLOOR_DEG)
+            else:
+                m["fixedWindowOffDeg"] = w
     else:
-        skipped["rmsPointingErrorDeg"] = skipped["minOffDeg"] = skipped["terminalOffDeg"] = "missing column: off"
+        skipped["rmsPointingErrorDeg"] = skipped["minOffDeg"] = skipped["terminalOffDeg"] = \
+            skipped["offFloorPct"] = skipped["settleTime95"] = skipped["fixedWindowOffDeg"] = \
+            "missing column: off"
     if "azErr" in cols:
         az = [r.get("azErr", 0.0) for r in rows]
         m["overshootAzDeg"] = signed_overshoot(az)
@@ -543,7 +705,7 @@ def aoa_g_metrics(rows, cols):
         m["gSustained"] = statistics.median(gs)  # median: robust to brief peaks, unlike a mean
         # gJitterG — mean |dg| between consecutive SAMPLES. Not an aero quantity: the game's
         # `Aircraft.gForce` is |v - vPrev| / (fixedDeltaTime * 9.81) taken off the COCKPIT PART's
-        # rigidbody (decompile :61804-61806), so under complex physics it carries whatever the
+        # rigidbody (decompile :61977-61979), so under complex physics it carries whatever the
         # multi-rigidbody joint solver is doing, and the recorder samples it at ~15-20 Hz — well
         # under any structural rate — so this is an ALIASED read of high-frequency solver noise,
         # not a spectrum. It is here because that noise is the dominant term in replicate scatter
@@ -583,7 +745,61 @@ def saturation_metrics(rows, cols, cfg, fbw):
     was active on 97% of a sustained turn while g sat at 5.4 of 9 — i.e. the law was saturated and
     the airframe was not. Every saturation question below is answerable from columns already in the
     CSV, so a run should self-report it:
-      bankClampActivePct    - % samples with |targetBank| at Cfg.MaxBankAngle (the clamp is ON)
+      bankClampActivePct    - % samples whose bank DEMAND (`bankTR`) is at or past Cfg.MaxBankAngle,
+                              i.e. the clamp is discarding turn demand. READ OFF `bankTR`. It used
+                              to be read off `targetBank`, WHICH IS A DIFFERENT QUANTITY (R40).
+                              ONE writer (ChaseController.cs:1455), unconditional, no branch and no
+                              second code path -- what made it look like two is that ONE FORMULA HAS
+                              THREE REGIMES:
+                                targetBank = Clamp(Lerp(linBank, bankTR, bankBlend), +-MaxBank)
+                                linBank    = deadbanded(azErr) * hdgConf * FineBankGain*(1 + BankAuthGain*assist)
+                                bankBlend  = YawAssistEnabled ? yawWeak*(1-bigTurn) : 0      (:1456)
+                                assist     = yawWeak*(1-bigTurn)*YawAssistStrength           (:1051)
+                                azDz       = FineBankDeadzone*(1-assist)                     (:1057)
+                                hdgConf    = |horizontal(t.forward)| = cos(nose pitch)        (:1007,:1059)
+                              Verified by reconstruction, not read off the source: median residual
+                              0.000 deg over 446k corpus rows. The hdgConf factor is the one that
+                              matters offline -- it is NOT a recorded column, and dropping it costs
+                              0.03-0.05 deg on a level leg but 0.26-1.67 deg on a descending one
+                              (solved hdgConf 0.994-0.999 at a -2 deg flight path against 0.940 at
+                              -22 deg on oblique-below/-below-c). So any offline use of targetBank
+                              needs a nose-pitch estimate. It is the REMOVED Legacy law's bank target:
+                              ApplyEvolvedLegacy -- the only fixed-wing law since v0.60 -- has never
+                              read it, computes its own tBankE = Clamp(bankTR, +-MaxBank), and flies
+                              that (:1827); the dead parameters were finally deleted from the
+                              signature in v0.96. So |targetBank| == MaxBank does not mean "the
+                              clamp discarded turn demand", it means "azErr exceeded
+                              MaxBank/bankGain", and the error is in BOTH directions:
+                                UNDER-READS on a sustained turn -- bigTurn -> 1 zeroes the blend and
+                                azErr -> 0 collapses linBank, so targetBank reads ~0 while the
+                                aircraft is on the wall (R39 turn360rtl: 0.0% against bankTR 30.8%
+                                and mean|bank| 68.0 of 72; R28 Darkreach obUR12 12.5% against 81.0%).
+                                OVER-READS on a large azimuth step flown by a yaw-weak airframe --
+                                assist drives bankGain to 3.0*(1+5.0*0.7) = 13.5, so 5.4 deg of azErr
+                                already saturates linBank at the clamp (R29 Darkreach obUL2: 43.0%
+                                against 29.3%; a parallel STOL batch measured 70.7% against 4.6%).
+                                THE OVER-READ IS ONE VARIABLE, NOT A COINCIDENCE OF THREE: bankBlend,
+                                assist and azDz all key off the SAME yawWeak*(1-bigTurn), so the
+                                weakness that blends bankTR in is also what inflates the gain 4.5x
+                                and collapses the deadband. That is why it appears abruptly instead
+                                of ramping.
+                                A THIRD REGIME EXISTS AND HAS NEVER BEEN FLOWN: with YawAssistEnabled
+                                off, bankBlend is identically 0 and targetBank is Clamp(linBank) --
+                                a different formula, not an extreme of this one, containing zero
+                                turn-demand information. Every capture in the corpus has
+                                'yawAssist=1' (2366 of 2366); check that field before concluding
+                                anything about a batch that looks anomalous.
+                              NOT SALVAGEABLE, and knowing the formula is what settles it: in regimes
+                              1 and 3 targetBank carries no clamp information at all, and inverting
+                              regime 2 back to the turn demand needs hdgConf, which is not recorded.
+                              bankTR IS that demand, exactly, already in the CSV. The wall comes from
+                              the capture's own '# config maxBank=' (Cfg.MaxBankAngle, 72 by default)
+                              -- never hardcoded.
+                              tBankE would answer nearly the same question -- it matched bankTR
+                              sample-for-sample on the R39 turn legs -- but it is post-slew and
+                              post-settle-injection, so on a roll-in it reads the BankSlewRate
+                              rather than the clamp. bankTR is the demand the clamp acts on, and
+                              is the same signal bankDemandExcessDeg already measured.
       bankDemandExcessDeg   - mean |bankTR| - MaxBankAngle over those samples (how much demand the
                               clamp DISCARDED; 0.0 when it never clamps). bankTR is the pre-clamp,
                               post-achievability-cap bank demand, so this is exactly the throw-away.
@@ -603,29 +819,20 @@ def saturation_metrics(rows, cols, cfg, fbw):
                               LATCHED side, where roll does not participate. A segment that
                               straddles it is two regimes averaged together, so read this before
                               pooling anything. Absent pre-v0.85 (bWt is a v0.85 column).
-      authBank / authAoa /
-      authStick             - THE MIRROR QUESTION. Every metric above detects the airframe being the
-                              limit; none of them detects the LAW being the limit, which is the case
-                              that is actually fixable. Each is the mean of one authority axis over
-                              the authority available on it: mean|bank|/maxBank, mean|aoa|/the AoA
-                              ceiling aoa_ceiling() gives, and max over the three axes of
-                              mean|outP|/|outR|/|outY| (stick is already normalised to +-1, so its
-                              own full deflection IS the denominator). authStick is a MAX over axes,
-                              not a sum: a pure-pitch segment using all of the elevator is at its
-                              limit whatever the rudder is doing.
-      authorityUsedFrac     - max(the three above, turnRateDemandRatio). Which is to say: of every
-                              authority we can measure, how much did the MOST-used one use? A MAX,
-                              because these are alternatives exactly the way the rails are -- one
-                              axis at its stop is a saturated segment however idle the others are, so
-                              a mean over axes would let three quiet ones hide it. Low with nothing
-                              railed = the law left performance on the table; see rail_warning's
-                              SLACK case, which is the only thing that thresholds this.
-                              A TERM WITH NO INPUTS IS DROPPED, NOT DEFAULTED (a 0.0 stand-in for an
-                              unmeasurable axis would drag the max down and manufacture SLACK) -- and
-                              dropped SILENTLY rather than into `skipped`, because every term is
-                              derived: whatever is missing was already reported by the block that
-                              owns it, and its absence here IS the record. Count the terms present to
-                              know how much the max is worth; rail_warning does.
+    THE MIRROR QUESTION -- "did the LAW leave performance on the table?" -- USED TO BE ANSWERED HERE,
+    by authBank / authAoa / authStick / authorityUsedFrac and the SLACK flag on top of them. All five
+    were DELETED in R40 and nothing replaced them, because the quantity was not a fraction of
+    authority. authorityUsedFrac equalled authBank = mean|bank| / maxBank in all 32 cells examined,
+    and bank in a coordinated turn is pinned by phi = atan(omega*V/g) BEFORE any control law runs --
+    so it read 0.87-0.99 on every card that demanded a fast turn and was measuring the CARD's demand,
+    not the law's effort. It exceeded 1.0 (to 1.084). The largest deliberate law defect in the corpus,
+    a 2.3x error, moved it 0.03-0.11: roughly 5x mis-scaled. SLACK fired 0 times in R39's 121
+    sustained turns, and all 8 fires in corpus history were one card geometry at 1.3 deg/s.
+    Re-gating it or taking a peak instead of a mean does not fix it -- THE DENOMINATOR IS WRONG, not
+    the window -- so a rescaled version of the same quantity is not wanted either. What a real
+    replacement needs is an achieved-vs-achievable pair on one axis (gSustained/gLimit, or achieved
+    turn rate over the probed omegaMax); turnRateDemandRatio above is the DEMAND side of exactly that
+    and is still published. Do not reintroduce a mean-over-a-limit as an effort metric.
 
     AoA-gate occupancy is deliberately NOT re-added here — aoa_g_metrics already reports it as
     aoaLimiterActivePct on the same segments.
@@ -640,13 +847,13 @@ def saturation_metrics(rows, cols, cfg, fbw):
     m, skipped = {}, {}
     n = len(rows)
     max_bank = cfg.get("maxBank")
-    if max_bank and {"targetBank", "bankTR"} <= cols:
-        clamped = sum(1 for r in rows if abs(r.get("targetBank", 0.0)) >= max_bank - 0.01)
+    if max_bank and "bankTR" in cols:
+        clamped = sum(1 for r in rows if abs(r.get("bankTR", 0.0)) >= max_bank - 0.01)
         over = [abs(r.get("bankTR", 0.0)) - max_bank for r in rows if abs(r.get("bankTR", 0.0)) > max_bank]
         m["bankClampActivePct"] = 100.0 * clamped / n if n else 0.0
         m["bankDemandExcessDeg"] = statistics.fmean(over) if over else 0.0
     else:
-        why = "missing column(s): targetBank/bankTR" if max_bank else "no maxBank= on the '# config' header"
+        why = "missing column: bankTR" if max_bank else "no maxBank= on the '# config' header"
         skipped["bankClampActivePct"] = skipped["bankDemandExcessDeg"] = why
 
     corner, glim = fbw.get("cornerSpeed"), fbw.get("gLimit")
@@ -676,25 +883,6 @@ def saturation_metrics(rows, cols, cfg, fbw):
         m["blendRailPct"] = 100.0 * sum(1 for r in rows if r.get("bWt", 0.0) >= BLEND_RAILED) / n if n else 0.0
     else:
         skipped["blendRailPct"] = "missing column: bWt (pre-v0.85 capture)"
-
-    # --- the low side: how much of the available authority did the law USE? (see docstring) -------
-    # turnRateDemandRatio is REUSED off `m`, not recomputed -- it is already exactly this quantity for
-    # the turn axis (demanded omega over achievable omega) and a second derivation of the omegaMax
-    # chain is the drift this file keeps warning about.
-    auth = {k: v for k, v in (("turnRateDemandRatio", m.get("turnRateDemandRatio")),) if v is not None}
-    if max_bank and "bank" in cols:
-        auth["authBank"] = statistics.fmean(abs(r.get("bank", 0.0)) for r in rows) / max_bank
-    ceil = aoa_ceiling(fbw)
-    if ceil and ceil > 0 and "aoa" in cols:
-        auth["authAoa"] = statistics.fmean(abs(r.get("aoa", 0.0)) for r in rows) / ceil
-    stick = [statistics.fmean(abs(r.get(c, 0.0)) for r in rows) for c in ("outP", "outR", "outY") if c in cols]
-    if stick:
-        auth["authStick"] = max(stick)
-    for k, v in auth.items():
-        if k != "turnRateDemandRatio":     # already in `m`; don't publish the same number twice
-            m[k] = v
-    if auth:
-        m["authorityUsedFrac"] = max(auth.values())
     return m, skipped
 
 
@@ -707,34 +895,11 @@ RAILED_PCT = 90.0
 # near 100% is already enough to make the segment's other numbers unresponsive.
 RAIL_METRICS = ("bankClampActivePct", "turnRateCapActivePct", "blendRailPct", "aoaAboveCeilingPct")
 
-# --- the mirror flag: SLACK -----------------------------------------------------------------------
-# Below this fraction of available authority, with nothing railed, the LAW is the limit rather than
-# the airframe -- the case that is actually fixable, and the one nothing in this file could see.
-# 0.5 IS A GUESS. Nothing has calibrated it: it says "the most-used authority axis averaged under
-# half of what was there", which is a plausible reading of "left performance on the table" and
-# nothing more. What would calibrate it: a batch where we ALREADY know the law under-flew — the R21
-# fixedwing-sweep corpus (bank clamped at 72 deg while g sat at 5.4 of 9) scored against a capture of
-# the same card+airframe flown at the real limit (hand-flown, or after the fix that lifts it) — with
-# the threshold set just under the authority the good run used. Until then read a SLACK line as
-# "look here", never as a verdict.
-SLACK_FRAC = 0.5
-
-# ...and it only means anything on a segment whose CARD is asking for sustained near-limit
-# performance. Measured over R27 (v0.90.1, four airframes): sustained turns run authorityUsedFrac
-# 0.53-1.07, while every oblique/micro step runs 0.04-0.23 — because a 0.5 deg step needs 0.5 deg
-# worth of authority, so "used 4% of the airframe" there is the CARD's demand, not the law's failure.
-# Ungated, this warning would fire on most of a batch's segments and on almost none of its turns,
-# which is the detector inverted. A step's authority question is about the TRANSIENT anyway, and a
-# mean over a settle-dominated window cannot answer it (that would need a peak/rise-window statistic,
-# not this one). authorityUsedFrac is still emitted for every segment type — only the flag is gated.
-SLACK_TYPES = ("sustained_turn", "alpha_hold")
-
-# The terms authorityUsedFrac maxes over (turnRateDemandRatio doubles as the turn term). The max is
-# over the terms that COULD be computed, so with one term it is a lower bound on the real number, and
-# "the law didn't use the authority available" is not a claim a lower bound can support -- a capture
-# merely missing a column would read as slack. Two is the least that can.
-AUTH_TERMS = ("turnRateDemandRatio", "authBank", "authAoa", "authStick")
-AUTH_MIN_TERMS = 2
+# THE MIRROR FLAG, SLACK, IS GONE (R40). It thresholded authorityUsedFrac, which was not a fraction
+# of authority -- see saturation_metrics' docstring for the measurement that killed it. Nothing
+# replaced it: an un-calibrated flag on a mis-scaled quantity is worse than the silence it filled,
+# because it reads like a verdict. If the question comes back, it needs an achieved-vs-achievable
+# pair, not a mean over a limit.
 
 
 def railed_metrics(seg):
@@ -759,7 +924,7 @@ def is_railed(seg):
 
 
 def rail_warning(seg):
-    """None, or the RAILED / SLACK warning for one scored segment (compute_segment()'s dict).
+    """None, or the RAILED warning for one scored segment (compute_segment()'s dict).
 
     All four numbers below have been computed for a while and NOTHING thresholded them, so a segment
     pinned against the bank clamp for 100% of its samples printed exactly like a healthy one — same
@@ -772,27 +937,12 @@ def rail_warning(seg):
     Threshold is deliberately blunt (>= 90%, a literal like the rest of this file's read thresholds):
     it separates "on the stop" from "worked hard", and a capture can always be re-read with another.
 
-    THE OTHER HALF, and the one worth acting on: nothing railed AND the law used under SLACK_FRAC of
-    the authority the airframe was offering. Railed says "no signal here, don't bother"; SLACK says
-    "the signal is here, the law is what's holding it back". Same warnings channel on purpose -- they
-    are the two answers to one question ("law or airframe?") and reading them apart is the whole job.
-    The two are mutually exclusive by construction (this only runs when `hits` is empty), so no
-    segment can ever be labelled both.
+    THE OTHER HALF -- "nothing railed, and the law still under-flew" -- has no flag any more; the
+    SLACK case was removed in R40 with the quantity it thresholded. See RAIL_METRICS above.
     """
-    mv = lambda k: (seg["metrics"].get(k) or {}).get("value")
     hits = railed_metrics(seg)
     if not hits:
-        used, terms = mv("authorityUsedFrac"), [k for k in AUTH_TERMS if mv(k) is not None]
-        if (used is None or used >= SLACK_FRAC or len(terms) < AUTH_MIN_TERMS
-                or seg.get("type") not in SLACK_TYPES):
-            return None
-        # The per-axis breakdown is not decoration: a bare max nobody can attribute is un-actionable,
-        # and WHICH axis came closest is the whole diagnosis (bank-limited by the 72 deg clamp reads
-        # nothing like AoA-limited, and both read nothing like a stick the law never deflects).
-        why = ", ".join(f"{k}={mv(k):.2f}" for k in terms)
-        return (f"segment '{seg['tag']}' is SLACK: used {100.0 * used:.0f}% of available authority, "
-                f"nothing railed -- the LAW is the limit, not the airframe ({why}). "
-                f"Its metrics CAN move: this segment is worth an A/B, unlike a railed one.")
+        return None
     # An alpha_* card exists to PUT the airframe past the ceiling — there, aoaAboveCeilingPct near
     # 100 is the card succeeding, and reading it as a defect would be the mirror of the mistake this
     # warning exists to prevent. Only say so when the AoA ceiling is the ONLY thing railed.
@@ -804,6 +954,33 @@ def rail_warning(seg):
     return (f"segment '{seg['tag']}' is RAILED: {', '.join(hits)} (>= {RAILED_PCT:.0f}% of samples). "
             f"A limit, not the control law, is flying that segment -- a gain change physically cannot "
             f"move its metrics, so read them as NO SIGNAL rather than as a score.{note}")
+
+
+def floor_warning(seg):
+    """None, or the RESOLUTION-FLOOR warning for one scored segment: its terminal pointing error is
+    at or under what the `off` column can physically resolve (see OFF_QUANTUM_DEG).
+
+    Third member of the same family as RAILED and SLACK, and there for the same reason: the number
+    prints exactly like a score. R35's near lanes put 94 of 192 terminal windows at exactly 0.0000
+    and three airframes tied there -- ranking anything on that is ranking float grain, and nothing in
+    the artifacts said so. RAILED says "a limit is flying this"; SLACK says "the law is the limit";
+    this one says "the INSTRUMENT is the limit". Unlike those two it is not mutually exclusive with
+    either: a railed segment can also be sub-quantum, and both facts are worth printing.
+
+    Match on the METRICS (`terminalOffDeg <= OFF_QUANTUM_DEG`, or `offFloorPct`), never on this
+    prose -- same rule as the railed flag, for the same reason."""
+    mv = lambda k: (seg["metrics"].get(k) or {}).get("value")
+    term, pct = mv("terminalOffDeg"), mv("offFloorPct")
+    if term is None or term >= OFF_FLOOR_DEG:
+        return None
+    frac = "" if pct is None else f", {pct:.0f}% of its samples read 0.00 or 0.02"
+    # Both replacements are named unconditionally rather than branching on which one this segment
+    # happens to have: norm_warning() masks NUMBERS, not words, so a branch here would split one
+    # roll-up line into two that say the same thing.
+    return (f"segment '{seg['tag']}' is AT THE RESOLUTION FLOOR: terminalOffDeg={term:.4f} deg is "
+            f"under the {OFF_FLOOR_DEG:.4f} deg floor of the `off` column{frac}. That is float grain, "
+            f"not a score -- it cannot rank anything. Use fixedWindowOffDeg / rmsPointingErrorDeg "
+            f"(and settleTime95) instead.")
 
 
 def damage_warning(rows, cols):
@@ -1015,10 +1192,187 @@ def _cap(s):
     return s[0].upper() + s[1:]
 
 
+# --- THE SETTLED-WINDOW OSCILLATION ESTIMATOR (R40) ----------------------------------------------
+# WHAT WAS WRONG. wobble_scan used to hand the WHOLE segment to aw.episodes() and publish the longest
+# episode's frequency. Both halves failed, and R39-C (debugtests/R39-C-settle-mode.md §3) measured
+# how:
+#   * IT SCORED THE ENTRY TRANSIENT. Every wobbleEpisodesAzErr episode in R35/R36/R37/R39 -- 42 of 42
+#     -- began at tSeg 1.9-2.6 s. A step segment's ring-down crosses the dead-band a few times on its
+#     way to zero and that is an "episode"; not one episode in four batches started after 3 s.
+#   * HALF OF THEM WERE THE DETECTOR'S OWN FLOOR. At the 4-crossing minimum the reported frequency is
+#     1.5/(t1-t0) whatever the signal did (see aw.episodes' min_cross). The "0.319-0.328 Hz reproduced
+#     to three digits across three batches" was 3/(2 x the transient's fourth zero crossing).
+#   * IT WAS AMPLITUDE-CENSORED. A real mode whose settled |azErr| never reaches the 0.5 deg dead-band
+#     reads as NO MODE -- which is how "the mode is absent on obDR6" got published when the mode was
+#     in fact present on every batch and both throttle arms.
+# THE REPLACEMENT separates the two questions. WHERE does the transient end (per segment, from the
+# signal's own envelope -- no fixed window anywhere in here), and WHAT is left after it, measured
+# amplitude-independently. Validated against the one independently-confirmed mode in the corpus: the
+# Darkreach azimuth mode, 32/32 legs, coherence 0.72-0.81 against 3/480 elsewhere. See selftest().
+
+WOBBLE_BIN_S = 2.0   # envelope bin. ~34 samples at the recorder's ~17 Hz: enough for a stable rms,
+                     # short against the 6-11 s decay it has to resolve.
+
+# The peak must clear white noise at this many sigma. For an N-sample autocorrelation of white noise
+# the peak height is 0 +- 1/sqrt(N), so the bar is derived from the window, not chosen.
+WOBBLE_SIGMA = 3.0
+
+# ...and the window must hold at least this many periods of whatever it reports. Two reasons, and the
+# second one sets the number: the autocorrelation's first peak is not separable from the central
+# lobe's tail below ~3 cycles, and the DFT cross-check below has resolution 1/T, so at f*T = 4 the
+# agreement tolerance is f/4 -- any fewer cycles and "the two estimators agree" stops meaning anything.
+WOBBLE_MIN_CYCLES = 4.0
+
+# Episodes are still counted, but only inside the settled window and only past this many crossings,
+# so aw.episodes' frequency floor cannot be published as a measurement. 6 crossings = 2.5 cycles.
+WOBBLE_MIN_CROSS = 6
+
+
+def _detrend(xs):
+    """xs minus its least-squares line. Removes both the DC term and any residual ramp -- a drift
+    left in place puts a large 1/T component in the DFT and a slow decay in the autocorrelation,
+    which is the transient leaking back in through the estimator after being windowed out."""
+    n = len(xs)
+    mx = (n - 1) / 2.0
+    my = statistics.fmean(xs)
+    sxx = sum((i - mx) ** 2 for i in range(n))
+    b = sum((i - mx) * (x - my) for i, x in enumerate(xs)) / sxx if sxx else 0.0
+    return [x - (my + b * (i - mx)) for i, x in enumerate(xs)]
+
+
+def settled_from(t, xs, bin_s=WOBBLE_BIN_S):
+    """First index past this signal's own entry transient (0 = there wasn't one).
+
+    NOT A CHOSEN WINDOW, which is the whole point -- a fixed "tSeg >= 10 s" is a constant tuned to
+    one batch's leg length. Bin |x| into `bin_s` rms bins and start at the first bin that has come
+    within one e-fold of the segment's own QUIETEST bin: the transient is a decay, so this is "the
+    envelope has stopped dominating what is left", stated in the signal's own units with the
+    segment's own floor as the reference. `e` is the natural unit of an exponential decay, not a
+    tuning knob.
+
+    Measured on 1120 R35/R36/R37 oblique legs: the envelope decays exponentially from ~4 s with a
+    pooled time constant of 6.4 s (9-11 s fitted per leg), and this rule lands at 6-17 s on a 30 s
+    leg -- moving with each leg's own decay instead of pinning every leg to the same number.
+    # ponytail: |x| rms, not a Hilbert envelope. Ceiling is a signal with a large DC offset, where
+    # the rms never falls; none of WOBBLE_SIGNALS has one (all are errors or stick commands about 0).
+    """
+    if not t:
+        return 0
+    t0 = t[0]
+    bins = {}
+    for ti, x in zip(t, xs):
+        bins.setdefault(int((ti - t0) // bin_s), []).append(x)
+    ks = sorted(b for b in bins if len(bins[b]) >= 8)
+    if len(ks) < 4:
+        return 0                                          # too short to have a resolvable transient
+    r = {b: math.sqrt(sum(y * y for y in bins[b]) / len(bins[b])) for b in ks}
+    floor = min(r.values())
+    if floor <= 0:
+        return 0
+    start = next((b for b in ks if r[b] <= math.e * floor), ks[-1]) * bin_s + t0
+    return next((i for i, ti in enumerate(t) if ti >= start), len(t))
+
+
+def _acf_first_peak(xs):
+    """(lag in samples, peak height) of the first non-central autocorrelation peak of a detrended
+    signal, or (None, None). Height is the coherence: high = periodic, 0 = white.
+
+    BIASED estimator (divide by the full sum-of-squares, not by the n-k overlap), which is the
+    standard form and the one R39-C's published 0.72-0.81 was measured with -- keep it, or those
+    numbers stop being comparable. Consequence worth knowing when reading the value: it tapers by
+    (1 - lag/n), so a PERFECT sine peaks at ~0.75 when the lag is a quarter of the window, not at
+    1.0. The unbiased form removes the taper and adds variance exactly where the peak is; the taper
+    is monotone in lag and identical across a batch's equal-length legs, so it cannot reorder a
+    comparison, which is all this number is used for."""
+    n = len(xs)
+    d = sum(x * x for x in xs)
+    if d <= 0:
+        return None, None
+    r = [sum(xs[i] * xs[i + k] for i in range(n - k)) / d for k in range(n // 2)]
+    k = 1
+    while k < len(r) and r[k] > 0:            # walk off the central lobe first
+        k += 1
+    best, bk = None, None
+    while k < len(r) - 1:
+        if r[k] >= r[k - 1] and r[k] >= r[k + 1] and (best is None or r[k] > best):
+            best, bk = r[k], k
+        k += 1
+    return bk, best
+
+
+def _dft_peak_hz(xs, dt):
+    """Frequency of the largest Hann-windowed DFT bin of a detrended signal (None if none resolvable).
+    The INDEPENDENT half of the cross-check: it shares no arithmetic with the autocorrelation, so the
+    two agreeing is evidence and the two disagreeing is the signature of a noise peak (R39-C measured
+    0.003-0.005 Hz agreement on the real mode against 0.08-0.67 Hz elsewhere)."""
+    n = len(xs)
+    if n < 8:
+        return None
+    y = [x * (0.5 - 0.5 * math.cos(2 * math.pi * i / (n - 1))) for i, x in enumerate(xs)]
+    best, bf = -1.0, None
+    for k in range(1, n // 4):                # 1 cycle over the window .. half of Nyquist
+        w = 2 * math.pi * k / n
+        re = sum(y[i] * math.cos(w * i) for i in range(n))
+        im = sum(y[i] * math.sin(w * i) for i in range(n))
+        p = re * re + im * im
+        if p > best:
+            best, bf = p, k / (n * dt)
+    return bf
+
+
+def osc_mode(t, xs):
+    """(freqHz | None, coherence | None) for one signal over its settled window.
+
+    coherence is the autocorrelation first-peak height and is reported WHENEVER a window exists --
+    including when it is near zero, because "measured, and incoherent" is a finding and a missing
+    number is not. freqHz is reported only when all three hold:
+      * the peak clears white noise at WOBBLE_SIGMA / sqrt(N);
+      * the two independent estimators land in the SAME DFT bin (|f_acf - f_dft| <= 1/T -- one bin is
+        the instrument's own resolution, so demanding better agreement than the instrument resolves
+        would be asking for precision nobody has);
+      * the window holds WOBBLE_MIN_CYCLES periods of it.
+    Otherwise it is None -- NOT a floor value, which is exactly what the crossing detector published.
+    # ponytail: dt = T/(n-1). The recorder alternates 0.050/0.067 s steps, so the grid is not uniform
+    # and this is the mean. The resulting frequency error is second-order and ~50x under the 0.06 Hz
+    # effects this is used to separate; resample onto a uniform grid if that ever stops being true.
+    # ponytail: the ACF lag is integer samples, ~2% frequency quantization at 0.35 Hz. Parabolic
+    # interpolation of the peak would remove it; not worth it against a 0.06 Hz effect.
+    """
+    i0 = settled_from(t, xs)
+    tw, xw = t[i0:], xs[i0:]
+    n = len(tw)
+    if n < 32:
+        return None, None
+    xw = _detrend(xw)
+    T = tw[-1] - tw[0]
+    if T <= 0:
+        return None, None
+    dt = T / (n - 1)
+    k, h = _acf_first_peak(xw)
+    if k is None or h is None:
+        return None, None
+    f = 1.0 / (k * dt)
+    fd = _dft_peak_hz(xw, dt)
+    ok = (h >= WOBBLE_SIGMA / math.sqrt(n) and fd is not None and abs(f - fd) <= 1.0 / T
+          and f * T >= WOBBLE_MIN_CYCLES)
+    return (f if ok else None), h
+
+
 def wobble_scan(t, rows, cols, dur):
-    """Oscillation-episode counts/frequencies via analyze_wobble.episodes() — the same detector,
-    same signals/dead-bands, that analyze-wobble.py's own analyze() scans. Also stick sign-flip
-    rate per axis via analyze_wobble.crossings()."""
+    """Per-signal settled-window oscillation metrics, plus the per-axis stick sign-flip rate.
+
+      stickFlipRate{P,R,Y}  - crossings/s of the raw command over the WHOLE segment (unchanged: it is
+                              a rate, not an episode, and the transient's flips are part of it).
+      wobbleFreqHz{Sig}     - osc_mode()'s frequency. ABSENT when the evidence does not support one.
+      wobbleCoherence{Sig}  - osc_mode()'s autocorrelation peak height. THE DENOMINATOR: read the
+                              frequency only with this beside it, the way rollYawOpposedPct is read
+                              with bothActivePct.
+      wobbleEpisodes{Sig}   - sustained dead-band episodes INSIDE the settled window, past
+                              WOBBLE_MIN_CROSS crossings. Still amplitude-gated by construction (that
+                              is what an episode is), so a 0 here with a coherent wobbleFreqHz beside
+                              it means "a real mode, under the dead-band" -- the exact case that used
+                              to read as "no mode".
+    """
     m = {}
     for axis, lbl in (("outP", "P"), ("outR", "R"), ("outY", "Y")):
         if axis in cols:
@@ -1027,11 +1381,15 @@ def wobble_scan(t, rows, cols, dur):
     for name, dead in aw.WOBBLE_SIGNALS:  # the detector's own dead-bands, not a copy of them
         if name not in cols:
             continue
-        eps = aw.episodes(t, [r.get(name, 0.0) for r in rows], dead)
-        m[f"wobbleEpisodes{_cap(name)}"] = len(eps)
-        if eps:
-            worst = max(eps, key=lambda e: e["dur"])
-            m[f"wobbleFreqHz{_cap(name)}"] = worst["freq"]
+        xs = [r.get(name, 0.0) for r in rows]
+        f, h = osc_mode(t, xs)
+        if h is not None:
+            m[f"wobbleCoherence{_cap(name)}"] = h
+        if f is not None:
+            m[f"wobbleFreqHz{_cap(name)}"] = f
+        i0 = settled_from(t, xs)
+        m[f"wobbleEpisodes{_cap(name)}"] = len(
+            aw.episodes(t[i0:], xs[i0:], dead, min_cross=WOBBLE_MIN_CROSS))
     return m
 
 
@@ -1182,12 +1540,12 @@ def score_run(path):
         seg_type = infer_type(tag)
         seg = compute_segment(tag, seg_type, seg_rows, cols, ctx)
         segments.append(seg)
-        for w in (_tag_warning(tag, seg_type), rail_warning(seg)):
+        for w in (_tag_warning(tag, seg_type), rail_warning(seg), floor_warning(seg)):
             if w:
                 warnings.append(w)
-    dw = damage_warning(rows, cols)   # whole-capture, so outside the per-segment loop
-    if dw:
-        warnings.append(dw)
+    for w in (damage_warning(rows, cols), dead_warning(meta)):  # whole-capture: outside the loop
+        if w:
+            warnings.append(w)
     return {"provenance": prov, "segments": segments, "warnings": warnings}
 
 
@@ -1295,7 +1653,10 @@ def selftest():
             for i in range(len(az))]
     pcols = {"t", "off", "azErr", "elevErr"}
     pm, pskip = pointing_metrics([r["t"] for r in prow], prow, pcols)
-    assert pskip == {}, pskip
+    # 1.1 s of samples: SHORTER than the 7-8 s fixed window, so that one metric must be absent with a
+    # reason -- never a mean over whatever samples happen to exist (see FIXED_WINDOW_START_S).
+    assert set(pskip) == {"fixedWindowOffDeg"}, pskip
+    assert "fixedWindowOffDeg" not in pm, pm
     assert pm["overshootAzDeg"] > 1.5, pm                    # positive number, not 0-by-construction
     assert pm["overshootElDeg"] is None, pm                  # no crossing -> absent, distinguishable from 0.0
     assert pm["minOffDeg"] < pm["terminalOffDeg"], pm        # decayed then rose again
@@ -1309,6 +1670,67 @@ def selftest():
     assert pointing_metrics([r["t"] for r in neg], neg, pcols)[0]["entryAzSign"] == -1
     zero = [dict(r, azErr=0.0) for r in prow[:1]] + prow[1:]
     assert pointing_metrics([r["t"] for r in zero], zero, pcols)[0]["entryAzSign"] == 0
+
+    # --- the 8 s / 30 s pair: settleTime95, fixedWindowOffDeg, offFloorPct ------------------------
+    # WHY these exist (R35, 2026-08-01): every oblique leg in the corpus is 8 s long and
+    # terminalOffDeg therefore scores a MID-TRANSIENT -- the off minimum lands after 8 s on 496 of
+    # 496 legs of the 30 s twin card, off@16s < off@8s on 487 of them (median ratio 3.53x). And once
+    # the residual reaches the recorder's own resolution, terminalOffDeg stops measuring the law at
+    # all: 94 of 192 near-lane terminal windows read exactly 0.0000 and three airframes tied there.
+    def point_of(ts, offs):
+        return pointing_metrics(ts, [{"t": ti, "off": o} for ti, o in zip(ts, offs)], {"t", "off"})
+
+    # (1) a 30 s leg that really does settle: 6 deg step, on 0.30 deg from t=5.0 onward.
+    t30 = [0.5 * i for i in range(61)]
+    off30 = [max(0.30, 6.0 - 0.6 * i) for i in range(61)]
+    m30, s30 = point_of(t30, off30)
+    assert "fixedWindowOffDeg" not in s30, s30    # (azErr/elevErr are absent by construction here)
+    assert abs(m30["terminalOffDeg"] - 0.30) < 1e-9, m30
+    assert abs(m30["settleTime95"] - 5.0) < 1e-9, m30          # last sample outside 1.05*0.30 is t=4.5
+    assert abs(m30["fixedWindowOffDeg"] - 0.30) < 1e-9, m30    # 7-8 s from the START, not from the end
+    assert m30["offFloorPct"] == 0.0, m30
+    seg_of_m = lambda mm, tag="obDR6": {"tag": tag, "type": "oblique_step",
+                                        "metrics": {k: {"value": v, "grade": None} for k, v in mm.items()}}
+    assert floor_warning(seg_of_m(m30)) is None
+
+    # (2) THE SAME DECAY TRUNCATED AT 8 S -- the corpus's actual leg length. Still transient, so
+    # there is no settled value to be within 5% of and the honest answer is "did not settle".
+    # terminalOffDeg cannot give that answer: it returns a plausible 2.35 deg either way.
+    t8 = [0.5 * i for i in range(17)]
+    off8 = [6.0 * math.exp(-ti / 8.0) for ti in t8]
+    m8, _ = point_of(t8, off8)
+    assert m8["settleTime95"] is None, m8
+    assert m8["terminalOffDeg"] > 2.3, m8
+    assert abs(m8["fixedWindowOffDeg"] - statistics.fmean(off8[14:])) < 1e-9, m8   # exactly 8 s: measurable
+    # ...and one sample shorter than the window is NOT a short-window mean, it is nothing.
+    assert "fixedWindowOffDeg" in point_of(t8[:-1], off8[:-1])[1], point_of(t8[:-1], off8[:-1])
+
+    # (3) THE ADVERSARIAL ONE: a leg that dithers 0.00/0.02, i.e. sits on the recorder's resolution.
+    # WHEN it settled is still resolvable (the band floors at BAND_MIN_DEG, above OFF_FLOOR_DEG);
+    # WHAT it settled at is not, so the fixed-window value is withheld with a reason and the warning
+    # fires. A number that cannot order two airframes must not be published as if it could.
+    tdi = [0.0625 * i for i in range(320)]                                        # 20 s
+    offdi = [max(0.0, 3.0 - 0.1 * i) if i < 32 else (0.02 if i % 2 else 0.0) for i in range(320)]
+    mdi, sdi = point_of(tdi, offdi)
+    assert mdi["terminalOffDeg"] < OFF_FLOOR_DEG, mdi
+    assert "fixedWindowOffDeg" not in mdi and "resolution floor" in sdi["fixedWindowOffDeg"], (mdi, sdi)
+    assert mdi["offFloorPct"] > 85.0, mdi                      # 0.02 counts as floor: it IS the first rung
+    assert mdi["settleTime95"] is not None and mdi["settleTime95"] < 2.0, mdi
+    fw = floor_warning(seg_of_m(mdi))
+    assert fw is not None and "RESOLUTION FLOOR" in fw and "obDR6" in fw, fw
+    assert "rmsPointingErrorDeg" in fw and "fixedWindowOffDeg" in fw, fw   # both replacements named
+    # a steady 0.02 -- one rung, indistinguishable from 0.0198 or 0.0395 -- is floor too, and 0.05 is not.
+    assert floor_warning(seg_of_m(point_of(t30, [0.02] * 61)[0])) is not None
+    assert floor_warning(seg_of_m(point_of(t30, [0.05] * 61)[0])) is None
+
+    # (4) settleTime95 must never fall back to "the last sample looked fine".
+    assert point_of(t30, off30[:-1] + [3.0])[0]["settleTime95"] is None            # excursion at the end
+    late = list(off30)
+    late[-3] = 3.0                                                                 # 1.0 s before the end
+    assert point_of(t30, late)[0]["settleTime95"] is None, late[-4:]               # tail too short to hold
+    assert point_of(t30, [0.30] * 61)[0]["settleTime95"] == 0.0                    # never left the band
+    assert settle_time_95([0.0, 0.2, 0.4], [0.3, 0.3, 0.3], 0.3) is None           # whole segment < hold
+    assert settle_time_95(t30, off30, None) is None                                # no terminal value
 
     # ...and the whole block is now on EVERY segment type (the defect: it was fine_track-only, so a
     # steady lag through turn360 was invisible), including a missing-column segment that must skip
@@ -1337,16 +1759,57 @@ def selftest():
     sine = [A * math.sin(2 * math.pi * f * i * dt) for i in range(N)]
     assert abs(rms(sine) - A / math.sqrt(2)) < 0.01, rms(sine)
 
-    # fine_track wiring: feed that same-shaped oscillation (now on azErr, amplitude clears the
-    # 0.5deg dead-band) through wobble_scan and confirm the reused episode detector reports both
-    # a nonzero count and roughly the known frequency.
+    # --- the settled-window oscillation estimator (R40) ------------------------------------------
+    # (1) a clean sustained 0.4 Hz mode: frequency recovered, coherence near 1, episodes counted.
     rows = [{"t": i * dt, "azErr": 5.0 * math.sin(2 * math.pi * 0.4 * i * dt),
-             "outP": (0.6 if i % 2 else -0.6)} for i in range(600)]
+             "outP": (0.6 if i % 2 else -0.6)} for i in range(1200)]
     tt = [r["t"] for r in rows]
     wm = wobble_scan(tt, rows, {"azErr", "outP"}, tt[-1] - tt[0])
+    assert abs(wm["wobbleFreqHzAzErr"] - 0.4) < 0.02, wm
+    assert wm["wobbleCoherenceAzErr"] > 0.8, wm      # < 1.0 by the biased estimator's taper
     assert wm["wobbleEpisodesAzErr"] >= 1, wm
-    assert abs(wm["wobbleFreqHzAzErr"] - 0.4) < 0.08, wm     # crossing-based estimate, generous tolerance
     assert wm["stickFlipRateP"] > 0, wm                      # outP alternates every sample -> flips every row
+
+    # (2) THE DEFECT ITSELF: a pure decaying entry transient with NO sustained mode. The old detector
+    # reported an episode and a frequency here (42 of 42 corpus episodes were this shape, all
+    # starting at tSeg 1.9-2.6 s); the rebuilt one must report NEITHER, and must place its window
+    # past the ringing rather than at a fixed offset.
+    trans = [{"t": i * dt, "azErr": 8.0 * math.exp(-i * dt / 2.0) * math.sin(2 * math.pi * 0.5 * i * dt)}
+             for i in range(1200)]
+    ttr = [r["t"] for r in trans]
+    xtr = [r["azErr"] for r in trans]
+    assert ttr[settled_from(ttr, xtr)] > 6.0, ttr[settled_from(ttr, xtr)]   # past ~3 time constants
+    wt = wobble_scan(ttr, trans, {"azErr"}, ttr[-1] - ttr[0])
+    assert "wobbleFreqHzAzErr" not in wt, wt                 # nothing coherent left after the decay
+    assert wt["wobbleEpisodesAzErr"] == 0, wt
+    # ...and the old detector DID fire on it -- otherwise this case proves nothing.
+    assert len(aw.episodes(ttr, xtr, 0.5)) >= 1, "the pre-R40 detector must fire here"
+
+    # (3) AMPLITUDE CENSORING, the "the mode is absent on obDR6" failure. Same mode at 1/50th the
+    # amplitude: far under the 0.5 deg episode dead-band, so the episode count is 0 -- and the
+    # frequency must still come out, because the new estimator is amplitude-independent.
+    quiet = [{"t": i * dt, "azErr": 0.1 * math.sin(2 * math.pi * 0.4 * i * dt)} for i in range(1200)]
+    wq = wobble_scan([r["t"] for r in quiet], quiet, {"azErr"}, quiet[-1]["t"])
+    assert wq["wobbleEpisodesAzErr"] == 0, wq
+    assert abs(wq["wobbleFreqHzAzErr"] - 0.4) < 0.02, wq
+    assert not aw.crossings(None, [r["azErr"] for r in quiet], 0.5), "must be under the dead-band"
+
+    # (4) NOISE IS NOT A MODE. Deterministic pseudo-random (no `random`, so the assert is stable):
+    # coherence is published, a frequency is not.
+    noise = [{"t": i * dt, "azErr": ((i * 1103515245 + 12345) % 2048) / 1024.0 - 1.0} for i in range(1200)]
+    wn = wobble_scan([r["t"] for r in noise], noise, {"azErr"}, noise[-1]["t"])
+    assert "wobbleFreqHzAzErr" not in wn, wn
+    assert wn["wobbleCoherenceAzErr"] is not None, wn        # measured-and-incoherent is a finding
+    # (5) the crossing floor can no longer be published: aw.episodes' own minimum is a constant
+    # frequency, and wobble_scan passes 6 so a 4-crossing episode is not an episode here at all.
+    short = [0.0, 1.0, -1.0, 1.0, -1.0, 1.0, 0.0]            # exactly 4 crossings, spanning 3 s
+    ts = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert len(aw.episodes(ts, short, 0.5)) == 1
+    assert abs(aw.episodes(ts, short, 0.5)[0]["freq"] - 1.5 / 3.0) < 1e-9   # 1.5/(t1-t0): the floor
+    assert aw.episodes(ts, short, 0.5, min_cross=WOBBLE_MIN_CROSS) == []
+    # (6) a segment too short to hold WOBBLE_MIN_CYCLES gives None, not a number.
+    stub = [{"t": i * dt, "azErr": math.sin(2 * math.pi * 0.4 * i * dt)} for i in range(40)]
+    assert osc_mode([r["t"] for r in stub], [r["azErr"] for r in stub])[0] is None
 
     # hover_metrics — pure linear drift (no jitter): drift rate is exact; positionRMS is the RMS
     # deviation from the mean of a 0..10 ramp, i.e. sqrt(mean([-5,-3,-1,1,3,5]^2)) = sqrt(70/6).
@@ -1396,6 +1859,21 @@ def selftest():
     sm, sskip = saturation_metrics(sat_rows, satcols, satcfg, satfbw)
     assert sskip == {}, sskip
     assert abs(sm["bankClampActivePct"] - 75.0) < 1e-9, sm            # 3 of 4 at the wall
+    # R40: it reads bankTR, and it must READ NOTHING FROM targetBank -- which is the removed Legacy
+    # law's azErr-proportional bank command and errs in BOTH directions (see the docstring). Both
+    # directions are asserted, because a fix aimed at only one of them would pass a one-sided test.
+    #   UNDER-READ: on the wall, targetBank flat 0 (a settled turn: bigTurn 1, azErr ~0).
+    under = [dict(r, targetBank=0.0) for r in sat_rows]
+    assert abs(saturation_metrics(under, satcols, satcfg, satfbw)[0]["bankClampActivePct"] - 75.0) < 1e-9
+    #   OVER-READ: targetBank pinned at the wall on every row while bankTR is nowhere near it
+    #   (a big azimuth step on a yaw-weak airframe: bankGain up to 13.5, so 5.4 deg of azErr saturates).
+    over = [dict(r, targetBank=72.0, bankTR=20.0) for r in sat_rows]
+    assert saturation_metrics(over, satcols, satcfg, satfbw)[0]["bankClampActivePct"] == 0.0
+    #   ...and the column's absence changes nothing at all.
+    no_tb = saturation_metrics(sat_rows, satcols - {"targetBank"}, satcfg, satfbw)
+    assert abs(no_tb[0]["bankClampActivePct"] - 75.0) < 1e-9 and no_tb[1] == {}, no_tb
+    # ...and with bankTR itself gone it is SKIPPED, never 0.0.
+    assert "bankClampActivePct" in saturation_metrics(sat_rows, satcols - {"bankTR"}, satcfg, satfbw)[1]
     # the lateralHold latch, the limit that decides comparability: 3 of 4 samples with eFine
     # multiplied by zero. 0.999 is a rail test, so 0.4 must NOT count and 1.0 must.
     assert abs(sm["blendRailPct"] - 75.0) < 1e-9, sm
@@ -1429,9 +1907,10 @@ def selftest():
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateCapActivePct"] == 100.0
     assert saturation_metrics(low_aoa, satcols, satcfg, satfbw)[0]["turnRateDemandRatio"] > 1.9
 
-    # authorityUsedFrac — the mirror of those rails, built to exact arithmetic. maxBank 72 and the
-    # alphaLimiter-20 ceiling (17) give round fractions: mean|bank| 36 -> 0.5, mean|aoa| 8.5 -> 0.5.
-    # The rows are SIGN-ALTERNATING on every axis, so a mean that forgot the abs() would read 0.0.
+    # THE AUTHORITY BLOCK IS GONE (R40) and must stay gone: authorityUsedFrac was mean|bank|/maxBank
+    # wearing a general name, and bank in a coordinated turn is pinned by atan(omega*V/g) before the
+    # law runs. Asserting its ABSENCE is the only thing that stops it being reintroduced by a
+    # well-meaning "the mirror question has no metric" patch -- see saturation_metrics' docstring.
     authcfg = {"maxBank": 72.0}
     authfbw = {"cornerSpeed": 160.0, "gLimit": 9.0, "alphaLimiter": 20.0}
     authcols = {"bank", "aoa", "outP", "outR", "outY", "spd", "bankTR", "targetBank"}
@@ -1440,28 +1919,13 @@ def selftest():
                  {"bank": -36.0, "aoa": -8.5, "outP": 0.4, "outR": -0.1, "outY": 0.0,
                   "spd": 266.0, "bankTR": 10.0, "targetBank": 10.0}]
     aum, auskip = saturation_metrics(auth_rows, authcols, authcfg, authfbw)
-    assert abs(aum["authBank"] - 0.5) < 1e-9, aum
-    assert abs(aum["authAoa"] - 0.5) < 1e-9, aum
-    assert abs(aum["authStick"] - 0.4) < 1e-9, aum        # MAX over axes (pitch), not their sum/mean
-    assert abs(aum["authorityUsedFrac"] - 0.5) < 1e-9, aum
-    # the turn term is the same turnRateDemandRatio already published, and it can WIN the max: at
-    # bankTR 81.75 the demand is 0.762 of omegaMax while bank/aoa/stick are unchanged at 0.5/0.5/0.4.
-    hot, _ = saturation_metrics([dict(r, bankTR=81.75, targetBank=60.0) for r in auth_rows],
-                                authcols, authcfg, authfbw)
-    assert abs(hot["authorityUsedFrac"] - hot["turnRateDemandRatio"]) < 1e-9, hot
-    assert abs(hot["authorityUsedFrac"] - 0.762) < 0.005, hot
-    # A term with no inputs is DROPPED, not defaulted: a 0.0 stand-in for an unmeasurable axis would
-    # drag the max down and manufacture SLACK out of a missing column.
-    no_aoa, _ = saturation_metrics(auth_rows, authcols - {"aoa"}, authcfg, authfbw)
-    assert "authAoa" not in no_aoa and abs(no_aoa["authorityUsedFrac"] - 0.5) < 1e-9, no_aoa
-    assert "authBank" not in saturation_metrics(auth_rows, authcols, {}, authfbw)[0]   # no maxBank=
-    assert "authAoa" not in saturation_metrics(auth_rows, authcols, authcfg, {})[0]    # pre-v0.55 fbw
-    # ...and dropped SILENTLY, never into `skipped` -- these are derived, so a skip entry here would
-    # re-report a missing column the owning block already reported (and would break the two
-    # graceful-degradation set-equality asserts below).
-    auth_keys = {"authorityUsedFrac", "authBank", "authAoa", "authStick"}
-    assert not (auth_keys & set(auskip)), auskip                       # all four computable here
-    assert not (auth_keys & set(saturation_metrics(auth_rows, set(), {}, {})[1])), "none computable"
+    gone = {"authorityUsedFrac", "authBank", "authAoa", "authStick"}
+    assert not (gone & set(aum)) and not (gone & set(auskip)), (aum, auskip)
+    assert not ({"SLACK_FRAC", "SLACK_TYPES", "AUTH_TERMS", "AUTH_MIN_TERMS"} & set(globals()))
+    # ...and the demand side of the question, which was measured against a real denominator, stays:
+    # at bankTR 81.75 the demand is 0.762 of the probed omegaMax.
+    hot, _ = saturation_metrics([dict(r, bankTR=81.75) for r in auth_rows], authcols, authcfg, authfbw)
+    assert abs(hot["turnRateDemandRatio"] - 0.762) < 0.005, hot
 
     import tempfile, io, contextlib
     # rail_warning — the flag on top of those same numbers. A segment at the wall must SAY so, and
@@ -1494,45 +1958,14 @@ def selftest():
         dict(alpha_railed, metrics=dict(alpha_railed["metrics"],
                                         blendRailPct={"value": 100.0, "grade": None})))
 
-    # SLACK — the low side, and the three verdicts one function now has to keep apart. Same segment
-    # type and columns each time; ONLY how hard the law flew changes.
+    # An idle segment is NOT a warning any more (that was SLACK). Nothing on any stop, ~10% of every
+    # axis: silence. Kept as a case because it is the one the removal changes.
     seg_of = lambda **kw: compute_segment(
         "turn360", "sustained_turn",
         [dict(r, t=i * 0.1, **kw) for i, r in enumerate(auth_rows * 8)],
         authcols | {"t"}, {"cfg": authcfg, "fbw": authfbw})
-    # (1) RAILED: pinned on the 72 deg clamp. Every OTHER authority is near zero here on purpose --
-    # the two flags must be mutually exclusive even when both conditions look true, because "no
-    # signal" and "worth an A/B" are opposite instructions to the reader.
-    railed = seg_of(targetBank=72.0, bank=1.0, aoa=0.1, outP=0.01, outR=0.01, outY=0.0)
-    assert "RAILED" in rail_warning(railed) and "SLACK" not in rail_warning(railed), rail_warning(railed)
-    assert railed["metrics"]["authorityUsedFrac"]["value"] < SLACK_FRAC, railed["metrics"]
-    # (2) SLACK: nothing on any stop, ~10% of every axis used.
-    slack = seg_of(targetBank=10.0, bank=7.2, aoa=1.7, outP=0.05, outR=0.05, outY=0.0)
-    sw = rail_warning(slack)
-    assert sw is not None and "SLACK" in sw and "RAILED" not in sw, sw
-    assert "turn360" in sw and "used 10%" in sw, sw
-    assert "authBank=0.10" in sw and "authAoa=0.10" in sw, sw      # attributable, not a bare max
-    # (3) healthy: nothing railed, three quarters of the bank authority in use -> neither flag. A
-    # warning that fires on a segment doing its job is the failure mode both of these exist to avoid.
-    assert rail_warning(seg_of(targetBank=60.0, bank=54.0, aoa=12.0,
-                               outP=0.6, outR=0.2, outY=0.1)) is None
-    # exactly at the threshold is NOT slack (mirrors RAILED's >=); just under is.
-    slack_seg = lambda frac, **kw: dict({"tag": "turn360", "type": "sustained_turn", "metrics": {
-        "authorityUsedFrac": {"value": frac, "grade": None},
-        "authBank": {"value": frac, "grade": None},
-        "authStick": {"value": 0.01, "grade": None}}}, **kw)
-    assert rail_warning(slack_seg(SLACK_FRAC)) is None
-    assert "SLACK" in rail_warning(slack_seg(SLACK_FRAC - 0.01))
-    # one term is a LOWER bound on the max, so a capture merely missing columns must not read as slack.
-    assert rail_warning({"tag": "turn360", "type": "sustained_turn",
-                         "metrics": {"authorityUsedFrac": {"value": 0.1, "grade": None},
-                                     "turnRateDemandRatio": {"value": 0.1, "grade": None}}}) is None
-    # THE TYPE GATE (see SLACK_TYPES): a 0.5 deg oblique step uses ~4% of the airframe BY DESIGN --
-    # measured 0.04-0.23 across every step segment of R27 — so flagging it would invert the detector.
-    assert rail_warning(slack_seg(0.04, type="oblique_step")) is None
-    assert rail_warning(slack_seg(0.04, type="micro_step")) is None
-    assert "SLACK" in rail_warning(slack_seg(0.04, type="alpha_hold"))
-    # ...and an `arm` segment carries no metrics at all, so it can never be either.
+    assert rail_warning(seg_of(bank=7.2, aoa=1.7, outP=0.05, outR=0.05, outY=0.001)) is None
+    # ...and an `arm` segment carries no metrics at all, so it can never be flagged.
     assert rail_warning(compute_segment("arm", "arm", [dict(r, t=0.1 * i) for i, r in enumerate(auth_rows)],
                                         authcols | {"t"}, {"cfg": authcfg, "fbw": authfbw})) is None
     # score_run's channel: the warning has to reach result["warnings"], where print_table, the
@@ -1559,32 +1992,44 @@ def selftest():
         out = buf.getvalue()
         assert "11 file(s)" in out and "fixedwing-sweep x11" in out, out
         assert "[9/11 file(s)" in out and "RAILED" in out and "--verbose" in out, out
-        # SLACK rides the SAME channel and must dedup the same way -- the percentage in its text is
-        # the obvious thing that would defeat norm_warning, and ten replicates of one slack card is
-        # exactly the case the roll-up exists for.
-        c = "segment 'turn360' is SLACK: used 31% of available authority (authBank=0.31)."
-        d = "segment 'turn360' is SLACK: used 28% of available authority (authBank=0.28)."
-        assert norm_warning(c) == norm_warning(d), (norm_warning(c), norm_warning(d))
-        assert norm_warning(c) != norm_warning(a)                 # SLACK and RAILED never collapse
+        # The DEAD COLUMN warning rides the SAME channel and must dedup the same way.
+        c = "capture has DEAD COLUMN(S): dmgFrac, engP -- present in the header, identically 0.0."
+        assert norm_warning(c) != norm_warning(a)                 # never collapses into RAILED
     finally:
         os.remove(rail_csv)
 
-    # ...and end to end through score_run: a turn360 that rails NOTHING and uses ~10% of bank/AoA/
-    # stick has to come out of the same result["warnings"] list a RAILED one does.
-    fd_s, slack_csv = tempfile.mkstemp(suffix=".csv")
+    # --- DEAD COLUMNS, end to end (R40) ----------------------------------------------------------
+    # THE INVARIANT: a column present in the header and never written must SKIP its metrics, never
+    # score them as 0.0. Three shapes in one file: a live column, one that is identically 0 for the
+    # whole capture (`dmgFrac` -- structurally so, the damage abort truncates before the row is
+    # written, 0 non-zero in 641,555 indexed rows), and one that is constant NON-zero (`bWt` railed
+    # at 1, which is a real finding and must survive).
+    fd_dc, dc_csv = tempfile.mkstemp(suffix=".csv")
     try:
-        with os.fdopen(fd_s, "w", newline="") as f:
-            f.write("# mouseaim recording v0.90.0 run=R1 rec=2 session=t\n"
+        with os.fdopen(fd_dc, "w", newline="") as f:
+            f.write("# mouseaim recording v0.96.0 run=R1 rec=9 session=t\n"
                     "# card fixedwing-sweep\n# config maxBank=72.0\n"
-                    "# fbw cornerSpeed=160 gLimit=9 alphaLimiter=20 maxPitchAngVel=0.75\n"
-                    "t,off,segTag,targetBank,bankTR,bWt,bank,aoa,outP,outR,outY,spd\n"
-                    + "".join(f"{i * 0.1:.1f},3.0,turn360,10.0,10.0,0.2,7.2,1.7,0.05,0.05,0.0,266.0\n"
-                              for i in range(20)))
-        sr_ = score_run(slack_csv)
-        assert any("SLACK" in w for w in sr_["warnings"]), sr_["warnings"]
-        assert not any("RAILED" in w for w in sr_["warnings"]), sr_["warnings"]
+                    "t,off,segTag,bankTR,bWt,dmgFrac,aoaRec\n"
+                    + "".join(f"{i * 0.1:.1f},3.0,turn360,81.75,1.0,0.000,0.000\n" for i in range(20)))
+        meta_dc, rows_dc, cols_dc = load_csv(dc_csv)
+        assert meta_dc["dead"] == ["aoaRec", "dmgFrac"], meta_dc["dead"]
+        assert "dmgFrac" not in cols_dc and "bWt" in cols_dc, cols_dc   # constant non-zero survives
+        dcr = score_run(dc_csv)
+        assert any("DEAD COLUMN" in w and "dmgFrac" in w for w in dcr["warnings"]), dcr["warnings"]
+        # ...and the consequence, which is the whole point: damage_warning cannot certify a capture
+        # intact off a column nobody writes -- it is silent either way, but now it is silent because
+        # the column was WITHDRAWN, and the withdrawal is on the page.
+        assert not any("DAMAGED" in w for w in dcr["warnings"]), dcr["warnings"]
+        assert abs(dcr["segments"][0]["metrics"]["blendRailPct"]["value"] - 100.0) < 1e-9
     finally:
-        os.remove(slack_csv)
+        os.remove(dc_csv)
+    # the predicate on its own, including the boundary cases: a live column with one non-zero row is
+    # NOT dead, and a string column is never judged.
+    assert dead_columns([{"a": 0.0, "b": 0.0, "segTag": "x"}] * 5, {"a", "b", "segTag"}) == ["a", "b"]
+    assert dead_columns([{"a": 0.0}] * 4 + [{"a": 1e-9}], {"a"}) == []
+    assert dead_columns([{"a": -0.0}] * 4, {"a"}) == ["a"]         # signed zero is still zero
+    assert dead_columns([], {"a"}) == ["a"]                        # no rows: nothing was written
+    assert dead_warning({"dead": []}) is None and dead_warning({}) is None
 
     # --- DAMAGED (v0.96 dmgFrac) ----------------------------------------------------------------
     # The four readings that must stay apart. The absent case is the one that matters most: every
@@ -1614,6 +2059,32 @@ def selftest():
         assert any("DAMAGED" in w for w in dr["warnings"]), dr["warnings"]
     finally:
         os.remove(dmg_csv)
+
+    # --- AT THE RESOLUTION FLOOR, end to end -----------------------------------------------------
+    # Same channel as RAILED/SLACK/DAMAGED, and the same reason for being on it: 94 of R35's 192
+    # near-lane terminal windows read 0.0000 and NOTHING in the artifacts said the number was float
+    # grain. The CSV below is a 20 s leg written the way the recorder writes one -- two decimals --
+    # decaying to a 0.00/0.02 dither, so it also proves the new metrics survive the CSV round trip.
+    fd_f, floor_csv = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd_f, "w", newline="") as f:
+            f.write("# mouseaim recording v0.96.2 run=R35 rec=4 session=t\n"
+                    "# card oblique-6-dwell\n"
+                    "t,off,segTag\n"
+                    + "".join("%.3f,%.2f,obDR6\n" % (0.0625 * i,
+                                                     max(0.0, 3.0 - 0.1 * i) if i < 32
+                                                     else (0.02 if i % 2 else 0.0))
+                              for i in range(320)))
+        fr = score_run(floor_csv)
+        assert any("RESOLUTION FLOOR" in w for w in fr["warnings"]), fr["warnings"]
+        fm = fr["segments"][0]["metrics"]
+        assert fm["settleTime95"]["value"] is not None, fm     # WHEN is still measurable...
+        assert "fixedWindowOffDeg" not in fm, fm               # ...WHAT it settled at is not
+        assert fm["offFloorPct"]["value"] > 85.0, fm
+        # norm_warning must collapse eight replicates of it, like every other warning on this channel.
+        assert norm_warning(fr["warnings"][0]) == norm_warning(fr["warnings"][0].replace("0.0100", "0.0000"))
+    finally:
+        os.remove(floor_csv)
 
     # graceful degradation, both halves independently: no '# config' line, and a pre-v0.55 '# fbw'.
     _, s_nocfg = saturation_metrics(sat_rows, satcols, {}, satfbw)
@@ -1875,11 +2346,56 @@ def selftest():
     print("selftest OK")
 
 
+def deadscan(files):
+    """`--deadscan`: which columns never varied, across a whole batch. A REPORT, not an input to
+    scoring -- load_csv already withdraws the always-zero ones per capture. This is the wider sweep
+    the invariant cannot make on its own: it also names the constant NON-zero columns, which are
+    suspect for the same reason (a column that cannot move cannot answer a question) but are left
+    scoring, because there the value itself is the evidence."""
+    seen, lo, hi, cnt, flat_in = set(), {}, {}, {}, {}
+    for f in files:
+        _meta, rows, cols = load_csv(f)
+        f_lo, f_hi = {}, {}
+        for r in rows:
+            for k, v in r.items():
+                if k in aw.STRING_COLS or not isinstance(v, float):
+                    continue
+                seen.add(k)
+                cnt[k] = cnt.get(k, 0) + 1
+                lo[k] = v if k not in lo else min(lo[k], v)
+                hi[k] = v if k not in hi else max(hi[k], v)
+                f_lo[k] = v if k not in f_lo else min(f_lo[k], v)
+                f_hi[k] = v if k not in f_hi else max(f_hi[k], v)
+        # THE THIRD SHAPE (R40): a column live in one batch and flat in another, on the same build.
+        # `targetBank` is the cautionary case -- it is written unconditionally, but it is a
+        # deadbanded function of azErr, so a card that never leaves the deadband writes a flat
+        # column that looks structurally dead and is not. Counted per file, reported as a ratio.
+        for k in seen:
+            if k in f_lo and f_lo[k] == f_hi[k]:
+                flat_in[k] = flat_in.get(k, 0) + 1
+    print(f"{len(files)} file(s), {len(seen)} numeric column(s)")
+    for k in sorted(seen):
+        n_flat = flat_in.get(k, 0)
+        if lo[k] == hi[k]:
+            kind = "DEAD (identically 0.0)" if lo[k] == 0.0 else f"CONSTANT {lo[k]:g}"
+        elif n_flat:
+            kind = (f"FLAT WITHIN {n_flat}/{len(files)} FILE(S) but varying over the set "
+                    f"[{lo[k]:g}..{hi[k]:g}] -- read per capture, never pooled")
+        else:
+            continue
+        print(f"  {k:<16} {kind}   n={cnt[k]}")
+    print("DEAD columns are already withdrawn from scoring per capture (see dead_columns). "
+          "CONSTANT and FLAT-IN-SOME ones are not -- read them, do not rank on them.")
+
+
 def main(argv):
     if not argv:
         sys.exit(__doc__)
     if argv[0] == "--selftest":
         selftest()
+        return
+    if argv[0] == "--deadscan":
+        deadscan(argv[1:])
         return
     json_path, files, i = None, [], 0
     verbose = "--verbose" in argv

@@ -1,7 +1,7 @@
 # TOMORROW — the unattended multi-airframe campaign
 
-The runbook for one morning. Eight launches, ~50 min of flying, ~530 captures, and it closes out the
-**11 shipped cards that have never been flown**. Everything below is one checkbox (or one text field)
+The runbook for one morning. Seven launches, ~42 min of flying, ~480 captures, and it closes out the
+**10 shipped cards that have never been flown**. Everything below is one checkbox (or one text field)
 and the spawn key; nothing in F1 needs to be hand-matched to a card, and the two places where that is
 still not quite true are called out explicitly.
 
@@ -39,7 +39,7 @@ share it unless you quit in between.
 |---|---|---|
 | `Drone/DroneEnabled` | **ON** | master switch; the harness is inert (and the hotkeys unread) while off |
 | `Scenario/ScenarioCardSet` | **the batch's card name** | see below — this is how you pick the card |
-| `Scenario/ScenarioRepeat` | ignored | every card in this campaign carries `repeat: 8` itself and wins — including `alpha-steps`/`alpha-sweep` since v0.96. Nothing here needs it set |
+| `Scenario/ScenarioRepeat` | ignored | every card in this campaign carries `repeat: 8` itself and wins — including `alpha-steps`/`alpha-pullup`. Nothing here needs it set |
 | `Scenario/ScenarioArmToggle` | **empty** | must be blank. The `e*` cards name their own `armToggle` and win, but batches 6–8 declare none — a leftover value here would sweep a knob nobody asked to sweep |
 | `Scenario/ScenarioForceEntry` | ON (default) | the placement writes the entry condition; off, a lane that is not already on condition simply refuses |
 | `Control/Enabled`, `Control/WriteControl` | **ON** | with either off the card moves the marker and nothing chases it. `[card]` warns, and the capture is not a law measurement |
@@ -78,21 +78,21 @@ despawn key (default **F9**) between batches anyway; it is safe with none alive.
 
 ---
 
-## 1–5. The `e*` attribution set — five one-checkbox A/Bs that have never flown
+## 1–4. The `e*` attribution set — four one-checkbox A/Bs that have never flown
 
-Five launches, ~30 min total, 320 captures. Each is one config knob swept **ABBA** against a fixed
+Four launches, ~24 min total, 256 captures. Each is one config knob swept **ABBA** against a fixed
 geometry, and since v0.94 the arm is per-aircraft state, so **every lane runs its own independent
 ABBA**: the answer comes back as eight A/Bs, one per airframe, which is the ONE-LAW question the
 single-airframe version could not ask. Adding those seven extra lanes costs no wall clock (R28: 384
 captures across 8 lanes in 30m14s).
 
-All five fly the same fleet — the eight fixed-wing keys that clear the v0.92 envelope gate at 250 m/s:
+All four fly the same fleet — the eight fixed-wing keys that clear the v0.92 envelope gate at 250 m/s:
 
 ```
 Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, EW1, FastBomber1, Darkreach
 ```
 
-**Read `blendRailPct` before anything else in all five.** A railed segment cannot respond to a gain
+**Read `blendRailPct` before anything else in all four.** A railed segment cannot respond to a gain
 change; it is *no signal*, not a good score, and measuring the clamp is precisely what the v0.83 A/B
 for `RelativeTurnLead` did (96.9% clamped).
 
@@ -101,8 +101,7 @@ for `RelativeTurnLead` did (96.9% clamped).
 | 1 | `e1-below-suppress` | `Control/BelowAlignSuppress` | 8 | ~5.6 min | 64 |
 | 2 | `e1-below-control` | `Control/BelowAlignSuppress` | 8 | ~5.6 min | 64 |
 | 3 | `e1b-align-lead` | `Control/AlignRateLead` | 8 | ~5.6 min | 64 |
-| 4 | `e2-rel-turn-lead` | `Control/RelativeTurnLead` | 8 | ~6.7 min | 64 |
-| 5 | `e3-marker-ff` | `Control/MarkerRateFeedForward` | 8 | ~6.7 min | 64 |
+| 4 | `e3-marker-ff` | `Control/MarkerRateFeedForward` | 8 | ~6.7 min | 64 |
 
 **Batches 1 and 2 are a matched pair — fly them back to back, in that order, in the same session.**
 Batch 2 is the *control*: the same knob on the horizon-centred diamond, where `alignFracH` ≈ 0 and the
@@ -128,13 +127,7 @@ card rather than a second arm on batch 1.
 in `terminalOffDeg`. *Fail:* on-arm `stickFlipRateR` or `wobbleEpisodes` **up** — the damping side
 effect is what the knob actually does.
 
-**4 — `e2-rel-turn-lead`.** Re-runs the v0.83 A/B off the rail.
-*Gate first:* `blendRailPct` ≈ 0 and mean |azErr| in 2.5–5. *Pass:* on-arm `terminalOffDeg` down, with
-`leadDeg` per arm confirming the knob changed the lead it is supposed to change. *Fail:* a RAILED
-warning (re-size the rate, conclude nothing), or `leadDeg` separating while `terminalOffDeg` does not —
-correct and worthless.
-
-**5 — `e3-marker-ff`.** The v0.78 feed-forward supplies 82.5% of the turn demand yet arrives as 0.0000
+**4 — `e3-marker-ff`.** The v0.78 feed-forward supplies 82.5% of the turn demand yet arrives as 0.0000
 of roll stick above the `lateralHold` rail (finding 16), so it has never been A/B'd anywhere it can
 reach the roll channel.
 *Gate first:* `blendRailPct` ≈ 0. *Pass:* on-arm mean |azErr| and `terminalOffDeg` smaller. *Fail:*
@@ -144,12 +137,22 @@ feed-forward never firing.
 
 ---
 
-## 6–7. `alpha-*` — the AoA ceiling, never once exercised
+## 5–6. `alpha-*` — the AoA ceiling
 
-Two launches, ~11 min, 128 captures. The ONE-LAW rule explicitly names "a loaded jet mushing near its
-alpha limit above corner speed" and neither card has ever been flown. Both fly at **8000 m**: thin air
-is the airframe-agnostic lever that makes the wing hit its alpha ceiling before its g-limit. Same
-eight-key fleet as the `e*` set.
+Two launches, ~12 min, 144 captures. The ONE-LAW rule explicitly names "a loaded jet mushing near its
+alpha limit above corner speed". Both fly at **8000 m**: thin air is the airframe-agnostic lever that
+makes the wing hit its alpha ceiling before its g-limit, and **lowering it is not an option** — that
+raises q, which is the wrong direction. `alpha-steps` flies the eight-key 250 m/s fleet; `alpha-pullup`
+flies **all ten** at 1.15× each lane's own FBW corner speed.
+
+> **`alpha-sweep` HAS now flown (R39, 61 captures) and is SUPERSEDED — do not launch it.** It failed
+> structurally: its demand is an AZIMUTH sweep derived from the airframe's structural g, so the
+> roll/turn channel saturated first — bank clamp 74–97%, turn-rate cap 85–97%, blend rail 81–96% on
+> **all 60** scorable segments, with `aoaAboveCeilingPct` **0.0 on 60 of 60** and 525–2428 m of
+> DESCENT. `alpha-pullup` replaces it and pulls in the **vertical plane** (`az ≡ 0`), where load costs
+> no bank and all three of those rails are unreachable by construction. See
+> [`ALPHA-CARD-REDESIGN.md`](ALPHA-CARD-REDESIGN.md) and
+> [`../debugtests/R39-E-alpha.md`](../debugtests/R39-E-alpha.md).
 
 > **CORRECTED 2026-07-31 — and it changes the priority of these two batches.** The premise here was
 > *"`aoaLimiterActivePct` is 0 in every capture this project has ever taken"*. **False:** non-zero on
@@ -164,39 +167,49 @@ eight-key fleet as the `e*` set.
 > **No hand-matched global here any more.** Both cards now declare `"repeat": 8` themselves, so the
 > run board should read `repeat 8 [from card]` and `Scenario/ScenarioRepeat` is irrelevant to these two
 > batches. (It was left as a global while a shipped card's `repeat` could break comparability with
-> earlier flights of it — neither of these has ever been flown, so there was nothing to break.)
+> earlier flights of it.) **Both also pin their own `Scenario/ScenarioThrottle`** — `alpha-pullup` at
+> 0.40, biased low on purpose — so `Scenario/ScenarioThrottle` in F1 is irrelevant to them too.
+> That pin is **process-global and currently buggy under a concurrent fleet**: the first lane to
+> finish un-pins it under everyone still flying. **Fly `alpha-pullup` only after the refcounting fix
+> lands**, or read the `# override` header of every capture before trusting a throttle.
 
 | # | `ScenarioCardSet` | lanes | wall clock | captures |
 |---|---|---|---|---|
-| 6 | `alpha-steps` | 8 | ~4.8 min | 64 |
-| 7 | `alpha-sweep` | 8 | ~5.9 min | 64 |
+| 5 | `alpha-steps` | 8 | ~4.8 min | 64 |
+| 6 | `alpha-pullup` | **10** | ~7.5 min | 80 |
 
-**6 — `alpha-steps`** (transient α, mirrored ±45° pitch steps). *Pass:* `aoaAboveCeilingPct` > 0,
+**5 — `alpha-steps`** (transient α, mirrored ±45° pitch steps). *Pass:* `aoaAboveCeilingPct` > 0,
 `aoaPeakOverCeiling` ≲ 1.1 (v0.57 measured a *reactive* gate relaying at 1.3–2.5×), `wobbleEpisodesAoa`
 = 0.
 
-**7 — `alpha-sweep`** (sustained α at the ceiling — the highest-value card in the grid). *Pass:*
-`aoaAboveCeilingPct` > 0 **and** `commandIntoCeilingPct` low — the law should back its own demand off
-rather than leave it to the gate — with `qSchedMin` < 1 proving the v0.59 schedule engaged and
-`aoaRecoverActivePct` > 0 the recovery bias. `deriveAzRate` makes the demand a fraction of *each*
-lane's own capability, so the eight lanes are asking one question; watch `FastBomber1` and `Darkreach`
-(gLimit 5.0) — they are the most likely to hit alpha before g.
+**6 — `alpha-pullup`** (sustained α in the vertical plane — the replacement for `alpha-sweep`, and
+the highest-value card in the grid). Two scored segments: `alphaHoldFast` (18°/s, 4 s) exposes every
+one of the ten lanes, `alphaHoldSlow` (4°/s, 12 s) walks the lim-10 group across the guard's onset
+band. *Gate first:* `bankClampActivePct` / `turnRateCapActivePct` / `blendRailPct` must all be ≈ 0 —
+the demand commands no azimuth at all, so a non-zero reading is a **law** defect, not a card problem.
+*Pass:* `aoaLimiterActivePct` > 0 on `alphaHoldFast` for 10 of 10; `wobbleEpisodesAoa` = 0 wherever
+`gateMinUp` < 1; altitude **rising** across each scored segment. *Read `gateMinUp` beside every
+`commandIntoCeilingPct`* — that metric reads 0.00 both for "the law behaved" and "the gate never
+closed far enough to look", and five of `alpha-sweep`'s eight lanes published exactly that false pass.
+The full fire/fail/not-exposed table for all six criteria is in
+[`ALPHA-CARD-REDESIGN.md`](ALPHA-CARD-REDESIGN.md) §5.
 
 **On both: `aoaLimiterActivePct` = 0 is a FAILED CARD, not a clean law.** It means the card missed the
-regime and every other number describes some other flight. Raise `startAlt` before touching anything
-else. Neither covers the *loaded* case — a card cannot set a loadout — so hand-fly them again with
+regime and every other number describes some other flight — and on `alpha-pullup` it is the gate that
+disqualifies every other criterion on that lane (§5 C1). Do **not** reach for `startAlt`: raise the
+lane's pitch rate instead. Neither covers the *loaded* case — a card cannot set a loadout — so hand-fly them again with
 heavy stores if the clean runs look interesting.
 
 ---
 
-## 8. `oblique-above-c` — closing the belowness axis
+## 7. `oblique-above-c` — closing the belowness axis
 
 One launch, ~5.7 min, 80 captures, **10 lanes** (the whole fixed-wing roster: this is a corner-speed
 card, so `CAS1` and `COIN` fly too, at 0.95× their own corner).
 
 | # | `ScenarioCardSet` | lanes | wall clock | captures |
 |---|---|---|---|---|
-| 8 | `oblique-above-c` | 10 | ~5.7 min | 80 |
+| 7 | `oblique-above-c` | 10 | ~5.7 min | 80 |
 
 `oblique-6-c` centres the 6° diamond **on** the horizon and `oblique-below-c` **20° below**; this
 centres it **20° above**, making belowness — `alignFracH`, the exact quantity the v0.85 suppression

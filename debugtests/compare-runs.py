@@ -490,26 +490,22 @@ def _cell(sp):
 
 
 def _sat_cell(metrics):
-    """The WORST rail on this segment as `<name><pct>%`, or the AUTHORITY USED when no rail is live,
-    or 'none' / '-'. One column: the four rails are alternatives, not additives -- any single one near
-    100% already means a gain change cannot move this segment (see scorecard.rail_warning, which
-    thresholds the same numbers). The cases are kept distinct on purpose: a named rail, `auth<pct>%`,
-    'none' (rails measured, all idle, authority not measured) and '-' (nothing measured at all, e.g. a
-    pre-v0.85 capture with no bWt column) are four different findings, and naming whichever rail
-    happens to sort last when they are all 0.0% would read as the first.
+    """The WORST rail on this segment as `<name><pct>%`, or 'none' / '-'. One column: the four rails
+    are alternatives, not additives -- any single one near 100% already means a gain change cannot
+    move this segment (see scorecard.rail_warning, which thresholds the same numbers). The cases are
+    kept distinct on purpose: a named rail, 'none' (rails measured, all idle) and '-' (nothing
+    measured at all, e.g. a pre-v0.85 capture with no bWt column) are three different findings, and
+    naming whichever rail happens to sort last when they are all 0.0% would read as the first.
 
-    Two questions, one column, because they are the two halves of ONE question: a railed row's
-    metrics cannot move, and a low-authority row's metrics are the ones most worth moving. A row that
-    is on no stop has a free column by definition, so this costs nothing and saves the reader
-    cross-referencing scorecard's SLACK warnings back to 40 summary rows by hand."""
+    R40 removed the `auth<pct>%` fallback with the metric behind it: scorecard's authorityUsedFrac
+    was mean|bank|/maxBank, and bank in a coordinated turn is pinned by atan(omega*V/g) before the
+    law runs, so the column was reporting the CARD's demand in the rows where it had room to print.
+    An empty half-column is better than a plausible wrong one."""
     live = [(metrics[k]["mean"], lbl) for lbl, k in SUMMARY_RAILS if k in metrics]
     if live:
         v, lbl = max(live)
         if v >= 0.5:
             return f"{lbl}{v:.0f}%"
-    au = metrics.get("authorityUsedFrac")
-    if au:
-        return f"auth{100.0 * au['mean']:.0f}%"
     return "none" if live else "-"
 
 
@@ -819,14 +815,10 @@ def selftest():
     assert _sat_cell({"blendRailPct": {"mean": 0.0}, "bankClampActivePct": {"mean": 0.0}}) == "none"
     assert _sat_cell({"blendRailPct": {"mean": 100.0}, "bankClampActivePct": {"mean": 96.0}}) == "blend100%"
     assert _sat_cell({}) == "-"
-    # ...and with no rail live the column answers the MIRROR question instead (scorecard's SLACK
-    # side): how much of the available authority the law used. A live rail still wins the cell --
-    # "this segment cannot move" outranks "it moved this far".
-    assert _sat_cell({"blendRailPct": {"mean": 0.0},
-                      "authorityUsedFrac": {"mean": 0.31}}) == "auth31%"
-    assert _sat_cell({"blendRailPct": {"mean": 100.0},
-                      "authorityUsedFrac": {"mean": 0.31}}) == "blend100%"
-    assert _sat_cell({"authorityUsedFrac": {"mean": 0.9}}) == "auth90%"   # no rails measured at all
+    # R40: the `auth<pct>%` fallback is GONE with authorityUsedFrac. A stray copy of the metric in
+    # an archived score.json must not resurrect the column -- read the docstring before adding one.
+    assert _sat_cell({"blendRailPct": {"mean": 0.0}, "authorityUsedFrac": {"mean": 0.31}}) == "none"
+    assert _sat_cell({"authorityUsedFrac": {"mean": 0.9}}) == "-"
     # a lone run still gets a line: in a 300-file batch a group that prints nothing reads as "that
     # card was never flown", which is a different (and wrong) finding from "it was flown once".
     with contextlib.redirect_stdout(io.StringIO()) as buf:

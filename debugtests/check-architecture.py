@@ -100,6 +100,12 @@ def _literal_commas(block: str) -> int:
 
 def recorder_columns(src: str):
     """(header_count, row_count) for ManeuverRecorder, or (None, None) if either can't be parsed."""
+    # STRIP COMMENTS FIRST, because both patterns below terminate on a `;` at end of line and the
+    # column blocks are interleaved with paragraphs of prose. A comment sentence ending in a
+    # semicolon used to truncate the capture mid-block and report a plausible undercount — v0.97
+    # lost two columns that way. `_literal_commas` also strips comments; that stays, because it is
+    # called on other blocks too. No string literal in either block contains `//`.
+    src = re.sub(r"//[^\n]*", "", src)
     h = re.search(r"private const string Header\s*=(.*?);\s*\n", src, flags=re.S)
     r = re.search(r"_w\.WriteLine\(\s*\n(.*?)\);\s*\n", src, flags=re.S)
     if not h or not r:
@@ -268,6 +274,17 @@ def segment_tag_problems(scen_src: str) -> list:
 # — the point is to fail loudly on the shape of the regression, not to model C#.
 # =====================================================================================================
 
+# A Transform write, in any of the spellings that reach one. Rigidbody writes (rb.position,
+# pr.rotation) deliberately do NOT match — the whole point of rule 3b is that the two must not be
+# mixed. .Repair() is in here because it is a transform write behind a method name.
+XFORM_WRITE = re.compile(
+    r"\b\w*(?:[Xx]form|[Tt]ransform)\s*\.\s*(?:position|rotation|eulerAngles)\s*="
+    r"|\.\s*(?:localPosition|localRotation)\s*="
+    r"|\.\s*SetPositionAndRotation\s*\("
+    r"|\.\s*Repair\s*\("
+)
+
+
 def source_invariants(sources: dict) -> list:
     p = []
     scen = strip_comments(sources.get("ScenarioPlayer.cs", ""))
@@ -334,30 +351,74 @@ def source_invariants(sources: dict) -> list:
                 f"both halves were learned by destroying the airframe (see ScenarioPlayer.cs)."
             )
 
-    # ...and MoveAssembly must AUDIT ITSELF afterwards (v0.96.1). A part the move does not reach is
-    # not a cosmetic miss: AeroPart.CheckAttachment detaches purely on geometry (0.5 m from the pose
-    # recorded at Awake, in the parent part's frame — no force, no damage), and it samples ONE part
-    # per fixed step round-robin, so a miss shows up as an intermittent shed part rather than a
-    # reproducible one (R33: Darkreach, ratio 0.029 = 1/35, two fixed steps after a placement, off
-    # four byte-identical replicates). The audit must sit AFTER the root write — that is the pose it
-    # measures against — and BEFORE Physics.SyncTransforms, so a healed part is pushed to PhysX in
-    # the same call. Both orderings compile fine when broken and neither shows up in a capture.
+    # ...and MoveAssembly must be a RIGID TRANSFORM AND NOTHING ELSE (v0.97.2). This check is now an
+    # ANTI-invariant, which is unusual enough to explain: it exists to stop the same fix being tried a
+    # third time, because both previous attempts compiled, passed every offline gate, and looked
+    # obviously correct right up until a batch was flown.
+    #
+    # v0.96.1's mod-side audit was a TAUTOLOGY — with pivot == rb.position at both call sites it
+    # rebuilt the same expression the move loop had just written, over the same list with the same
+    # skip, so it could not fire (0 [place] lines over R35's 186 placements).
+    #
+    # v0.97.0 replaced it with the game's own AeroPart.Repair, on the reasoning that Repair writes
+    # exactly the quantity CheckAttachment compares. The reasoning was right and the result destroyed
+    # the aircraft: R36 lost 32 of 32 placements, 100%, every airframe.
+    #
+    # WHY, precisely — because the ban below is drawn around the mechanism, not around Repair.
+    # Rigidbody.position writes the PhysX pose and leaves the Transform holding its OLD value until
+    # the next simulation step, and Physics.SyncTransforms copies Transform -> PhysX, never the
+    # reverse. So when the Repair loop ran, every part transform still held the PRE-teleport pose.
+    # Repair read one (attachInfo.parentPart.xform) and wrote another (xform.position/rotation) —
+    # both pre-teleport, so its arithmetic was near-correct and beside the point. The write DIRTIES
+    # the transform, and since AeroPart.CreateRB (:74418) unparents every part it bodies, a dirty
+    # transform plus a sync IS a body teleport: the parts went back to the old lane. Aircraft.rb was
+    # untouched (the root part has attachInfo == null, so Repair no-ops on it) and stayed at the
+    # anchor, so Physics.Simulate ran with the root 13.8-41 km from its own parts. Deleting only the
+    # second sync would NOT have saved it — the physics step syncs dirty transforms before simulating
+    # regardless. The lethal act is writing a Transform in here at all. Repair never threw, so the
+    # try/catch logged nothing.
+    #
+    # The same log holds the natural experiment: R36's 32 "snapped back 0 m" placements — still a
+    # full MoveAssembly call, Repair loop included — were 32/32 CLEAN; its 32 placements of 13.8-41 km
+    # were 32/32 FATAL. The fault scales with the size of the MOVE and with nothing else. (Do not
+    # read the 10602-172586 m/s spike spread as err/dt: it is saturated by breakForce and solver
+    # clamps. 20415 m at the rig's measured 19x predicts ~388000 m/s and read 60147.)
+    #
+    # The underlying problem (ledger #51) stays OPEN, instrumented via dmgFrac rather than fixed — and
+    # its premise is now itself in doubt, since MoveAssembly is an exact rigid transform whose float32
+    # grain at 60-100 km is ~0.004 m, ~125x under CheckAttachment's 0.5 m. So: no Transform write, and
+    # exactly one SyncTransforms, last.
     mv = method_body(scen, r"internal static void MoveAssembly\([^)]*\)")
     if mv is None:
         p.append("ScenarioPlayer.MoveAssembly not found — has the safe-teleport primitive moved?")
     else:
-        i_root, i_tol, i_sync = mv.find("rb.position"), mv.find("PartSnapTol"), mv.find("Physics.SyncTransforms")
-        if i_tol < 0:
+        i_root = mv.find("rb.position")
+        syncs = [m.start() for m in re.finditer(r"Physics\.SyncTransforms", mv)]
+        xw = XFORM_WRITE.search(mv)
+        if xw:
             p.append(
-                "ScenarioPlayer.MoveAssembly no longer checks that every part followed the move "
-                "(the PartSnapTol pass is gone). A part left behind is a DETACHED part one fixed "
-                "step later — AeroPart.CheckAttachment detaches on 0.5 m of geometry alone."
+                "ScenarioPlayer.MoveAssembly writes a Transform (%r). v0.97.0 shipped one instance of "
+                "this — a Repair() loop — and R36 lost 32 of 32 placements, 100%%, every airframe. "
+                "rb.position writes the PhysX pose and leaves the Transform stale, and "
+                "Physics.SyncTransforms only ever copies Transform -> PhysX, so a Transform write in "
+                "here commits a PRE-teleport pose for bodied parts (scene roots — CreateRB unparents "
+                "them) while the untouched root stays at the anchor: joints stretched by the full "
+                "13.8-41 km, pilot killed by G damage, nothing thrown. Mixing transform writes into a "
+                "function that moves BODIES is the defect; Repair was one case of it. Either move "
+                "EVERYTHING by transform (parts and root, then one sync, and no rb.position at all) "
+                "or leave #51 instrumented. Do not restore v0.96.1's audit either — it was a "
+                "tautology." % xw.group(0).strip()
             )
-        elif not (0 <= i_root < i_tol < i_sync):
+        elif len(syncs) != 1:
             p.append(
-                "ScenarioPlayer.MoveAssembly's part audit is out of order. It must run AFTER the "
-                "root rb.position write (the pose it measures against) and BEFORE "
-                "Physics.SyncTransforms (so a healed part reaches PhysX in the same call)."
+                "ScenarioPlayer.MoveAssembly should call Physics.SyncTransforms exactly once, as its "
+                "LAST statement (found %d). Everything above it writes BODY poses; that one call is "
+                "what reaches PhysX before the next Physics.Simulate." % len(syncs)
+            )
+        elif not (0 <= i_root < syncs[0]):
+            p.append(
+                "ScenarioPlayer.MoveAssembly syncs before the root rb.position write, so the root's "
+                "new pose never reaches PhysX this step."
             )
 
     # --- 4. card setup order in Tick ----------------------------------------------------------
@@ -442,6 +503,129 @@ def source_invariants(sources: dict) -> list:
             "TestDrone.Spawn no longer verifies `ac.Player == null` before registering. That check is "
             "the root of the crewed/uncrewed separation — the postfix writes ControlInputs for "
             "everything in the dictionary, so a player aircraft in it means the harness flies the human."
+        )
+
+    # --- 8. the batch queue only advances into an EMPTY sky (v0.98) ----------------------------
+    # AdvanceBatch launches a whole fleet. Its one safety property is that it cannot run while the
+    # previous fleet is alive or still staggering in, and that property lives entirely in WHERE it is
+    # called: the `else` arm of `if (_live.Count > 0) PruneDead();`, additionally gated on
+    # `_pending == 0`. Hoist the call out of the else — an easy-looking tidy-up, since the line reads
+    # fine on its own — and a queued fleet spawns on top of the one still flying: N more drones in
+    # lanes already occupied, the previous batch's captures still open, and every metric pooled across
+    # two different experiments. Nothing would throw and nothing in the log would say so.
+    tick = method_body(drone, r"public static void FixedTick\(\)")
+    if tick is None:
+        p.append("TestDrone.FixedTick() not found — has the harness fixed-step entry point moved?")
+    elif "AdvanceBatch(" in tick:
+        # The call must sit in an `else` that is guarded by the live-count test, and must itself test
+        # _pending. Checked on the flattened body so line breaks inside the condition do not matter.
+        flat = " ".join(tick.split())
+        if not re.search(r"if\s*\(\s*_live\.Count\s*>\s*0\s*\)[^;]*;\s*else\s+if\s*\([^)]*_pending\s*==\s*0[^)]*\)\s*AdvanceBatch\(", flat):
+            p.append(
+                "TestDrone.FixedTick calls AdvanceBatch outside the sky-empty interlock. It must stay "
+                "in the `else` arm of `if (_live.Count > 0) PruneDead();` AND test `_pending == 0` in "
+                "the same condition — those two counters ARE the interlock. Called anywhere else it "
+                "launches a queued fleet into lanes the previous fleet is still flying, silently."
+            )
+
+    # --- 9. a card's config pins are REFCOUNTED, and the count cannot be dropped or double-released -
+    # `Cfg` entries are one per process; ScenarioPlayer is one per aircraft. A 16-lane fleet therefore
+    # pins the same entries sixteen times, and before v0.99.1 the FIRST lane to finish its card
+    # restored them while the other fifteen were still flying under them (1469 rows across 61 of 512
+    # legs at the wrong ScenarioThrottle, stepping in the launch stagger). The fix is PinShared /
+    # UnpinShared around one static table, and it has exactly three ways to rot back — all of which
+    # compile, and none of which shows up as anything but a wrong number in a capture:
+    #   (a) someone writes `e.BoxedValue = v` in ApplyOverrides/RestoreOverrides again, bypassing the
+    #       count entirely — which is the original defect, restored;
+    #   (b) ApplyOverrides loses its `_ovEntries != null` re-entry guard and increments twice per card
+    #       (the placement re-enters that path a tick later), so the pins never come off at all;
+    #   (c) RestoreOverrides loses its `_ovEntries == null` guard, or stops nulling the list, and
+    #       decrements a count another aircraft is still holding — un-pinning it mid-flight.
+    ov_apply = method_body(scen, r"private void ApplyOverrides\(Card c\)")
+    ov_rest = method_body(scen, r"private void RestoreOverrides\(\)")
+    if ov_apply is None or ov_rest is None:
+        p.append("ScenarioPlayer.ApplyOverrides/RestoreOverrides not found — has the card-pin path moved?")
+    else:
+        for meth, body, want in (("ApplyOverrides", ov_apply, "PinShared("),
+                                 ("RestoreOverrides", ov_rest, "UnpinShared(")):
+            if want not in body:
+                p.append(
+                    f"ScenarioPlayer.{meth} does not go through {want.rstrip('(')}. A card's pins are "
+                    f"process-global Cfg entries and the fleet flying them is not: writing/restoring "
+                    f"them per aircraft is the v0.99.1 defect (the first lane to finish un-pinned the "
+                    f"knob under the other fifteen)."
+                )
+            if re.search(r"\.BoxedValue\s*=", body):
+                p.append(
+                    f"ScenarioPlayer.{meth} assigns .BoxedValue directly. Only PinShared/UnpinShared "
+                    f"may touch a pinned entry's value — they are what hold the refcount, and a write "
+                    f"beside them restores the concurrent-fleet corruption exactly."
+                )
+        if "if (_ovEntries != null) return;" not in ov_apply:
+            p.append(
+                "ScenarioPlayer.ApplyOverrides lost its `_ovEntries != null` re-entry guard. The "
+                "placement re-enters that path a tick later, so without it one card ACQUIRES each pin "
+                "twice and releases it once — the refcount never reaches zero and the knob stays "
+                "pinned for the rest of the session."
+            )
+        if "if (_ovEntries == null) return;" not in ov_rest or "_ovEntries = null" not in ov_rest:
+            p.append(
+                "ScenarioPlayer.RestoreOverrides must both early-return on `_ovEntries == null` and "
+                "null it after releasing. Those two lines are what make a double release a no-op; "
+                "without them a second call decrements a refcount another AIRCRAFT is still holding "
+                "and un-pins the knob out from under a flying card."
+            )
+    # ...and the abort path has to reach that release. Forget(int) is the teardown a drone that dies
+    # mid-card takes, and it only releases because it Aborts BEFORE dropping the registry entry.
+    fgt = method_body(scen, r"internal static void Forget\(int aircraftId\)")
+    if fgt is None:
+        p.append("ScenarioPlayer.Forget(int) not found.")
+    else:
+        i_ab, i_rm = fgt.find("Abort("), fgt.find("_byAc.Remove")
+        if i_ab < 0 or i_rm < 0 or i_ab > i_rm:
+            p.append(
+                "ScenarioPlayer.Forget(int) must Abort BEFORE removing the registry entry. That abort "
+                "is the only thing that closes a dead drone's capture and releases the card pins it "
+                "was holding; dropping the entry first leaks a refcount nothing can ever decrement."
+            )
+
+    # --- 10. an abort ends the REPLICATE; the next one must start from a fresh-lane state -----------
+    # `Finish` nulls `_queue`, and `_queue` IS the replicate expansion — so until v0.99.1 one abort
+    # discarded every remaining replicate for that lane (STOL batch: 40 captures expected, 13 written,
+    # nine lanes lost three replicates each to one altitude-floor abort on replicate 1). The recovery
+    # routes through `NextCard`, which means every piece of per-card state `Finish` resets must be
+    # reset there too — a field added to one and not the other is ledger #12 again (a per-replicate
+    # reset that did not happen), and it does not fail to compile, it just carries the aborted
+    # replicate's state into the next one.
+    #
+    # The allowlist is the per-RUN state, which NextCard must NOT touch: the queue and its cursor, the
+    # A/B schedule the run is halfway through, the anchor every replicate snaps back to, and the abort
+    # tally the run reports at the end.
+    per_run = {"_card", "_queue", "_qi", "_armEntry", "_armIdx", "_anchorSet", "_aborted"}
+    fin = method_body(scen, r"private void Finish\(string reason\)")
+    nxt = method_body(scen, r"private void NextCard\(\)")
+    if fin is None or nxt is None:
+        p.append("ScenarioPlayer.Finish/NextCard not found — has the card teardown moved?")
+    else:
+        assign = re.compile(r"(_\w+)\s*=(?!=)")
+        missing = sorted({m for m in assign.findall(fin)} - {m for m in assign.findall(nxt)} - per_run)
+        if missing:
+            p.append(
+                "ScenarioPlayer.Finish resets %s and NextCard does not. Since v0.99.1 a non-fatal "
+                "abort ends the REPLICATE and hands over to NextCard, so anything Finish clears and "
+                "NextCard does not is state the aborted replicate leaks into the next one — the shape "
+                "of ledger #12. Reset it in NextCard, or add it to this rule's per-run allowlist with "
+                "a reason (the queue cursor, the A/B schedule and the run anchor are all per RUN)."
+                % ", ".join(missing)
+            )
+    # ...and the recovery only exists if Abort can still be told which kind it is. Checked on the
+    # SIGNATURE, not the body: a body that merely mentions `fatal` proves nothing about the callers.
+    if scen and not re.search(r"public void Abort\(string reason,\s*bool fatal", scen):
+        p.append(
+            "ScenarioPlayer.Abort no longer takes the `fatal` flag, so every abort ends the LANE — "
+            "Finish nulls _queue and _queue IS the replicate expansion. That is how the STOL batch "
+            "wrote 13 of an expected 40 captures: nine lanes lost three replicates each to one "
+            "altitude-floor abort on replicate 1."
         )
     return p
 
@@ -656,6 +840,13 @@ def selftest() -> int:
     # ...and it must FAIL when they drift, which is the only thing this check is for.
     assert recorder_columns(rec.replace('"frameMs"', '"frameMs,extra"')) == (7, 6)
     assert recorder_columns("no recorder here") == (None, None)
+    # A COMMENT SENTENCE ENDING IN A SEMICOLON must not truncate the header capture. Both patterns
+    # terminate on `;` at end of line, and the column blocks are interleaved with paragraphs of
+    # prose, so before v0.97 this silently reported an UNDERCOUNT — a plausible wrong number from
+    # the one gate whose whole job is catching a column-count drift. Two real columns went missing.
+    assert recorder_columns(rec.replace(
+        '            "frameMs";',
+        '            // the datum moved; the lane did not;\n            "frameMs";')) == (6, 6)
 
     # Crewed/uncrewed separation. The good shape passes; each way of breaking it is caught.
     ok = {
@@ -741,6 +932,13 @@ def selftest() -> int:
         {
             if (ac.Player != null) return null;
         }
+
+        public static void FixedTick()
+        {
+            if (_pending > 0) LaunchDue();
+            if (_live.Count > 0) PruneDead();
+            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();
+        }
     ''',
         "ScenarioPlayer.cs": '''
         public void Tick(Aircraft ac)
@@ -755,20 +953,51 @@ def selftest() -> int:
         {
             ResetGLoadTrackers(ac);
             rb.position = pivot + dPos;
-            if (err > PartSnapTol) { pr.position = tgt; }
             Physics.SyncTransforms();
+        }
+
+        private void ApplyOverrides(Card c)
+        {
+            if (_ovEntries != null) return;
+            if (!PinShared(e, v, o.value, c.name)) continue;
+        }
+
+        private void RestoreOverrides()
+        {
+            if (_ovEntries == null) return;
+            for (int i = 0; i < _ovEntries.Length; i++) UnpinShared(_ovEntries[i]);
+            _ovEntries = null; _ovNote = "";
+        }
+
+        internal static void Forget(int aircraftId)
+        {
+            s.Abort("aircraft gone");
+            _byAc.Remove(aircraftId);
+        }
+
+        public void Abort(string reason, bool fatal = true)
+        {
+            if (fatal) { Finish("abort: " + reason); return; }
+            _rec.Stop("abort: " + reason);
+            NextCard();
         }
 
         private void Finish(string reason)
         {
             _rec.Stop(reason);
             RestoreOverrides();
+            _armIdx = -1;
+            _anchorSet = false;
+            _aborted = 0;
+            _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
         }
 
         private void NextCard()
         {
             _rec.Stop("done");
             RestoreOverrides();
+            _qi++;
+            _card = _queue[_qi]; _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
         }
     ''',
         "PlayerSpawn.cs": "ResetGLoadTrackers(ac); MoveAssembly(ac, rb, q, v, w);",
@@ -796,6 +1025,18 @@ def selftest() -> int:
         }
     '''})
     assert len(source_invariants(moved)) == 2, source_invariants(moved)
+    # 1b. the v0.98 batch interlock: hoisted out of the else, or with the _pending test dropped.
+    #     Both read as harmless tidy-ups and both launch a fleet into an occupied sky.
+    assert broken("TestDrone.cs",
+                  "if (_live.Count > 0) PruneDead();\n            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();",
+                  "if (_live.Count > 0) PruneDead();\n            if (_batch.Length > 1) AdvanceBatch();") == 1
+    assert broken("TestDrone.cs",
+                  "else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();",
+                  "else if (_batch.Length > 1) AdvanceBatch();") == 1
+    # ...and a queue-less build (no AdvanceBatch at all) must stay silent, not fail closed.
+    assert broken("TestDrone.cs",
+                  "            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();\n", "") == 0
+
     # 2. the two-seat double-step guard, removed and then moved ahead of the despawn (v0.90.1).
     assert broken("TestDrone.cs", "if (d.LastStep == Time.fixedTime) return;", "") == 1
     assert broken("TestDrone.cs",
@@ -803,11 +1044,26 @@ def selftest() -> int:
                   'if (d.LastStep == Time.fixedTime) return;\n            if (p.dead || p.ejected) { Despawn(d, "x"); return; }') == 1
     # 3. half the safe-teleport primitive.
     assert broken("PlayerSpawn.cs", "ResetGLoadTrackers(ac); ", "") == 1
-    # 3b. MoveAssembly's self-audit: removed, and moved out of order (v0.96.1).
-    assert broken("ScenarioPlayer.cs", "if (err > PartSnapTol) { pr.position = tgt; }\n", "") == 1
+    # 3b. MoveAssembly is a rigid transform and nothing else (v0.97.2). This is an ANTI-invariant:
+    #     re-adding Repair() must FAIL, because v0.97.0 shipped exactly that and R36 lost 32 of 32
+    #     placements. The ban is on the CLASS, not on Repair — Repair was one spelling of "write a
+    #     Transform in a function that moves bodies" — so the bare xform write and the combined
+    #     setter must fail identically. Both the second sync and a sync before the root write also fail.
     assert broken("ScenarioPlayer.cs",
-                  "rb.position = pivot + dPos;\n            if (err > PartSnapTol) { pr.position = tgt; }",
-                  "if (err > PartSnapTol) { pr.position = tgt; }\n            rb.position = pivot + dPos;") == 1
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();",
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();\n"
+                  "            p.Repair();\n            Physics.SyncTransforms();") == 1
+    assert broken("ScenarioPlayer.cs", "rb.position = pivot + dPos;",
+                  "rb.position = pivot + dPos;\n            p.xform.position = pivot + dPos;") == 1
+    assert broken("ScenarioPlayer.cs", "rb.position = pivot + dPos;",
+                  "rb.position = pivot + dPos;\n"
+                  "            p.transform.SetPositionAndRotation(pivot + dPos, rot1);") == 1
+    assert broken("ScenarioPlayer.cs",
+                  "            Physics.SyncTransforms();\n",
+                  "            Physics.SyncTransforms();\n            Physics.SyncTransforms();\n") == 1
+    assert broken("ScenarioPlayer.cs",
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();",
+                  "Physics.SyncTransforms();\n            rb.position = pivot + dPos;") == 1
     # 4. card setup order, both halves.
     assert broken("ScenarioPlayer.cs", "ApplyOverrides(_card);\n            ApplyArm();",
                   "ApplyArm();\n            ApplyOverrides(_card);") == 1
@@ -826,6 +1082,32 @@ def selftest() -> int:
                   "        {\n            _live.Remove(d);\n        }\n\n        private static void PruneDead()") == 1
     # 7. the assert the whole crewed/uncrewed proof rests on.
     assert broken("TestDrone.cs", "if (ac.Player != null) return null;", "") == 1
+
+    # 9. the card-pin refcount (v0.99.1). Each of these is the concurrent-fleet corruption restored:
+    #    a direct write beside the helpers, a lost re-entry guard (acquire twice, release once), and a
+    #    lost idempotence guard (release a count another aircraft still holds).
+    assert broken("ScenarioPlayer.cs", "if (!PinShared(e, v, o.value, c.name)) continue;",
+                  "e.BoxedValue = v;") == 2          # no PinShared AND a direct write
+    assert broken("ScenarioPlayer.cs", "            if (_ovEntries != null) return;\n", "") == 1
+    assert broken("ScenarioPlayer.cs", "            if (_ovEntries == null) return;\n", "") == 1
+    assert broken("ScenarioPlayer.cs", "_ovEntries = null; _ovNote = \"\";", "_ovNote = \"\";") == 1
+    # ...and the teardown a dead drone takes must Abort before it drops the entry, or the pins it was
+    # holding are leaked to a refcount nothing can decrement.
+    assert broken("ScenarioPlayer.cs",
+                  's.Abort("aircraft gone");\n            _byAc.Remove(aircraftId);',
+                  '_byAc.Remove(aircraftId);\n            s.Abort("aircraft gone");') == 1
+
+    # 10. the per-replicate reset (v0.99.1, ledger #12's shape). An abort now hands over to NextCard,
+    #     so a field Finish clears and NextCard does not is state that leaks into the next replicate.
+    #     `_derivedRate` stands in for "the next field somebody adds to the teardown".
+    assert broken("ScenarioPlayer.cs", "            _aborted = 0;\n",
+                  "            _aborted = 0;\n            _derivedRate = 0f;\n") == 1
+    #     ...and the per-RUN allowlist must stay silent: the anchor and the A/B schedule are reset by
+    #     Finish precisely BECAUSE NextCard must not touch them.
+    assert broken("ScenarioPlayer.cs", "            _anchorSet = false;\n", "") == 0
+    #     Collapsing Abort back to one always-fatal path is the defect itself.
+    assert broken("ScenarioPlayer.cs", "public void Abort(string reason, bool fatal = true)",
+                  "public void Abort(string reason)") == 1
 
     # The real file, if we are running inside the repo: header and row must agree today.
     real = REPO / "Recording.cs"

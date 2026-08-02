@@ -387,7 +387,12 @@ def index_one(cx, path, cap_cols, seg_cols, cap_id=None):
     cid = row.get("id") or cx.execute("SELECT id FROM captures WHERE file = ?", (fname,)).fetchone()[0]
 
     for i, seg in enumerate(result["segments"]):
-        warn = [w for w in (sc._tag_warning(seg["tag"], seg["type"]), sc.rail_warning(seg)) if w]
+        # All THREE of the warnings scorecard emits (it joins the same trio at scorecard.py:1326).
+        # floor_warning was missing until R36, which is why segments.warnings read NULL on every leg
+        # whose terminalOffDeg sat under the 0.0396 deg quantization floor — 87 of 128 in R36, 396 of
+        # 615 in R35. The scorer said so and the database did not, which is the worst of the two.
+        warn = [w for w in (sc._tag_warning(seg["tag"], seg["type"]),
+                            sc.rail_warning(seg), sc.floor_warning(seg)) if w]
         joined = "\n".join(warn)
         s = {
             "capture_id": cid, "seg_index": i,
@@ -398,7 +403,11 @@ def index_one(cx, path, cap_cols, seg_cols, cap_id=None):
             # whether a number is a score or no signal, and a reworded warning must not silently mark
             # the whole corpus clean.
             "railed": int(sc.is_railed(seg)),
-            "slack": int(" is SLACK:" in joined),
+            # `slack` is NOT written any more (R40 deleted scorecard's SLACK flag with the
+            # authorityUsedFrac it thresholded). The COLUMN survives in existing databases; on a
+            # rebuild it goes NULL, which is the honest reading -- writing a constant 0 would say
+            # "measured, not slack" about a detector that no longer exists, and that is exactly the
+            # dead-column failure this release went after.
             "unknown_tag": int("does not match any known type" in joined),
             "warnings": joined or None,
             "skipped": json.dumps(seg["skipped"]) if seg["skipped"] else None,

@@ -31,21 +31,64 @@ namespace NuclearOptionMouseAim
     // letting Mirage throw into the game loop.
     internal static class TestDrone
     {
-        // Lane geometry. Drones are laid out ABEAM the player on the heading he was flying when the
-        // key was pressed — parallel courses, so nothing converges on anything.
-        //   AbeamM  : how far out the first lane sits. Far enough that the drone cannot collide with,
-        //             be shot at by, or visually clutter whatever is happening near the player.
-        //   LaneM   : lateral gap between consecutive drones. SIZED BY THE TURN CARDS, not by taste:
+        // Lane geometry. Drones are laid out on a RING around the observer — lanes evenly spaced in
+        // azimuth, each spawned heading OUTWARD along its own radius (v0.99), optionally split over
+        // two ALTITUDE DECKS.
+        //   AbeamM  : the ring's minimum radius. Sized by the only thing that can still bring a drone
+        //             back to the observer, now that every lane flies AWAY from him from t=0: its own
+        //             turn circle. The sustained-turn family's radius is 2.07 km, i.e. a 4.14 km
+        //             circle, so 5 km clears it — a bound with a derivation, where the old 8 km was a
+        //             round number for "far enough to not be in the way". The floor matters: with two
+        //             decks at N=8 the chord only asks for 4.24 km, so anything above ~4.2 km is what
+        //             binds, and 8 km would throw away half the packing the decks buy.
+        //   LaneM   : minimum CHORD between adjacent lanes. SIZED BY THE TURN CARDS, not by taste:
         //             the sustained-turn family flies a full 360 at the bank clamp, and at the 250 m/s
         //             entry condition a 72 deg banked turn has radius v^2/(g*tan phi) = 62500/(9.81*
         //             3.08) = 2.07 km, i.e. a 4.1 km CIRCLE. At the old 2 km gap two neighbouring
         //             lanes flying the same card swept overlapping ground tracks — they only ever
         //             missed because the launch stagger put them at different points on it. 6 km
         //             clears the widest card circle with a lane's width to spare.
-        // ponytail: fixed lateral lanes, no altitude stacking and no re-check that the lane is clear.
-        // The range mission (`harness/WTM-Range`) is deliberately empty, which is what makes that
-        // safe. If a card ever flies over a populated map, give each lane its own altitude block.
-        private const float AbeamM = 8000f;
+        //
+        // WHY A RING AND NOT THE OLD LINE ABEAM. The line spent `AbeamM + LaneM*k`, so lane 0 sat
+        // 8 km out and lane 15 at 98 km — and DISTANCE TO THE WORLD ORIGIN IS A MEASUREMENT NOISE
+        // AXIS, not a free parameter. The origin follows the operator's camera
+        // (`FloatingOrigin.OriginShift`, :19365), float32 grain at distance d is ~d*1.2e-7 m, and
+        // `Aircraft.gForce` is a finite difference off a rigidbody that multiplies that grain by 60.
+        // R35 measured r(`origDist`, `gJitterG`) = 0.948 with a log-log slope of 0.885 — the grain
+        // prediction almost exactly — and R39 found far-lane replicate sigma at 1.50x near-lane on
+        // `fixedWindowOffDeg`. The line layout maximised that axis across exactly the lanes a batch
+        // compares. On a ring every lane is the SAME distance out, so the noise floor is matched and
+        // lane is no longer confounded with it. The 6 km neighbour gap is unchanged: it is now the
+        // chord `2*R*sin(pi/N)`, which is what `RingRadius` solves for.
+        //
+        // WHY EACH LANE HEADS OUTWARD ALONG ITS OWN RADIUS, and not on one shared heading — this is
+        // the non-obvious half. The cards TRANSLATE: 250 m/s x 126 s ~= 31 km. A ring flown on one
+        // shared heading smears straight back into a distance spread mid-card (16 -> 47 km), i.e. it
+        // buys a matched origin distance for one instant and throws it away over the run. Flying each
+        // lane out along its own radius makes |pos| a function of t alone and not of theta, so the
+        // distances stay matched at EVERY instant, and lane separation GROWS on diverging rays
+        // instead of shrinking. Absolute heading is not a confound in exchange: the control law reads
+        // no absolute heading anywhere, and the range mission pins the wind.
+        //
+        // ALTITUDE DECKS (`Cfg.DroneAltDeckM`, default 0 = off), and why they are worth a knob. The
+        // ring is radius-bound by the chord: at N=16 on ONE deck, `2R*sin(pi/16) >= 6 km` forces
+        // R = 15.4 km. Split the fleet over two decks and the IN-DECK chord constraint only has to
+        // hold over 8 lanes, and R falls to 7.84 km — vertical separation buying horizontal packing,
+        // on the axis that was measured to matter. Read `RingRadius` before setting the knob though:
+        // that full gain arrives only at a spread of LaneM or more, because the cross-deck pairs
+        // have to reach LaneM in 3-D too and a token spread leaves them 3.06 km apart. The second
+        // return is bigger than the packing: with each airframe flying BOTH decks (see DeckOf's
+        // Latin-square diagonal — the obvious `k % 2` confounds deck with airframe outright), altitude
+        // becomes a BALANCED experimental factor crossed with airframe instead of a nuisance, and
+        // rho(3 km)/rho(6 km) = 1.38 makes it a cleaner dynamic-pressure lever than throttle (R39:
+        // one throttle setting straddled the fleet, CAS1 decelerating while Darkreach gained 1.67x).
+        //
+        // ponytail: TWO decks maximum, no altitude re-check and no re-check that a lane is clear. The
+        // range mission (`harness/WTM-Range`) is deliberately empty, which is what makes the last two
+        // safe. Two decks already take the hard 16-lane clamp (`CountOf`) down to the AbeamM floor,
+        // so a third would buy nothing but a third altitude to keep inside every airframe's envelope
+        // — add one only if that clamp rises.
+        private const float AbeamM = 5000f;
         private const float LaneM  = 6000f;
 
         // Hitch reporting. A "hitch" is any rendered frame that took more than this; during one,
@@ -61,6 +104,11 @@ namespace NuclearOptionMouseAim
         // ponytail: a const, not a Cfg knob — nothing about a run wants a different value, and the
         // despawn key already covers "get rid of it now".
         private const float IdleDespawnSec = 5f;
+        // Deadline on the spawn -> first-pilot-step window (see PruneDead). Generous on purpose: the
+        // normal path clears it in one fixed step, so this only ever fires on a drone that is already
+        // broken, and the cost of firing too early (despawning a healthy drone mid-spawn) is worse than
+        // the cost of firing late (30 s of one stuck aircraft before the queue moves on).
+        private const float StartGraceSec = 30f;
 
         private static readonly List<Drone> _live = new List<Drone>();
         // Keyed by Aircraft.GetInstanceID() so the per-pilot postfix is a dictionary probe, not a
@@ -73,9 +121,41 @@ namespace NuclearOptionMouseAim
         private static int        _pending;      // drones still to be launched from the current request
         private static int        _slot;         // lane index of the NEXT one
         private static float      _nextAt;       // Time.time it is due
-        private static Vector3    _laneBase;     // player position when the key was pressed
-        private static Vector3    _laneRight;    // horizontal right of his heading (the lane axis)
-        private static Quaternion _laneRot;      // spawn attitude: his heading, wings level, nose on the horizon
+        // THE LANE ORIGIN, AND WHY IT IS A `GlobalPosition` (v0.97.1). This is held across the WHOLE
+        // stagger — up to 16 lanes x DroneStaggerSec — and a Unity world coordinate does not survive
+        // that window. `FloatingOrigin.OriginShift` (decompile :19365) re-centres the world on the
+        // OPERATOR'S CAMERA whenever it drifts past 1024 m, translating every root GameObject by
+        // -round(cam/64)*64 and moving `Datum.originPosition` with them. A raw `Vector3` captured
+        // before such a shift still names the same NUMBERS afterwards, but those numbers now point at
+        // a different PLACE — so every lane launched after the shift was laid out from a base the
+        // world had already moved out from under. Datum-relative is the frame that survives it, and it
+        // is the frame `ScenarioPlayer`'s run anchor and every card's `startAlt` already use.
+        // MEASURED, twice, at the same boundary. R33's spawn log records the datum jumping mid-launch
+        // between lane 6 and lane 7 (local y 2400 -> -32, i.e. the camera moved onto a drone at 4 km
+        // MSL, ~32 km abeam); R35's `origDist` column then shows lanes 1-6 at 24.0/18.5/12.8/6.2/0.6/
+        // 7.4 km and lanes 7-16 at 44.0...98.5 km — the near six laid out around the NEW origin, the
+        // rest still measured from the old one, a 32 km rift straight through one fleet. Both halves
+        // read a clean 7.709 + 6.000k km at their own spawn instant, which is exactly why this was
+        // invisible for 30 batches: the error is in the frame, not in the number.
+        private static GlobalPosition _laneBase; // observer position when the key was pressed, DATUM-RELATIVE
+        private static Vector3    _laneRight;    // horizontal right of his heading — the ring's theta=0 ray
+        private static Vector3    _laneFwd;      // his flat heading — the ring's theta=90 deg ray
+        // `_laneRight`/`_laneFwd` need no such treatment: an origin shift is a pure translation, so
+        // directions are invariant under it.
+        //
+        // The pair is stored as VECTORS rather than as the old `_laneRot` quaternion because the ring
+        // needs a basis, not an attitude: every lane's spawn rotation is now its own
+        // (`LookRotation(u, up)`), so a shared attitude has nothing left to be, and pulling the two
+        // basis rays back out of a quaternion per lane would be arithmetic in service of a field that
+        // is never used as a rotation.
+        // Resolved ONCE per fleet in LaunchFleet, for the same reason `_plan` is: a knob edited
+        // mid-stagger would otherwise move the ring under the lanes already standing on it.
+        private static int   _laneN;             // the RESOLVED fleet size (CountOf)
+        private static int   _laneDecks;         // 1 or 2 altitude decks
+        private static int   _lanesPerRing;      // ceil(_laneN / _laneDecks) — what sets the radius
+        private static float _laneRadius;        // ring radius, from RingRadius(_lanesPerRing)
+        private static float _laneDeckM;         // deck spread in m (0 with one deck)
+        private static int   _laneRoster;        // AirframeList().Length — the deck diagonal needs it
 
         // --- WHAT THE CARD SAID (v0.90). Resolved ONCE in RequestLaunch, from the same preflight the
         // launch line prints, and read by every lane of that batch. Resolving per lane instead would
@@ -116,9 +196,79 @@ namespace NuclearOptionMouseAim
         // =========================================================================================
         // LAUNCH
         // =========================================================================================
-        // Hotkey entry point. Captures the lane geometry ONCE, here, then lets FixedTick launch the
-        // drones one at a time — so the layout is relative to where the player was when he asked,
-        // not to wherever he has flown by the time the last one appears.
+        // BATCH QUEUE (v0.98) — ONE PRESS, N FLEETS, UNATTENDED.
+        //
+        // A multi-card selection is ALREADY a sequence of different experiments: each card in the
+        // queue carries its own entry condition and its own config overrides, re-applied at every
+        // card boundary (see ScenarioPlayer.SelectRaw for the full split). What a selection cannot
+        // vary is the FLEET — airframe roster, drone count, replicate count and the A/B knob all come
+        // from sel[0] and are fixed the instant the metal is spawned, because one drone is one
+        // airframe for its whole life. So "fly the 10-airframe roster, then the loaded-jet roster,
+        // then the helos" was three key presses hours apart: three sessions nobody is awake for.
+        //
+        // This is exactly that gap and nothing more — a list of ScenarioCardSet values, one fleet at
+        // a time. Each entry is a completely normal launch (same preview, same log lines, same
+        // captures), so there is no second launch path to keep honest and nothing downstream has to
+        // learn what a "batch" is.
+        //
+        // ponytail: the unit is a ScenarioCardSet string, not a new batch descriptor type. The
+        // ceiling is that an entry chooses WHICH CARDS fly and nothing else; if a queue ever needs to
+        // sweep a global knob between fleets, that belongs in the card's own overrides, which already
+        // work per card.
+        private static string[] _batch = new string[0];
+        private static int      _batchIdx;      // index of the entry currently flying
+        private static float    _batchNextAt;   // Time.time the next entry may launch; 0 = gap not started
+
+        // Semicolon-separated, because an ENTRY is itself a comma list of card names.
+        private static string[] SplitBatch(string spec)
+        {
+            var outp = new List<string>();
+            if (!string.IsNullOrEmpty(spec))
+                foreach (var raw in spec.Split(';'))
+                {
+                    string s = raw.Trim();
+                    if (s.Length > 0) outp.Add(s);
+                }
+            return outp.ToArray();
+        }
+
+        // Point ScenarioCardSet at the current entry. Written through the ConfigEntry rather than
+        // held in a private field so that everything downstream — Preview, SelectRaw, the '# config'
+        // header stamped into each capture — sees exactly what it would if the operator had typed it,
+        // and the artifact says which entry produced it with no new column.
+        //
+        // Safe to write HERE and only here: ConfigFile.SettingChanged stamps a '# cfg' line into every
+        // capture that is open at the time, and both call sites run with the sky empty, so there is no
+        // open capture to mislabel with the next batch's setup.
+        private static void ArmBatchEntry()
+        {
+            if (_batch.Length == 0) return;
+            Cfg.ScenarioCardSet.Value = _batch[_batchIdx];
+        }
+
+        // Fleet empty, queue not finished: fly the next entry. Called from FixedTick only when
+        // _pending == 0 AND _live.Count == 0, so a batch can never start while the previous one is
+        // still staggering in or still despawning.
+        private static void AdvanceBatch()
+        {
+            if (_batchIdx + 1 >= _batch.Length) return;
+            // The sky just went empty; let the last capture close and flush before the next fleet
+            // spawns on top of it. Reuses the stagger knob instead of adding a second timing knob,
+            // floored at 3 s because DroneStaggerSec can legitimately be 0 for a one-drone batch.
+            if (_batchNextAt <= 0f) { _batchNextAt = Time.time + Mathf.Max(3f, Cfg.DroneStaggerSec.Value); return; }
+            if (Time.time < _batchNextAt) return;
+
+            _batchIdx++;
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[drone] batch entry {_batchIdx + 1}/{_batch.Length}: '{_batch[_batchIdx]}'.");
+            ArmBatchEntry();
+            LaunchFleet();
+        }
+
+        // =========================================================================================
+        // Hotkey entry point. Arms the batch queue (a no-op when none is set) and launches the first
+        // fleet; every later fleet comes from AdvanceBatch, which is why the queue state is reset
+        // HERE and not in LaunchFleet.
         public static void RequestLaunch()
         {
             if (!Cfg.DroneEnabled.Value) return;
@@ -128,8 +278,28 @@ namespace NuclearOptionMouseAim
                 return;
             }
 
+            _batch    = SplitBatch(Cfg.ScenarioBatchQueue.Value);
+            _batchIdx = 0;
+            // PRINTED IN FULL BEFORE THE FIRST FLEET FLIES, for the same reason the A/B schedule is
+            // (SetUpArmSchedule): the whole point of an unattended queue is that nobody is watching,
+            // so a typo'd entry has to be visible in the first ten seconds instead of six hours later.
+            if (_batch.Length > 1)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[drone] batch queue: {_batch.Length} fleets — '{string.Join("' -> '", _batch)}'. "
+                    + "The despawn key cancels the rest.");
+            ArmBatchEntry();
+            LaunchFleet();
+        }
+
+        // The launch itself. Captures the lane geometry ONCE, here, then lets FixedTick launch the
+        // drones one at a time — so the layout is relative to where the player was when he asked,
+        // not to wherever he has flown by the time the last one appears.
+        private static void LaunchFleet()
+        {
+            _batchNextAt = 0f;      // this fleet is up; the gap is re-armed when the sky next empties
+
             Vector3 fwd = Vector3.forward;
-            _laneBase = Vector3.zero;
+            _laneBase = Vector3.zero.ToGlobalPosition();
             try
             {
                 // LANES ARE RELATIVE TO WHOEVER IS WATCHING. With an aircraft that is his; with none
@@ -140,7 +310,7 @@ namespace NuclearOptionMouseAim
                 // camera is both visible and observer-dependent. Fail-soft, like the probes.
                 if (AimRig.TryGetContext(out var me, out _) && me != null)
                 {
-                    _laneBase = me.transform.position;
+                    _laneBase = me.transform.position.ToGlobalPosition();
                     Vector3 f = me.transform.forward; f.y = 0f;
                     if (f.sqrMagnitude > 1e-6f) fwd = f.normalized;
                 }
@@ -149,7 +319,7 @@ namespace NuclearOptionMouseAim
                     var cam = Camera.main;                    // stdlib; no game type, no new reflection seam
                     if (cam != null)
                     {
-                        _laneBase = cam.transform.position;
+                        _laneBase = cam.transform.position.ToGlobalPosition();
                         Vector3 f = cam.transform.forward; f.y = 0f;
                         if (f.sqrMagnitude > 1e-6f) fwd = f.normalized;
                     }
@@ -158,7 +328,7 @@ namespace NuclearOptionMouseAim
             catch { /* geometry is best-effort; the defaults above are valid */ }
 
             _laneRight = Vector3.Cross(Vector3.up, fwd);      // horizontal right of the heading
-            _laneRot   = Quaternion.LookRotation(fwd, Vector3.up);
+            _laneFwd   = fwd;                                 // the other basis ray of the ring
             // Start past whatever is still up, rather than at 0. Auto-despawn (below) normally empties
             // the sky between batches, so this is the belt to that braces: it makes "press it twice"
             // safe even when the observer has not moved, which lane 0 alone does not.
@@ -183,10 +353,37 @@ namespace NuclearOptionMouseAim
             // was written when the count could only come from Cfg, and it would silently pin every
             // batch to the global again.
             _pending = CountOf(pre);
+            // THE RING IS SIZED ONCE, FROM THE RESOLVED FLEET SIZE, BEFORE THE STAGGER BEGINS — the
+            // same number written to `_pending` above and printed on the line below. Re-deriving it
+            // per lane would let a mid-stagger change move the ring under the lanes already on it,
+            // and a ring whose radius moved is exactly the distance spread this layout removes.
+            _laneN        = _pending;
+            _laneDeckM    = DeckSpreadM();
+            _laneDecks    = _laneDeckM > 0f ? 2 : 1;
+            _lanesPerRing = (_laneN + _laneDecks - 1) / _laneDecks;      // ceil
+            _laneRadius   = RingRadius(_lanesPerRing, _laneDecks, _laneDeckM);
+            _laneRoster   = Mathf.Max(1, AirframeList().Length);         // the deck diagonal's other axis
 
+            // The geometry line is the operator's ONLY confirmation of the layout, so it describes
+            // the ring truthfully rather than naming the two constants it was derived from. Built up
+            // front, not nested in the interpolation below — see the note on `armPart`.
+            string ringPart = _lanesPerRing > 1
+                            ? $"{_lanesPerRing} lanes/ring on a {_laneRadius:0} m ring, {2f * _laneRadius * Mathf.Sin(Mathf.PI / _lanesPerRing):0} m between neighbours"
+                            : $"1 lane/ring at {_laneRadius:0} m";
+            string deckPart = DeckText(SpawnAlt(), _laneDeckM);
+            if (deckPart.Length > 0) deckPart = ", " + deckPart;
             WTMouseAimPlugin.Log.LogInfo(
                 $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
-                + $"{SpeedText(pre)}, {Cfg.DroneStaggerSec.Value:0.#}s apart, lanes {AbeamM:0} m + {LaneM:0} m abeam.");
+                + $"{SpeedText(pre)}, {Cfg.DroneStaggerSec.Value:0.#}s apart, {ringPart}, each heading outward along its own radius"
+                + $"{deckPart}.");
+            // LEGAL, BUT SAY IT OUT LOUD. The deck spread is the OPERATOR's knob and it lands on top
+            // of whatever altitude the card asked for, so a card that declares startAlt and a knob
+            // left set from a previous session combine into an entry condition neither of them names
+            // — the class of mismatch that never refuses and writes a capture that scores fine.
+            if (_laneDecks > 1 && pre.StartAlt > 0f)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[drone] Drone/DroneAltDeckM = {_laneDeckM:0} m is being applied ON TOP OF the card's own "
+                    + $"startAlt {pre.StartAlt:0} m — no lane will fly at the altitude the card declares. Set it to 0 for a single deck.");
             // WHO DECIDED, ITEM BY ITEM. This is the operator's ONLY confirmation that the card drove
             // the spawn — "4000 m" alone looks the same whether the card asked for it or the knob just
             // happened to be there, and the difference is exactly what the self-describing card was
@@ -260,6 +457,88 @@ namespace NuclearOptionMouseAim
         internal static int    CountOf(ScenarioPlayer.Preflight p) =>
             Mathf.Clamp(p.Count > 0 ? p.Count : Cfg.DroneCount.Value, 1, 16);
 
+        // THE RING RADIUS (v0.99). Takes LANES PER RING, not the fleet size — with two decks those
+        // differ, and that difference is the whole point of the decks. Three terms, and the third is
+        // the one that is easy to miss.
+        //
+        // (1) AbeamM, the floor.
+        // (2) IN-DECK NEIGHBOURS. The chord between adjacent lanes on a circle of radius R is
+        //     `2*R*sin(pi/M)`, so keeping the LaneM gap at M lanes per ring needs
+        //     `R >= LaneM / (2*sin(pi/M))`. Worked, one deck: M=3 -> 3.46 km and M=8 -> 7.84 km (the
+        //     5 km floor binds at 3, not at 8), M=16 (the hard clamp in CountOf) -> 15.4 km.
+        // (3) CROSS-DECK NEIGHBOURS, and this is where the obvious version of decks is WRONG. The
+        //     half-step azimuth offset that stops the decks stacking also puts a lane of one deck
+        //     exactly BETWEEN two lanes of the other, i.e. `pi/M` away rather than `2*pi/M` — so the
+        //     cross-deck horizontal gap is the HALF-chord, `2*R*sin(pi/(2M))`, about half the in-deck
+        //     one, and at N=16 it converges on 3.06 km whatever the radius formula does. The deck
+        //     spread is the only thing that makes that safe, so it is charged for here: the pair
+        //     needs `sqrt(LaneM^2 - spread^2)` of HORIZONTAL gap to reach LaneM in 3-D, hence
+        //     `R >= sqrt(max(0, LaneM^2 - spread^2)) / (2*sin(pi/(2M)))`.
+        //
+        // The consequence is worth knowing before setting the knob: the packing decks buy SCALES WITH
+        // THE SPREAD, and a token spread buys nothing. N=16 goes 15.38 km (one deck) -> 15.32 km at a
+        // 500 m spread -> 13.32 km at 3 km -> 7.84 km at 6 km, where term (3) vanishes entirely and
+        // the decks are worth exactly the half-fleet-per-ring they promise. That is not a tax, it is
+        // the honest price: at a 500 m spread two aircraft really would be 3.06 km apart.
+        //
+        // M<2 has no in-deck neighbour, so term (2) is skipped and sin(pi/1)=0 is never divided by;
+        // with one deck term (3) is skipped too, since there is no cross-deck pair to separate.
+        private static float RingRadius(int lanesPerRing, int decks, float deckSpreadM)
+        {
+            float r = AbeamM;
+            if (lanesPerRing >= 2)
+                r = Mathf.Max(r, LaneM / (2f * Mathf.Sin(Mathf.PI / lanesPerRing)));
+            if (decks > 1)
+            {
+                float horiz = Mathf.Sqrt(Mathf.Max(0f, LaneM * LaneM - deckSpreadM * deckSpreadM));
+                r = Mathf.Max(r, horiz / (2f * Mathf.Sin(Mathf.PI / (2f * lanesPerRing))));
+            }
+            return r;
+        }
+
+        // WHICH DECK LANE k FLIES — a LATIN-SQUARE DIAGONAL over (roster pass, airframe), not the
+        // obvious alternation.
+        //
+        //     a = k % A     the airframe (AirframeForLane wraps the list, so this IS the airframe)
+        //     c = k / A     which pass through the roster this lane is
+        //     deck = (c + a) & 1
+        //
+        // Airframe `a` occupies lanes a, a+A, a+2A, …, i.e. c = 0,1,2,… at fixed a, so its decks run
+        // (0+a), (1+a), (2+a) … mod 2 — STRICTLY ALTERNATING, for every airframe, at every roster
+        // length and both parities of A. That is the property the decks exist for: altitude crossed
+        // with airframe rather than confounded with it. `k % 2` gets it wrong for every even A (the
+        // parity of k is then constant within an airframe), and no function of k alone with period p
+        // can get it right — it fails at A = p. A=1 degenerates to plain alternation, correctly.
+        //
+        // NOT `(k / A) & 1`, which is also balanced per airframe but assigns decks in CONTIGUOUS
+        // BLOCKS of A lanes: deck 0 would occupy one arc of the ring and deck 1 the opposite arc, so
+        // altitude would be confounded with azimuth sector instead of with airframe. The diagonal
+        // scatters both decks around the ring.
+        //
+        // The sequence at A=2 is 0,1,1,0,0,1,1,0 — the same SHAPE as ScenarioPlayer's ABBA `ArmOf`,
+        // and that is a coincidence of shape only, not a confound: `ArmOf` is indexed by the
+        // replicate/queue index across launches, this by the lane index within one fleet, and the
+        // two indices are independent. `debugtests/test-lane-frame.py` asserts the full 2x2 stays
+        // balanced, so nobody has to rediscover this before "fixing" it.
+        private static int DeckOf(int k) =>
+            _laneDecks < 2 ? 0 : ((k / _laneRoster) + (k % _laneRoster)) & 1;
+
+        // The deck spread as the geometry uses it. Negative is meaningless and the Cfg range already
+        // forbids it; clamping here rather than trusting the range keeps this readable from the test.
+        internal static float DeckSpreadM() => Mathf.Max(0f, Cfg.DroneAltDeckM.Value);
+
+        // The decks as the OPERATOR needs to read them, for the launch log and the run board — the
+        // same shared-wording rule as SpeedText, and for the same reason: those two lines are his
+        // only confirmation, and a card declaring `startAlt: 4000` that silently flies at 2500 and
+        // 5500 is precisely the mismatch that never refuses and scores fine. Empty string when there
+        // is one deck, so neither caller says anything about a feature that is off.
+        internal static string DeckText(float altM, float spreadM)
+        {
+            if (spreadM <= 0f) return "";
+            float h = spreadM * 0.5f;
+            return $"2 alt decks {altM - h:0}/{altM + h:0} m (spread {spreadM:0} m)";
+        }
+
         private static float SpawnAlt() => AltOf(_plan);
         // No SpawnSpeed() twin: since v0.93 the entry speed is a per-LANE question (see SpeedOfLane),
         // and a no-argument accessor is precisely how the gate and the placement would end up
@@ -275,6 +554,9 @@ namespace NuclearOptionMouseAim
         {
             if (_pending > 0) LaunchDue();
             if (_live.Count > 0) PruneDead();
+            // Sky completely empty — nothing alive, nothing still staggering in. That is the ONLY
+            // moment a queued fleet is allowed to start, so the two counters are the whole interlock.
+            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();
         }
 
         private static float _hitchArmed;   // Time.time the current hitch was first reported (edge gate)
@@ -318,12 +600,53 @@ namespace NuclearOptionMouseAim
             _pending--;
 
             string key = AirframeForLane(_slot);
-            Vector3 pos = _laneBase + _laneRight * (AbeamM + LaneM * _slot);
+
+            // THIS LANE'S OUTWARD RADIAL. `u` is the unit ray at azimuth 2*pi*k/N in the ring basis;
+            // it is both where the drone is placed and where it is pointed, which is the property the
+            // whole layout rests on (see the header): |pos - base| then depends on t alone, never on
+            // which lane you are.
+            //
+            // `turn` IS THE OVERFLOW GUARD, AND IT IS DELIBERATE. `_slot` starts at `_live.Count`, not
+            // 0, so "press it twice" cannot put a new drone where a live one is — on the old infinite
+            // LINE that came free, since lane k+1 was simply further out. A ring is finite, so
+            // azimuth alone WRAPS: with a previous fleet still up, `_slot % N` aims the new lane 0 at
+            // exactly the old lane 0's ray. Pushing each full wrap out by one LaneM keeps that
+            // guarantee for the cost of one term, and it costs the matched-distance property NOTHING
+            // in the case that measures: `AdvanceBatch` only ever launches into an empty sky, so a
+            // batch's own fleet always has turn == 0 and sits on one exact ring. A hand-pressed
+            // relaunch over a live fleet is not a measurement, and it is still not a mid-air.
+            int turn = _slot / _laneN;
+            int k    = _slot % _laneN;
+            // DECK BY LATIN-SQUARE DIAGONAL over (roster pass, airframe) — see DeckOf. Plain
+            // alternation (`k % 2`) looks right and is wrong: the airframe of lane k is `k % A`
+            // (AirframeForLane wraps), so for an EVEN-length airframe list the parity of k is
+            // constant within an airframe and every airframe lands entirely on one deck — deck and
+            // airframe 100% confounded, which is exactly the artifact the decks exist to remove.
+            int deck = DeckOf(k);
+            // The lane's index WITHIN ITS OWN DECK, counted rather than derived: the diagonal is not
+            // `k / 2`, so there is no closed form worth trusting here. k < 16 and this runs once per
+            // launched lane (seconds apart), so a count is free and cannot be subtly wrong.
+            int idx = 0;
+            for (int j = 0; j < k; j++) if (DeckOf(j) == deck) idx++;
+            // Half a step of azimuth between the decks, so the two rings INTERLEAVE instead of
+            // stacking one drone directly above another — and RingRadius is charged for the
+            // resulting half-chord, which is what keeps the cross-deck pair at LaneM in 3-D.
+            float theta = 2f * Mathf.PI * idx / _lanesPerRing
+                        + deck * Mathf.PI / _lanesPerRing;
+            Vector3 u   = Mathf.Cos(theta) * _laneRight + Mathf.Sin(theta) * _laneFwd;
+            // Converted HERE, at the launch instant, not cached at the press: that is the whole fix.
+            // `ToLocalPosition()` adds the CURRENT `Datum.originPosition`, so however many origin
+            // shifts have landed during the stagger, this lane is laid out from the same physical
+            // point every other lane in the batch was.
+            Vector3 pos = _laneBase.ToLocalPosition() + u * (_laneRadius + LaneM * turn);
+            // Decks are CENTRED on the card's altitude, so the fleet mean is what it always was: with
+            // one deck the offset is identically zero, with two it is -/+ half the spread.
+            float deckOff = _laneDeckM * (deck - (_laneDecks - 1) * 0.5f);
             // DroneSpawnAlt is MSL in the DATUM frame — the same frame `Aircraft.GlobalPosition().y`
             // and every card's startAlt are expressed in. Round-tripping a global y through
             // ToLocalPosition converts it without this file needing to know whether the floating
             // origin shifts y at all (ScenarioPlayer's placement dodges the same question).
-            pos.y = new GlobalPosition(0f, SpawnAlt(), 0f).ToLocalPosition().y;
+            pos.y = new GlobalPosition(0f, SpawnAlt() + deckOff, 0f).ToLocalPosition().y;
             _slot++;
 
             // THE LANE'S OWN ENTRY SPEED (v0.93). Resolved once, here, and used by the gate and the
@@ -339,8 +662,13 @@ namespace NuclearOptionMouseAim
             // not a second one bolted alongside it. Still live under v0.93: a corner multiple is not
             // automatically flyable (2.0x corner is over Vmax on most of the roster), it is just no
             // longer a number chosen without reference to the airframe.
+            // EVERY LANE FLIES ITS OWN HEADING — there is no shared `_laneRot` any more. The velocity
+            // is still derived FROM the attitude rather than from `u` directly (the two are equal by
+            // construction) so that the nose and the velocity vector cannot drift apart if one of
+            // them is ever changed.
+            Quaternion laneRot = Quaternion.LookRotation(u, Vector3.up);
             var d = EntrySpeedFlyable(key, laneSpeed)
-                  ? Spawn(key, pos, _laneRot, _laneRot * Vector3.forward * laneSpeed)
+                  ? Spawn(key, pos, laneRot, laneRot * Vector3.forward * laneSpeed)
                   : null;
             if (d == null)
             {
@@ -415,7 +743,7 @@ namespace NuclearOptionMouseAim
         // 141.7, the rotorcraft lower still.
         //
         // Asked BEFORE the spawn, off `Encyclopedia.Lookup` (a public static
-        // Dictionary<string, UnitDefinition> filled by `Encyclopedia.AfterLoad`, decompile :9715) —
+        // Dictionary<string, UnitDefinition> filled by `Encyclopedia.AfterLoad`, decompile :9718) —
         // an aircraft instance would defeat the point, which is to refuse without creating a unit.
         // =========================================================================================
 
@@ -435,12 +763,12 @@ namespace NuclearOptionMouseAim
         // batch because a field was missing is worse than no probe at all. The out-value is
         // untouched on false by construction, so there is no zero for a caller to mistake for data.
         // The FBW's own corner speed, read off the PREFAB — no aircraft instance, same as everything
-        // else in this block. `ControlsFilter.GetFlyByWireParameters()` is public (:65521) and packs
-        // cornerSpeed at index 2 (`FlyByWire.GetParameters()`, :64786), so this needs no reflection —
+        // else in this block. `ControlsFilter.GetFlyByWireParameters()` is public (:65710) and packs
+        // cornerSpeed at index 2 (`FlyByWire.GetParameters()`, :64959), so this needs no reflection —
         // it is the same public accessor the v0.55 FBW probe in ChaseController already reads
         // `_fbwCorner` out of, just asked of a prefab instead of a flying aircraft. `GetComponentInChildren`
         // with `includeInactive` because a prefab's hierarchy is inactive and `HeloControlsFilter`
-        // (:35847) derives from `ControlsFilter`, so rotorcraft resolve through the same call.
+        // (:36005) derives from `ControlsFilter`, so rotorcraft resolve through the same call.
         //
         // FAIL-SOFT, and NaN is the sentinel on purpose: 0 is a speed and would silently become an
         // entry condition. Cached per jsonKey — both to keep this off the per-lane launch path and
@@ -490,21 +818,21 @@ namespace NuclearOptionMouseAim
                 if (ad == null || ad.aircraftInfo == null || ad.aircraftParameters == null) return false;
 
                 // KM/H -> M/S. `aircraftInfo` is the encyclopedia's display block and is in km/h at
-                // every use site in the game (:2583, :10258-10259); `aircraftParameters` is already
+                // every use site in the game (:2584, :10261-10262); `aircraftParameters` is already
                 // m/s. Mixing the two is a silent factor of 3.6.
-                e.VStall = ad.aircraftInfo.stallSpeed / 3.6f;   // :62791
-                e.VMax   = ad.aircraftInfo.maxSpeed   / 3.6f;   // :62789
+                e.VStall = ad.aircraftInfo.stallSpeed / 3.6f;   // :62964
+                e.VMax   = ad.aircraftInfo.maxSpeed   / 3.6f;   // :62962
                 // NOT `aircraftParameters.maxSpeed`, which is the obvious field and the wrong one:
-                // it is a NORMALIZER (`aircraft.speed / maxSpeed` at :15554, :15919, :70152) reading
+                // it is a NORMALIZER (`aircraft.speed / maxSpeed` at :15557, :15922, :70341) reading
                 // a flat 600 for every fast jet, so a check built on it concludes that the 141 m/s
                 // Cricket can do 250. The two agree only for rotorcraft.
                 // CORNER SPEED: the FLIGHT MODEL's, not the AI's. There are TWO `cornerSpeed` fields
-                // and until v0.96 this read the wrong one. `aircraftParameters.cornerSpeed` (:62924)
-                // is consumed only by the AI — throttle policy (:12993), glideslope (:13624), effort
-                // scaling (:15773) — while the thing that actually shapes the stick is
-                // `ControlsFilter.FlyByWire.cornerSpeed` (:64704): it is the pitch-rate demand's
+                // and until v0.96 this read the wrong one. `aircraftParameters.cornerSpeed` (:63097)
+                // is consumed only by the AI — throttle policy (:12996), glideslope (:13627), effort
+                // scaling (:15776) — while the thing that actually shapes the stick is
+                // `ControlsFilter.FlyByWire.cornerSpeed` (:64877): it is the pitch-rate demand's
                 // saturation speed (`targetPitchAngVel = pitch * gLimitPositive * 9.81 /
-                // max(speed, cornerSpeed * 0.75)`, :64859) and the G-limit knee (:64672). Measured
+                // max(speed, cornerSpeed * 0.75)`, :65032) and the G-limit knee (:64845). Measured
                 // over the whole capture corpus (1604 sidecars, both numbers already recorded) they
                 // differ by 0.556x (Darkreach 100 vs 180) to 1.417x (AttackHelo1 170 vs 120) — so a
                 // `startSpeedCorner` card, whose entire claim is "every lane enters at the same
@@ -512,7 +840,7 @@ namespace NuclearOptionMouseAim
                 // back to the AI value, never to zero.
                 float fbwCorner = FbwCornerSpeed(jsonKey);
                 e.Corner = float.IsNaN(fbwCorner) ? ad.aircraftParameters.cornerSpeed : fbwCorner;
-                e.GLimit = ad.aircraftParameters.aircraftGLimit; // :62910
+                e.GLimit = ad.aircraftParameters.aircraftGLimit; // :63083
                 // A definition that publishes no Vmax has nothing to check against; report unknown
                 // rather than hand back a ceiling of zero that would refuse everything.
                 return e.VMax > 0f;
@@ -550,7 +878,24 @@ namespace NuclearOptionMouseAim
         // Returns false having ALREADY logged the reason, so the caller only has to skip the lane —
         // the same division of labour as the unknown-jsonKey refusal inside `Spawn`. An UNKNOWN
         // envelope never refuses.
-        private static bool EntrySpeedFlyable(string jsonKey, float speed)
+        //
+        // KNOWN LIMITATION, NOT FIXED HERE: THIS GATE IS DENSITY-BLIND. `aircraftInfo`'s Vstall/Vmax
+        // are sea-level figures and the placement writes a TAS, so true stall TAS at 6 km is about
+        // sqrt(rho0/rho6000) = sqrt(1.225/0.660) = 1.36x the number checked here — a lane this gate
+        // passes can be below stall on a high deck. Not urgent: shipped cards already fly 6000 m
+        // (`oblique-below-c`) and 8000 m (`alpha-sweep`) without trouble, so the pairings in use are
+        // clear of it. What makes it REACHABLE is v0.99's `Cfg.DroneAltDeckM`, which puts half a fleet
+        // above the card's own altitude on the operator's say-so. Fixing it means an ISA density model
+        // and the deck altitude in hand at gate time, which is a bigger change than the exposure.
+        //
+        // v0.99.1 — `internal`, because it had exactly ONE call site and that was the defect. It gated
+        // the SPAWN velocity only, i.e. sel[0]'s speed, once. `ScenarioPlayer.PlaceOnCondition` writes
+        // a speed too, once per card per replicate, and had no envelope check at all — so card 2 of a
+        // multi-card selection could ask 250 m/s of a CAS1 (Vmax 205.6), the placement would write it,
+        // and the capture would measure the decay back to what the airframe can hold while scoring
+        // perfectly well against a different question. The gate belongs at every write of a speed to
+        // an aircraft, not at the first one anybody happened to notice.
+        internal static bool EntrySpeedFlyable(string jsonKey, float speed)
         {
             if (!TryEnvelope(jsonKey, out var e)) return true;
 
@@ -599,7 +944,28 @@ namespace NuclearOptionMouseAim
                 // recorder and StartCard opening the next, during which `Playing` is legitimately
                 // false mid-suite. Anything shorter than a placement tick would despawn a drone
                 // between its own replicates.
-                if (!d.CardStarted) continue;                 // pre-first-pilot-step; the stagger owns this window
+                // Pre-first-pilot-step. This window is legitimate — the drone exists but no pilot has
+                // been given a fixed step yet — but it is BOUNDED, and that bound is load-bearing since
+                // v0.98. It used to be an unconditional `continue`: a drone whose pilot never steps was
+                // never despawnable, `_live.Count` never fell to 0, and the cost was one aircraft
+                // circling for the rest of the session. `AdvanceBatch` waits on exactly that counter, so
+                // the same stuck drone now stalls the WHOLE batch queue — a ten-fleet unattended night
+                // silently flies one fleet and then sits there. No crash and no warning is the worst
+                // shape that failure could have.
+                //
+                // Bounded rather than deleted: the normal path sets CardStarted on the very next fixed
+                // step after the spawn, so any threshold above a frame or two is untouched by it, while
+                // deleting the guard outright would race a slow spawn and despawn healthy drones — the
+                // opposite failure and a worse one. StartGraceSec is deliberately 6x IdleDespawnSec.
+                if (!d.CardStarted)
+                {
+                    if (Time.time - d.SpawnedAt < StartGraceSec) continue;
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[drone] #{d.Id} never took a pilot step in {StartGraceSec:0}s — despawning so it "
+                        + "cannot stall the fleet (and, with a batch queue set, the rest of the night).");
+                    Despawn(d, "no pilot step");
+                    continue;
+                }
 
                 bool playing = false;
                 try { playing = ScenarioPlayer.For(d.Aircraft).Playing; }
@@ -794,9 +1160,16 @@ namespace NuclearOptionMouseAim
         }
 
         // Idempotent, and it also cancels a launch still in progress — otherwise the panic key would
-        // clear the sky and then watch the stagger refill it.
+        // clear the sky and then watch the stagger refill it. Same reasoning one level up: it drops
+        // the whole batch queue, because the panic key is an ABORT and a queue that resumed three
+        // seconds later would be the identical surprise the pending-cancel above exists to prevent.
         public static void DespawnAll()
         {
+            if (_batch.Length > 1 && _batchIdx + 1 < _batch.Length)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[drone] cancelling the batch queue at entry {_batchIdx + 1}/{_batch.Length} "
+                    + $"({_batch.Length - _batchIdx - 1} fleet(s) never flown).");
+            _batch = new string[0];
             if (_pending > 0)
             {
                 WTMouseAimPlugin.Log.LogInfo($"[drone] cancelling {_pending} pending launch(es).");
@@ -833,9 +1206,9 @@ namespace NuclearOptionMouseAim
             }
 
             // ONCE PER AIRCRAFT PER FIXED STEP — NOT once per PILOT. `Aircraft.pilots` is an ARRAY
-            // (Aircraft:60288 in the 0.34 decompile), every `Pilot` registers itself with `JobManager`
-            // in its own Awake (Pilot:85535), and `JobManager.PilotAeroInputs` walks that flat list
-            // calling `Pilot_OnAeroInputsApplied` on each one (:168794). So a TWO-SEAT airframe runs
+            // (Aircraft:60461 in the 0.34.1 decompile), every `Pilot` registers itself with `JobManager`
+            // in its own Awake (Pilot:85745), and `JobManager.PilotAeroInputs` walks that flat list
+            // calling `Pilot_OnAeroInputsApplied` on each one (:170214). So a TWO-SEAT airframe runs
             // this postfix TWICE per fixed step, and everything below it twice with it.
             //
             // Measured in R26, and it is not a cosmetic doubling: `trainer` and `FastBomber1` (two
@@ -846,9 +1219,9 @@ namespace NuclearOptionMouseAim
             // (t.up - _prevUp)/dt) read ZERO on the second call, because nothing had moved. The two
             // airframes' captures are not comparable to the other two and were not measuring the law.
             //
-            // The stamp, not the game's own `aircraft.pilots[0] == p` identity idiom (:85536, :85645):
+            // The stamp, not the game's own `aircraft.pilots[0] == p` identity idiom (:85746, :85855):
             // a pilot that dies returns PartResult.Remove and is dropped from JobManager's list
-            // (:168804), so keying on pilot 0 would silently stop ticking a drone whose front-seater
+            // (:170224), so keying on pilot 0 would silently stop ticking a drone whose front-seater
             // was killed — and it would never reach the despawn above either, since that check sits on
             // the INVOKING pilot. The stamp keeps flying on whichever crew member is still alive, and
             // leaving the death check upstream of it means ANY seat's death still despawns.
@@ -1015,6 +1388,7 @@ namespace NuclearOptionMouseAim
         public readonly Aircraft Aircraft;
         public readonly int      AircraftId;    // cached GetInstanceID(): the dictionary key must survive the aircraft being destroyed
         public readonly float    HoldAlt;       // MSL at spawn — what the built-in level-hold flies
+        public readonly float    SpawnedAt;     // Time.time at construction — bounds the pre-first-step wait
 
         // Has this drone been offered a test card? One attempt, on its first pilot step (see
         // OnPilotStep), so a suite that finishes — or was refused — is not restarted every tick.
@@ -1046,6 +1420,7 @@ namespace NuclearOptionMouseAim
             Id         = id;
             Aircraft   = ac;
             AircraftId = ac.GetInstanceID();
+            SpawnedAt  = Time.time;
             float alt  = 0f;
             try { alt = ac.GlobalPosition().y; } catch { /* fail-soft: 0 just means the hold flies to sea level */ }
             HoldAlt = alt;

@@ -109,15 +109,26 @@ def crossings(ts, xs, dead):
     return idx
 
 
-def episodes(ts, xs, dead, min_dur=2.0, max_gap=2.5):
-    """Group sign-flips into sustained-oscillation episodes; report freq/amplitude/trend."""
+def episodes(ts, xs, dead, min_dur=2.0, max_gap=2.5, min_cross=4):
+    """Group sign-flips into sustained-oscillation episodes; report freq/amplitude/trend.
+
+    `min_cross` IS A FREQUENCY FLOOR, not just an evidence bar. `freq` below is
+    (len(seg)-1)/2/(t1-t0), so an episode sitting exactly on the minimum reports
+    (min_cross-1)/2/(t1-t0) -- a constant divided by whenever the last crossing landed, identical
+    for every signal of that length. At the default 4 that is 1.5/(t1-t0), which is how R39-C found
+    "0.319-0.328 Hz reproduced to three digits across three batches" to be 3/(2 x the entry
+    transient's fourth zero crossing) rather than a measured frequency. Callers that need the number
+    to BE a measurement must raise this; scorecard.wobble_scan passes 6 (2.5 cycles) and takes its
+    frequency from an amplitude-independent estimator instead. Default unchanged so this module's
+    own death-wobble scan, which wants the COUNT and reads freq only as a shape hint, is untouched.
+    """
     xi = crossings(ts, xs, dead)
     eps, start = [], 0
     for k in range(1, len(xi) + 1):
         if k == len(xi) or ts[xi[k]] - ts[xi[k - 1]] > max_gap:
             seg = xi[start:k]
             start = k
-            if len(seg) < 4:
+            if len(seg) < min_cross:
                 continue
             t0, t1 = ts[seg[0]], ts[seg[-1]]
             if t1 - t0 < min_dur:

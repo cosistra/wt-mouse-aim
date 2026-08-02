@@ -3,9 +3,12 @@
   "cls": "Plane",
   "step": 0.02,
   "airframe": "",
-  "note": "Airframe coverage: the ONE-LAW rule names a low-limit STOL trainer and one has never been flown on a card. Mirrored pairs only - 30 deg az right/left about a -15/+15 datum, 40 deg el down/up about a -20/+20 datum, so an asymmetry shows up as a difference between two equal steps rather than as one absolute number. AIRFRAME: low-limit STOL trainer (alphaLimiter ~10 deg). A jet placed at 90 m/s will mush - see cards/README.md.",
+  "note": "Airframe coverage: the ONE-LAW rule names a low-limit STOL trainer and one has never been flown on a card. Mirrored pairs only - 30 deg az right/left about a -15/+15 datum, 40 deg el down/up about a -20/+20 datum, so an asymmetry shows up as a difference between two equal steps rather than as one absolute number. AIRFRAME: low-limit STOL trainer (alphaLimiter ~10 deg). A jet placed at 90 m/s will mush - see cards/README.md. THE CARD NEVER FLEW SLOW, fixed here; do not compare against a capture taken before this edit. startSpeed is applied ONCE at the placement and nothing holds it, so with throttle unpinned the batch ran at 1.00 and the jets were at 144-147 m/s by the end of the 6 s arm and 340-381 m/s by the last scored segment - the opposite of what a low-q card is for. ScenarioThrottle is now pinned at 0.25, derived from that same runaway: 90 -> 145.5 m/s in 6 s is a mean specific excess thrust of 9.25 m/s2, level drag at 90 m/s is about g/(L/D) ~ 0.98 m/s2, so full-throttle T/m ~ 10.2 m/s2 and holding 90 m/s needs about 0.10 throttle. 0.25 is a FLOOR, not an optimum - EntryThrottle snaps anything below MinThrottle 0.25 (ScenarioPlayer.cs:1365) back to the 0.70 DEFAULT, so a smaller pin would silently fly at 0.70. Residual excess is about +1.6 m/s2, i.e. ~+91 m/s over this card's 58 s; CHECK spd AT THE END OF THE ARM on the first capture, and if it is still above ~120 m/s the lever is exhausted and the rest is mod-side. startAlt raised 2500 -> 4000 as a consequence of that pin, not because this card ever aborted: it never did, but it is 58 s long with a deliberate 12 s 40-degree nose-down leg (elDn40, ~900 m at these speeds), and cutting the throttle removes the thrust that was previously paying for that descent. 4000 leaves 3500 m of usable air above the 500 m floor. Its sibling stol-sweep DID abort 9 lanes of 10 and is at 6000 for the measured reason recorded in its own note.",
   "startSpeed": 90,
-  "startAlt": 2500,
+  "startAlt": 4000,
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.25" }
+  ],
   "segments": [
     { "tag": "arm",    "dur": 6,  "az": -15, "el": 0 },
     { "tag": "az30R",  "dur": 12, "az": 15,  "el": 0 },

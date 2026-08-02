@@ -1341,10 +1341,21 @@ namespace NuclearOptionMouseAim
                 // brake/floor clamp below still confines the result to [azErr*predFloor, azErr]. So neither
                 // sign of marker sweep can command more bank than the RAW error already justified — the
                 // v0.52 relay argument survives untouched.
-                // Cfg.RelativeTurnLead is the A/B lever: off = bit-identical to v0.82, no restart needed.
                 // Feeds the SINGLE azErrPred site; ApplyEvolvedLegacy inherits it as a parameter, so the
                 // v0.51/v0.55 two-site lockstep is unaffected (there is only one lead computation).
-                float leadRate = _headingRateFilt - (Arm(Cfg.RelativeTurnLead) ? _aimAzRateFilt : 0f);
+                // v0.99.1 — THE LEVER IS RETIRED, THE TERM STAYS RELATIVE. R39-D swept Cfg.RelativeTurnLead
+                // 8 lanes x n=8 (§5): the knob does its declared job — |leadDeg| 2.85 -> 0.08 deg, predFloor
+                // binding 98% -> 60% — and the standing error does not move, 0.2-3.8% against a 0.1-4.7%
+                // NULL contrast between two byte-identical configurations in the same batch (§6a). That is a
+                // verdict on the KNOB, not on the term: bankTR sat at or over the 72 deg MaxBank wall on
+                // 94-100% of settled samples, so the 3.33x larger error term had nowhere to go, and §8 says
+                // in as many words that this card cannot answer whether the term helps. So the retired lever
+                // collapses to its shipped DEFAULT (relative), not to the absolute form: absolute is the
+                // wrong derivative by construction, and it eats TurnLeadTime*AssistTurnRateGain = 0.60 of the
+                // unit-gain v0.78 feed-forward the SAME batch measured at 57% of the standing error. Nothing
+                // measured asks for that back. leadDeg stays a recorder column — it is still "the lead
+                // actually applied", now unconditionally the relative form.
+                float leadRate = _headingRateFilt - _aimAzRateFilt;
                 float leadDeg  = leadRate * Cfg.TurnLeadTime.Value; // deg of lead ACTUALLY applied (recorder column)
                 float azErrPred = azErr - leadDeg;
                 // BRAKE-ONLY LEAD (v0.52). Unclamped, the lead term closed its own fast loop: near
@@ -1415,6 +1426,15 @@ namespace NuclearOptionMouseAim
                 // astern) commands a STEP to a fixed direction and then holds it. The feed-forward contributes
                 // nothing there and those metrics cannot move. Only turn360 — and a human tracking a moving
                 // marker — sees any change at all, which is exactly why this is scoreable in one session.
+                // MEASURED CHANNEL (v0.99.1, R39-D §4/§4a — 8 lanes x n=8, debugtests/R39-D-sustained-ab.md).
+                // Worth 55-58% of the standing azimuth error: fixedWindowOffDeg 5.08-6.38 -> 1.46-2.18 deg on
+                // 7 of 8 lanes, rms down 8/8, and aimRate identical on both arms so it is the law consuming
+                // the marker rate, not the stimulus changing. It delivers that through TARGET BANK, NOT roll
+                // stick — bankTR +10.4 to +15.4 deg, achieved bank +4 to +14 deg, while mean |outR| is
+                // 0.0068-0.0109 on BOTH arms. Roll stick is the servo term that HOLDS a trimmed bank; it is
+                // the wrong observable for a term that moves the bank TARGET, and reading it as one is what
+                // made GENERALITY-REVIEW finding 16 call this inert. Off, the aircraft SKIDS instead: mean
+                // |outY| 2-4x higher, _iYaw saturating against the deficit the bank channel should supply.
                 // MarkerRateFeedForward is the A/B lever: off = bit-identical to v0.77, no restart needed.
                 // LOCKSTEP: ApplyEvolvedLegacy's local omega copy adds the SAME term at the same point,
                 // under the same rule as the azErrPred / achievability-cap lockstep notes.

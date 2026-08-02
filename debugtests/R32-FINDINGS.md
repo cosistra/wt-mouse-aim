@@ -33,9 +33,9 @@ has been saying**. §1 and §2 are the corrections; §3 onward is R32 itself.
    two places it stops applying. See §1.
 2. **Over-G damages the PILOT, never the airframe**, so the standing theory that the law was
    *bending airframes* is wrong — **and I told the user that theory earlier. It was wrong. Retracted
-   here.** `Pilot.TakeGForceDamage` (`:85779`) fires at `magnitude > 20f` g and applies
+   here.** `Pilot.TakeGForceDamage` (`:85989`) fires at `magnitude > 20f` g and applies
    `(sqrGForces − 400f) * 0.007f` as `impactDamage` to **one part index — the pilot's own**
-   (`Unit.Damage(byte index, DamageInfo)`, `:88655`). No airframe structural-G path exists anywhere
+   (`Unit.Damage(byte index, DamageInfo)`, `:88865`). No airframe structural-G path exists anywhere
    in the decompile. R32 confirms it empirically: three drones despawned `(pilot killed)` with the
    aircraft still flying. See §2.
 3. **The R29 precursor REPRODUCED**, which is what the card was for. From replicate ~32 onward, the
@@ -54,7 +54,7 @@ has been saying**. §1 and §2 are the corrections; §3 onward is R32 itself.
    `_pitchEff` with no floor below `PEffRevThresh`. Every one of those reduces authority. **There is
    no recovery mode, only de-authorisation**, and on this airframe nothing else recovers it. See §6.
 6. **The game's own alpha limiter is structurally absent where the cards fly.** It is gated
-   `if (num2 < 1f)` (`:64860`), `num2` = q / q_corner against the FBW's `cornerSpeed = 100`. At the
+   `if (num2 < 1f)` (`:65033`), `num2` = q / q_corner against the FBW's `cornerSpeed = 100`. At the
    card's entry condition `num2 = 2.03`. Across R32, `num2 < 1` on **2.3 %** of rows — so the limiter
    is inactive on 97.7 % of them, and on **86.3 %** of the 5 541 rows that exceed this airframe's own
    10° `alphaLimiter`. See §1.3.
@@ -100,13 +100,13 @@ replacement text is in the DOCS block of the handoff.
 
 ### 1.2 what actually shapes G
 
-`FlyByWire.Filter` (`:64838`) computes
+`FlyByWire.Filter` (`:65011`) computes
 
 ```csharp
-float num  = cornerSpeed * cornerSpeed * 1.225f;                       // :64844  (FBW's OWN cornerSpeed)
-float num2 = aircraft.speed * aircraft.speed * aircraft.airDensity / num;   // :64845  = q / q_corner
+float num  = cornerSpeed * cornerSpeed * 1.225f;                       // :65017  (FBW's OWN cornerSpeed)
+float num2 = aircraft.speed * aircraft.speed * aircraft.airDensity / num;   // :65018  = q / q_corner
 ...
-targetPitchAngVel = inputs.pitch * gLimitPositive * 9.81f / Mathf.Max(aircraft.speed, cornerSpeed * 0.75f);  // :64859
+targetPitchAngVel = inputs.pitch * gLimitPositive * 9.81f / Mathf.Max(aircraft.speed, cornerSpeed * 0.75f);  // :65032
 ```
 
 That is a *rate* command whose scale happens to be `gLimit·g/V`. Nothing measures achieved G and
@@ -119,12 +119,12 @@ reached 26.9 g in R29 and 9.2 g in R32, because the rotation was not coming from
 ### 1.3 and the alpha limiter is gated off exactly where the cards fly
 
 ```csharp
-if (num2 < 1f)                                                          // :64860
+if (num2 < 1f)                                                          // :65033
 {
     targetPitchAngVel *= Mathf.Clamp(num2, 0.3f, 1f);
     ... if (Mathf.Abs(f) > alphaLimiter && Mathf.Sign(f) == Mathf.Sign(targetPitchAngVel))
             targetPitchAngVel *= 1f - Mathf.Clamp(value, 0f, 10f) * alphaLimiterStrength;
-}                                                                       // :64870
+}                                                                       // :65043
 ```
 
 The alpha limiter is **inside** the sub-corner-q branch. Above corner q there is no alpha protection
@@ -136,7 +136,7 @@ Measured across all 37 868 R32 rows: `num2 < 1` on **2.3 %**, `num2 < 1.2` on **
 **5 541 rows (14.6 %)** where |AoA| exceeded this airframe's own 10° `alphaLimiter`, **86.3 %** had
 the limiter structurally inactive.
 
-There is a second consequence of the same `num2` at `:64847`:
+There is a second consequence of the same `num2` at `:65020`:
 `limitFactorSmoothed → (stabilityAssist || num2 > 1.2) ? 1 : 0`. With `flightAssist = 0` and
 `num2 = 2.03`, the Darkreach flies the **protected g-based law with the alpha limiter removed** —
 the one combination that has neither guard. The mod mirrors this branch faithfully at
@@ -146,7 +146,7 @@ the one combination that has neither guard. The mod mirrors this branch faithful
 
 ## §2 — over-G damages the pilot, not the airframe
 
-`Pilot`'s fixed step (`:85857`):
+`Pilot`'s fixed step (`:86067`):
 
 ```csharp
 accel = ((velocityPrev == Vector3.zero) ? Vector3.zero : (unitPart.rb.velocity - velocityPrev));
@@ -157,7 +157,7 @@ if (magnitude > 20f) TakeGForceDamage(magnitude * magnitude);
 ```
 
 ```csharp
-public void TakeGForceDamage(float sqrGForces)          // :85779
+public void TakeGForceDamage(float sqrGForces)          // :85989
 {
     float num = (sqrGForces - 400f) * 0.007f;
     if (aircraft != null) aircraft.Damage(index, new DamageInfo(0f, 0f, 0f, num));
@@ -165,7 +165,7 @@ public void TakeGForceDamage(float sqrGForces)          // :85779
 }
 ```
 
-`index` is the **pilot's own part index**, and `Unit.Damage(byte index, DamageInfo)` (`:88655`) routes
+`index` is the **pilot's own part index**, and `Unit.Damage(byte index, DamageInfo)` (`:88865`) routes
 to that one part. `DamageInfo(0, 0, 0, num)` is pure `impactDamage`. Threshold: 20 g; at 26.9 g the
 damage per fixed step is `(723 − 400) × 0.007 = 2.26`.
 
@@ -288,7 +288,7 @@ magnitude overshoot in the **opposite direction**. Batch-wide, on rows with |`fb
 | departed captures | 18 | 9 400 | **7.73** | 13.00 | 28.2 |
 
 At those rates the game's own FBW pitch PID is saturated too: `num4 = clamp(localAngVel.x −
-targetPitchAngVel, −0.25, 0.25)` (`:64884`) is railed at 0.25 whenever the achieved rate exceeds the
+targetPitchAngVel, −0.25, 0.25)` (`:65057`) is railed at 0.25 whenever the achieved rate exceeds the
 commanded one by more than 0.25 rad/s, which is most of the departure, and `remapFactor = 1/num2` has
 already halved the FBW's own corrective authority at `num2 = 2.03`. Both loops are asking correctly
 and neither is being obeyed.
@@ -309,7 +309,7 @@ constants own the whole stand-down:
 
 | site | constant | what it decides |
 |---|---|---|
-| `ChaseController.cs:1152` | `Mathf.Clamp(qRatio, 0.3f, 1f)` | the speed schedule's floor (mirrors the game's own `:64861` clamp — defensible) |
+| `ChaseController.cs:1152` | `Mathf.Clamp(qRatio, 0.3f, 1f)` | the speed schedule's floor (mirrors the game's own `:65034` clamp — defensible) |
 | `ChaseController.cs:1255` | `schedFloor = 0.3f` | the **AoA-utilization** schedule's floor — the one that rails here |
 | `ChaseController.cs:1296` | `Mathf.Max(0.3f, aoaGateUp)` | the achievability cap's floor |
 

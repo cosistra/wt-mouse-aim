@@ -158,11 +158,15 @@ namespace NuclearOptionMouseAim
             //             IntegralStallGate OFF this equals the old fineBlend = clamp01(1 - off/FineAngle)
             //             exactly, so a run where the gate never opened is visible as iGate == 0 at a
             //             standing error instead of having to be inferred from iPitch being flat.
-            //   leadDeg = the anticipatory lead ACTUALLY subtracted from azErr (deg, signed). With
-            //             RelativeTurnLead OFF it is headingRateFilt*TurnLeadTime; with it ON it is
-            //             (headingRateFilt - aimRate)*TurnLeadTime — and since all three of azErr,
-            //             headingRateFilt and aimRate are already columns, which branch ran is checkable
-            //             by arithmetic, and predFloor binding is recoverable as azErrPred vs azErr-leadDeg.
+            //   leadDeg = the anticipatory lead ACTUALLY subtracted from azErr (deg, signed). Since
+            //             v0.99.1 it is unconditionally the RELATIVE form,
+            //             (headingRateFilt - aimRate)*TurnLeadTime — Cfg.RelativeTurnLead was deleted
+            //             once R39-D spent its A/B (it moved the standing error 0.2-3.8% against a
+            //             0.1-4.7% null contrast, and only because bankTR was on the MaxBank wall).
+            //             Captures from v0.83..v0.99.0 carry either form and say which on their own
+            //             '# config' line (relLead=0/1). Since all three of azErr, headingRateFilt and
+            //             aimRate are columns the term stays checkable by arithmetic either way, and
+            //             predFloor binding is recoverable as azErrPred vs azErr-leadDeg.
             "iGate,leadDeg," +
             // v0.85. The roll-to-align loop, for the same reason as aimRate and iGate/leadDeg — the v0.85
             // changes and the v0.85 changes NEVER FIRING both read as a smaller roll oscillation.
@@ -187,8 +191,8 @@ namespace NuclearOptionMouseAim
             "frameMs," +
             // v0.96. AIRFRAME DAMAGE — the fraction of THIS aircraft's parts that have DETACHED,
             // straight off the game's own aggregate (Aircraft.partDamageTracker is a public field,
-            // decompile :60388, constructed for every aircraft at :61084; PartDamageTracker at
-            // :79217). Free to read on every row: GetDetachedRatio (:79244) is event-driven and
+            // decompile :60561, constructed for every aircraft at :61257; PartDamageTracker at
+            // :79416). Free to read on every row: GetDetachedRatio (:79443) is event-driven and
             // self-throttled to 1 Hz — it returns a CACHED float and walks nothing at all until a
             // part actually falls off.
             // Why a column at all: over-G damages the PILOT only (Pilot.TakeGForceDamage), so
@@ -201,7 +205,7 @@ namespace NuclearOptionMouseAim
             // "intact", and reporting a failed probe as zero is the exact confusion the fail-soft
             // rule exists to prevent. The sidecar's aeroPartCount is NOT a substitute — nothing on
             // the detach path calls RemoveFromUnit(), the only caller of DeregisterAeroPart
-            // (AeroPart:74558-74564), so it never decreases and a constant 35 is not evidence that
+            // (AeroPart:74749-74755), so it never decreases and a constant 35 is not evidence that
             // nothing fell off.
             "dmgFrac," +
             // v0.96.2. Metres from the UNITY WORLD ORIGIN — deliberately the one quantity `posX/Y/Z`
@@ -213,13 +217,33 @@ namespace NuclearOptionMouseAim
             // |v-vPrev|/(dt*9.81) off the cockpit part's rigidbody, which multiplies that grain by 60.
             // R33 measured the consequence: replicate scatter in terminalOffDeg tracks gJitterG at
             // r = 0.886, and the game re-centres the origin on the OPERATOR'S CAMERA (OriginShift,
-            // :19361), so one operator moving mid-batch re-bands every lane at once. That is not a
+            // :19365), so one operator moving mid-batch re-bands every lane at once. That is not a
             // hypothesis about geometry — R29 and R33 have the per-lane jitter ordering INVERTED
             // across the same ten lanes at the same distances, which rules distance out as the driver
             // and leaves the datum. It was recoverable then only by grepping spawn lines out of
             // LogOutput.log, a file overwritten every session; as a column it is per-row, survives
             // archival, and a STEP in it IS an origin shift with no log to consult.
-            "origDist";
+            "origDist," +
+            // v0.97. The datum origin itself, as a VECTOR. `origDist` says an origin shift HAPPENED;
+            // these three say by how much and in which direction — which is the difference between
+            // "the lane moved" and "the origin moved", and R35 could not separate those two at all.
+            // `Datum.originPosition` (`:19234`, a public static on the static class at `:19215`) is
+            // exactly what the game subtracts to produce `GlobalPosition`, i.e. the `posX/Y/Z` above,
+            // so recording both makes the whole frame recoverable: world = pos + datum. A step in
+            // `datum` with no step in `pos` is an OriginShift; a step in `pos` with none in `datum` is
+            // the aircraft actually moving. R35 needed exactly that distinction 237 times in one card
+            // and had to reconstruct it from spawn lines in a log that is overwritten every session.
+            //
+            // CORRECTION to the v0.96.2 note above, which concluded the R29/R33 inversion "rules
+            // distance out as the driver and leaves the datum." Half right, and the wrong half is
+            // load-bearing. R35 measured r(origDist, gJitterG) = 0.948 across 16 lanes with a log-log
+            // slope of 0.885 — the d*1.2e-7 float-grain prediction. Distance IS the driver. The
+            // inversion was measuring the wrong RADIUS: distance to the lane base and distance to the
+            // world origin acquire opposite orderings once the origin drifts, and within R35's near
+            // six lanes they correlate with jitter at -0.810 and +0.962 respectively.
+            "datumX," +
+            "datumY," +
+            "datumZ";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -509,6 +533,14 @@ namespace NuclearOptionMouseAim
             float origDist = 0f;
             try { if (ac != null) origDist = ac.transform.position.magnitude; }
             catch { /* leave 0 */ }
+            // The datum that `pos` above is measured against. Unlike `origDist`, zero here IS a
+            // plausible reading — `Datum.originPosition` is genuinely Vector3.zero before the first
+            // shift and after a reset (`:19267`) — so this one carries no failure sentinel and cannot
+            // have one. That costs nothing: the pairing is what carries the signal, and `origDist`
+            // failing to 0 alongside a plausible datum is already self-evidently a failed probe.
+            Vector3 datum = Vector3.zero;
+            try { datum = Datum.originPosition; }
+            catch { /* leave zero */ }
             try
             {
                 _w.WriteLine(
@@ -522,7 +554,8 @@ namespace NuclearOptionMouseAim
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
                     $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}," +
-                    $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000},{origDist:0.0}");
+                    $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000},{origDist:0.0}," +
+                    $"{datum.x:0.0},{datum.y:0.0},{datum.z:0.0}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }
@@ -618,15 +651,15 @@ namespace NuclearOptionMouseAim
                     //
                     // Separate key names from the `maxSpeed` written below ON PURPOSE: that one is
                     // `aircraftParameters.maxSpeed`, which is a NORMALIZER (`aircraft.speed /
-                    // maxSpeed`, decompile :15554) reading a flat 600 for every fast jet, not a
+                    // maxSpeed`, decompile :15557) reading a flat 600 for every fast jet, not a
                     // Vmax. Two different quantities must never share a key.
                     // `aircraftInfo` is the encyclopedia's display block and is in KM/H at every use
-                    // site in the game (:2583, :10258-10259) — converted here so the sidecar stays
+                    // site in the game (:2584, :10261-10262) — converted here so the sidecar stays
                     // one unit throughout.
                     var ad = d as AircraftDefinition;   // `Unit.definition` is a UnitDefinition
                     if (ad == null || ad.aircraftInfo == null) return;
-                    Num("infoStallSpeed", ad.aircraftInfo.stallSpeed / 3.6f);   // :62791
-                    Num("infoMaxSpeed",   ad.aircraftInfo.maxSpeed   / 3.6f);   // :62789
+                    Num("infoStallSpeed", ad.aircraftInfo.stallSpeed / 3.6f);   // :62964
+                    Num("infoMaxSpeed",   ad.aircraftInfo.maxSpeed   / 3.6f);   // :62962
                     // Free (same block) and recorded for completeness, but read it as ADVISORY: its
                     // sibling `emptyWeight` is documented template junk — 10700 shared by three
                     // airframes, 5200 by three more (AIRFRAMES.md trap 3) — so this block's masses

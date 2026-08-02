@@ -6,7 +6,7 @@ jsonKey that does not exist costs a refused lane, and an entry condition the air
 costs a capture that measures the placement instead of the control law.
 
 **Source.** `Encyclopedia.aircraft` (`List<AircraftDefinition>`), decompile
-`Assembly-CSharp.decompiled.cs:9688`, keyed into the public static `Encyclopedia.Lookup` at `:9715`.
+`Assembly-CSharp.decompiled.cs:9691`, keyed into the public static `Encyclopedia.Lookup` at `:9718`.
 There is **no JSON or text data file** for this — the definitions are Unity ScriptableObjects inside
 `NuclearOption_Data/resources.assets`, which is why this table exists rather than a "just read the
 fields" note. Cross-validated against the mod's own `.airframe.json` sidecar for `Multirole1`: 6/6
@@ -38,7 +38,7 @@ number you read somewhere else.
 | `AttackHelo1` | SAH-46 Chicane | SAH-46 | helicopter | 0 | 100.0 | **170**† | 120 | 3.0 | 750 | 7550 |
 | `UtilityHelo1` | UH-90 Ibis | UH-90 | helicopter (compound) | 0 | 133.9 | — | 120 | 3.5 | 750 | 7300 |
 | `QuadVTOL1` | VL-49 Tarantula | VL-49 | quad tiltwing | 0 | 148.6 | — | 120 | 3.0 | 750 | 28900 |
-| `UFO` | ??? | ??? | **event-only — ignore.** `isEventContent=1`, gated by `MissionManager.AllowEventContent` (`UnitDefinition.IsAllowed :89751`). A clone of `Fighter1`'s envelope at 79 t | | | | | | | |
+| `UFO` | ??? | ??? | **event-only — ignore.** `isEventContent=1`, gated by `MissionManager.AllowEventContent` (`UnitDefinition.IsAllowed :89961`). A clone of `Fighter1`'s envelope at 79 t | | | | | | | |
 
 **Where the FBW column comes from, per airframe: the capture corpus, not the decompile.** It is a
 serialized field on the prefab, so it has **no value anywhere in the decompiled source** — the only
@@ -95,20 +95,20 @@ Stated plainly because it is the actionable part:
 Each is why the table above exists instead of a pointer to the ScriptableObject.
 
 1. **`aircraftParameters.maxSpeed` IS NOT a Vmax for jets.** It is a *normalizer*
-   (`aircraft.speed / aircraftParameters.maxSpeed` at `:15554`, `:15919`, `:70152`) and reads a flat
+   (`aircraft.speed / aircraftParameters.maxSpeed` at `:15557`, `:15922`, `:70341`) and reads a flat
    `600` for every fast jet. The Vmax column above is `aircraftInfo.maxSpeed / 3.6`. The two agree for
    rotorcraft and diverge by ~50% for `Fighter1`.
-2. **`aircraftInfo` is in km/h**, divided by 3.6 at every use site (`:2583`, `:10258-10259`).
+2. **`aircraftInfo` is in km/h**, divided by 3.6 at every use site (`:2584`, `:10261-10262`).
    `aircraftParameters` is already m/s. Mixing the two is the easy mistake.
 3. **`aircraftInfo.emptyWeight` is template junk.** 10700 is shared by
    `Fighter1`/`Multirole1`/`SmallFighter1`, 7260 by all three rotorcraft, 5200 by
    `CAS1`/`trainer`/`VTOLTrainer1`. Display-only, never read in flight logic. Use `mass`.
-4. **`UnitDefinition.mass` (`:89701`) is DRY mass**, overwritten at Encyclopedia load by
-   `CacheMass()` → `GetPrefabMass()` (`:89765`). The sidecar's `massKg` 25563 for `Multirole1` =
+4. **`UnitDefinition.mass` (`:89911`) is DRY mass**, overwritten at Encyclopedia load by
+   `CacheMass()` → `GetPrefabMass()` (`:89975`). The sidecar's `massKg` 25563 for `Multirole1` =
    mass 16040 + fuel 8200 + stores 1373.
 5. **No service ceiling exists.** Zero hits for "ceiling" in the decompile. Altitude is bounded only
-   by physics: `LevelInfo.GetAirDensity(alt)` (`:21761`) reads a 64-sample chart spanning 0–30 km, and
-   `GetSpeedOfSound(alt) = max(340 − 0.005·alt, 290)` (`:21768`). The nearest per-airframe hint is
+   by physics: `LevelInfo.GetAirDensity(alt)` (`:21776`) reads a 64-sample chart spanning 0–30 km, and
+   `GetSpeedOfSound(alt) = max(340 − 0.005·alt, 290)` (`:21783`). The nearest per-airframe hint is
    `UnitDefinition.maxEditorHeight` = 10000 m for everything except `QuadVTOL1` (5000 m). This is why
    the `alpha-*` cards reach the AoA ceiling by climbing to 8000 m rather than by asking for it.
 6. **THERE ARE TWO `cornerSpeed` FIELDS AND THEY HOLD DIFFERENT NUMBERS.**
@@ -122,11 +122,11 @@ Each is why the table above exists instead of a pointer to the ScriptableObject.
    `Encyclopedia.Lookup` hands you, what the sidecar calls `cornerSpeed` (the FBW one is
    `fbwCornerSpeed`), and it is **not** what the FBW flies.
 
-   | | `AircraftParameters.cornerSpeed` (`:62924`) | `ControlsFilter.FlyByWire.cornerSpeed` (`:64704`) |
+   | | `AircraftParameters.cornerSpeed` (`:63097`) | `ControlsFilter.FlyByWire.cornerSpeed` (`:64877`) |
    |---|---|---|
    | lives beside | `takeoffDistance`, `turningRadius`, `approachSpeed`, `landingSpeed` | the FBW rate-limiter gains |
-   | who reads it | **AI pilot code, and nothing else** — target selection `:12418`, throttle `:12993`, glideslope `:13624`, `:13927`, approach `:14121`, `:14234`, waypoint nav `:15773`, `:15787` | the FBW itself |
-   | what it does | describes the aircraft to a bot | **sets the pitch-rate command**: `targetPitchAngVel = inputs.pitch * gLimitPositive * 9.81f / Mathf.Max(aircraft.speed, cornerSpeed * 0.75f)` (`:64859`), plus pitch authority scaling `:64671`, the g-limit rate conversion `:64672` and the q reference `:64844` |
+   | who reads it | **AI pilot code, and nothing else** — target selection `:12421`, throttle `:12996`, glideslope `:13627`, `:13930`, approach `:14124`, `:14237`, waypoint nav `:15776`, `:15790` | the FBW itself |
+   | what it does | describes the aircraft to a bot | **sets the pitch-rate command**: `targetPitchAngVel = inputs.pitch * gLimitPositive * 9.81f / Mathf.Max(aircraft.speed, cornerSpeed * 0.75f)` (`:65032`), plus pitch authority scaling `:64844`, the g-limit rate conversion `:64845` and the q reference `:65017` |
 
    Measured disagreement over the whole capture corpus (both numbers are in every sidecar; the two
    columns in the table above are the per-airframe result): the ratio FBW/AI runs from **0.556×**
@@ -145,12 +145,12 @@ Each is why the table above exists instead of a pointer to the ScriptableObject.
    **Reading it before a spawn** (no aircraft instance), which is what v0.96 does:
    `Encyclopedia.i.TryGetPrefab(jsonKey, out prefab)` — already used by `TestDrone.Spawn` — then
    `prefab.GetComponentInChildren<ControlsFilter>(true)` (`includeInactive`: a prefab's hierarchy is
-   inactive, and `HeloControlsFilter` `:35847` derives from `ControlsFilter`, so rotorcraft resolve
-   through the same call) and `GetFlyByWireParameters()`, which is **public** (`:65521`) and packs
-   `cornerSpeed` at **index 2** (`FlyByWire.GetParameters()`, `:64786`). **No reflection is needed** —
+   inactive, and `HeloControlsFilter` `:36005` derives from `ControlsFilter`, so rotorcraft resolve
+   through the same call) and `GetFlyByWireParameters()`, which is **public** (`:65710`) and packs
+   `cornerSpeed` at **index 2** (`FlyByWire.GetParameters()`, `:64959`). **No reflection is needed** —
    this is the same public accessor the v0.55 live FBW probe reads, just asked of a prefab. The value
-   is serialized on the prefab, so it is correct pre-spawn — `ApplyParameters` (`:64796`) is the
-   in-game dev tuning panel (`:42699`, `:42712`), not a load path.
+   is serialized on the prefab, so it is correct pre-spawn — `ApplyParameters` (`:64969`) is the
+   in-game dev tuning panel (`:42876`, `:42889`), not a load path.
 
 ## Querying it before a spawn
 
@@ -159,16 +159,16 @@ What makes a feasibility gate possible at all. `Encyclopedia.Lookup` is only non
 
 ```csharp
 if (Encyclopedia.Lookup.TryGetValue(jsonKey, out var ud) && ud is AircraftDefinition ad) {
-    float vStall = ad.aircraftInfo.stallSpeed / 3.6f;   // :62791
-    float vMax   = ad.aircraftInfo.maxSpeed   / 3.6f;   // :62789
-    var p = ad.aircraftParameters;                      // :62800
-    float aiCorner = p.cornerSpeed;                     // :62924 — the AI's. NOT what the FBW flies:
+    float vStall = ad.aircraftInfo.stallSpeed / 3.6f;   // :62964
+    float vMax   = ad.aircraftInfo.maxSpeed   / 3.6f;   // :62962
+    var p = ad.aircraftParameters;                      // :62973
+    float aiCorner = p.cornerSpeed;                     // :63097 — the AI's. NOT what the FBW flies:
                                                         // for control, read trap 6's prefab FBW value
 
-    float gLim   = p.aircraftGLimit;                    // :62910
-    float turnR  = p.turningRadius;                     // :62922
-    bool  vtol   = p.verticalLanding;                   // :62920
-    float mass   = ad.mass;                             // :89767
+    float gLim   = p.aircraftGLimit;                    // :63083
+    float turnR  = p.turningRadius;                     // :63095
+    bool  vtol   = p.verticalLanding;                   // :63093
+    float mass   = ad.mass;                             // :89977
 }
 ```
 

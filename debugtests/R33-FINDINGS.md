@@ -30,7 +30,7 @@ debugtests/archive/R33-20260731 --rebuild`.
 2. **The real mechanism is high-frequency jitter in the game's own `Aircraft.gForce`**, which the
    control law reads and passes into the stick. It is not an aero quantity: `gForce` is
    `|v − vPrev| / (fixedDeltaTime · 9.81)` taken off the **cockpit part's** rigidbody
-   (decompile `:61804-61806`), so under complex physics it carries whatever the multi-rigidbody
+   (decompile `:61977-61979`), so under complex physics it carries whatever the multi-rigidbody
    joint solver is doing. Per lane, the change in `terminalOffDeg` stdev tracks the change in that
    jitter with **r = 0.886, log-log slope 0.82, over all 9 lanes and in BOTH directions** — including
    the three lanes that got *quieter*, which the briefing offered as a refutation and which are
@@ -41,7 +41,7 @@ debugtests/archive/R33-20260731 --rebuild`.
    R29 shows no such event: its per-lane jitter is flat to ±10% across all 8 replicates over 30
    minutes. §4.
 4. **The cause is the floating origin, and the floating origin follows the camera.**
-   `OriginShift(Vector3 cameraPosition)` (decompile `:19361`) translates **every root GameObject** by
+   `OriginShift(Vector3 cameraPosition)` (decompile `:19365`) translates **every root GameObject** by
    `−round(cameraPos / originShiftStep) · originShiftStep` whenever the camera passes `threshold`,
    then calls `Physics.SyncTransforms()`. A 10-lane fleet at 6 km spacing necessarily spans
    **8 km to 62 km** from that origin, and the mod's own spawn log records the datum moving *during
@@ -99,7 +99,7 @@ else changed), and COIN/EW1 moved *up* only 8–22%, not down from 171.
 | mean `terminalOffDeg` | 0.2318 | 0.2304 |
 | **stdev `terminalOffDeg`** | **0.0036** | **0.0118** |
 
-`targetPitchAngVel = pitch · gLimitPositive · 9.81 / max(V, 0.75·Vc)` (`:64859`) is unchanged for
+`targetPitchAngVel = pitch · gLimitPositive · 9.81 / max(V, 0.75·Vc)` (`:65032`) is unchanged for
 this lane in every term. The same holds on the other three tags (stdev 0.0030→0.0170,
 0.0025→0.0105, 0.0035→0.0113) with the mean moving ≤ 2.9%.
 
@@ -132,7 +132,7 @@ the mean |Δg| between consecutive recorder samples. Per lane, mean over all non
 **Regression of log(stdev ratio) on log(jitter ratio) over the nine usable lanes: slope 0.823,
 r = 0.886, r² = 0.785.** Both directions, one line.
 
-`gForce` is not lift. `Aircraft.LocalSimFixedUpdate` (`:61802-61806`):
+`gForce` is not lift. `Aircraft.LocalSimFixedUpdate` (`:61975-61979`):
 
 ```csharp
 accel = ((velocityPrev == Vector3.zero) ? Vector3.zero : (CockpitRB().velocity - velocityPrev));
@@ -195,7 +195,7 @@ with and then inverted.
 
 ## 5. Why: the floating origin follows the camera
 
-`OriginShift` (decompile `:19361`, in the class that owns `Datum`):
+`OriginShift` (decompile `:19365`, in the class that owns `Datum`):
 
 ```csharp
 private Vector3 ShiftPosition(Vector3 cameraPosition) =>
@@ -323,7 +323,7 @@ happily pool them.
 | flight condition | segment-mean airspeed, AoA and `authorityUsedFrac` match to <1% on the matched lane (§2) |
 | `pEff` / probe noise | `pEff` segment means match (0.550 vs 0.543–0.558 on VTOLTrainer1 `obDL6`) |
 | mod version | v0.94's `Arm()` returns `e.Value` with no assignment, and R30–R32 flew v0.94 without this; the flip is mid-batch on one version |
-| `Aircraft.CheckPhysicsLod` (10 km camera-distance physics LOD, `:61819`) | **dead code** — one occurrence in 181 878 lines, its own declaration, zero call sites. Same shape as `GLimiter` in R32. Checked because it was the obvious suspect; it is not the mechanism |
+| `Aircraft.CheckPhysicsLod` (10 km camera-distance physics LOD, `:61992`) | **dead code** — one occurrence in 181 878 lines, its own declaration, zero call sites. Same shape as `GLimiter` in R32. Checked because it was the obvious suspect; it is not the mechanism |
 
 ---
 

@@ -5,12 +5,22 @@ Two pieces of logic here regress silently, i.e. the batch still flies, every cap
 and the answer is just wrong:
 
   1. THE ABBA SEQUENCE (`ScenarioPlayer.ArmOf`). Its whole job is that both arms have the same MEAN
-     POSITION in the batch, so a one-way session drift cancels instead of reading as an effect.
-     A,A,B,B has equal counts and is fully confounded; nothing at runtime would notice.
+     POSITION, so a one-way session drift cancels instead of reading as an effect. A,A,B,B has equal
+     counts and is fully confounded; nothing at runtime would notice.
   2. THE ARM SURVIVING `ChaseController.Forget` (`ChaseController`'s ARM-SEAM region). The v0.84
      per-replicate reset calls `Forget(ac)` on EVERY replicate, so if the assignment lived in the
      controller instance the sweep would quietly do nothing while each capture still labelled itself
      `arm=0`/`arm=1`. That is why it lives in the registry map, keyed by aircraft.
+
+WHAT THE SEQUENCE IS INDEXED BY, since v0.99.1: the REPLICATE (`_qi / _block`), not the queue
+position. With more than one card selected the queue is BLOCKED — `SelectCards` repeats the whole
+selection, c1,c2,c1,c2… — so `ArmOf(_qi)` gave card c1 the arms at queue indices 0,2,4,6 = A,B,A,B:
+equal counts, but mean position 1 vs 2 inside c1's OWN sequence. The suite-start balance check ran
+over the whole queue (A at 0,3,4,7 and B at 1,2,5,6, both summing 14), so it reported balanced and
+printed nothing, while `compare-runs.py` groups by (airframe, CARD, arm) and sliced along exactly
+the confounded axis. **So the balance subject below is the CARD, not the queue** — case 2b asserts
+the fixed form and the old one as a counterfactual. `ArmOf` itself is unchanged, which is why the
+extracted program still compiles against it.
 
 Both live between markers in plain C# with no Unity/BepInEx type in them; this extracts those two
 regions verbatim, wraps them in a throwaway console project and runs the .NET SDK over the case
@@ -19,8 +29,10 @@ reason: a Python reimplementation would drift from the code and then agree with 
 
 Plus five SOURCE assertions the regions cannot make about themselves: that the lever list below is
 still exactly what Cfg.cs marks `(A/B lever)`, that `Forget` does not clear the arm, that `For`
-seeds it, that `ApplyArm` never writes the global knob, and that all five A/B levers are read
-through `Arm()` rather than off `Cfg` directly.
+seeds it, that `ApplyArm` never writes the global knob, and that all four A/B levers are read
+through `Arm()` rather than off `Cfg` directly. Plus two more since v0.99.1: that `ApplyArm` indexes
+by `_qi / _block` and not by a bare `_qi`, and that `SetUpArmSchedule` tallies balance with `_block`
+in hand — neither fails to compile, and both put the per-card confound straight back.
 
 Needs the .NET SDK, which this repo already requires to build at all (see CLAUDE.md).
 
@@ -44,18 +56,19 @@ CFG = REPO / "Cfg.cs"
 # that says "this knob is meant to be swept". Nothing links it to the list below except this scan.
 CFG_LEVER = re.compile(r"^\s*public static ConfigEntry<bool>\s+(\w+)\s*;.*\(A/B lever\)", re.M)
 
-# The five bools Cfg.cs marks "(A/B lever)". Every one must be read through Arm() to be sweepable;
+# The four bools Cfg.cs marks "(A/B lever)". Every one must be read through Arm() to be sweepable;
 # a lever read as Cfg.X.Value still compiles and still flies, it is just invisible to the schedule.
+# v0.99.1: RelativeTurnLead was DELETED (knob and branch) after R39-D spent its A/B — the lead is now
+# unconditionally the relative rate, so there is no arm left to sweep and no site left to read.
 LEVERS = [
     "MarkerRateFeedForward",
-    "RelativeTurnLead",
     "IntegralStallGate",
     "BelowAlignSuppress",
     "AlignRateLead",
 ]
 # MarkerRateFeedForward is read at BOTH lockstep sites (the shared omegaDes and
-# ApplyEvolvedLegacy's own omega), so five levers = six call sites.
-LEVER_SITES = 6
+# ApplyEvolvedLegacy's own omega), so four levers = five call sites.
+LEVER_SITES = 5
 
 PROJ = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -151,6 +164,28 @@ def source_checks() -> list:
             )
         if "ChaseController.SetArm" not in body:
             bad.append("ScenarioPlayer.ApplyArm no longer assigns the arm through ChaseController.SetArm.")
+        # v0.99.1 — the index is the REPLICATE. `ArmOf(_qi)` compiles, flies, and gives every card
+        # A,B,A,B internally while the queue-wide tally reports balanced (see the docstring).
+        if "ArmOf(_qi / _block)" not in body:
+            bad.append(
+                "ScenarioPlayer.ApplyArm does not index the arm by ArmOf(_qi / _block). Indexing by "
+                "the raw queue position confounds arm with position WITHIN each card as soon as a "
+                "second card is selected — 2 cards x repeat 4 gives every card A,B,A,B, mean position "
+                "1 vs 2 — and the queue-wide balance check reports it as balanced."
+            )
+
+    # 3b. ...and the balance check has to be tallied over the same thing the arm is indexed by, or it
+    #     goes back to certifying a per-card imbalance as balanced. That is the half that made the
+    #     defect invisible for as long as it existed.
+    m = re.search(r"private void SetUpArmSchedule\(int runs, Card first\)\s*\{(.*?)\n        \}", scen, re.S)
+    if not m:
+        bad.append("ScenarioPlayer.SetUpArmSchedule not found.")
+    elif "_block" not in m.group(1):
+        bad.append(
+            "ScenarioPlayer.SetUpArmSchedule does not use _block. Its balance tally must run over the "
+            "REPLICATE index, i.e. the same thing ApplyArm indexes by — tallying the whole queue is "
+            "what let 2 cards x repeat 4 print 'balanced' while every card flew A,B,A,B."
+        )
 
     # 4. Every lever read through Arm(). Cfg.X.Value in the law is not a compile error and not a
     #    flight bug — it just makes that lever unsweepable, which reads as "the A/B found nothing".
@@ -224,6 +259,41 @@ internal static class P
             Ok(nA == nB && sumA != sumB,
                $"n=6 must be equal-count ({{nA}}/{{nB}}) but UNEQUAL mean position ({{sumA}}/{{sumB}}) — "
                + "the case that proves counts alone do not detect an imbalance");
+        }}
+
+        // --- 2b. THE SUBJECT OF THE BALANCE CHECK IS THE CARD, NOT THE QUEUE (v0.99.1) --------
+        // The queue is BLOCKED for a multi-card selection (c1,c2,c1,c2...), and compare-runs.py
+        // groups by (airframe, CARD, arm) — so the sequence that has to be balanced is the one a
+        // SINGLE card flies. Indexing by replicate (_qi / _block) makes every card fly the same
+        // ArmOf-over-replicates sequence; the counterfactual below is the shipped-until-v0.99.1
+        // bare ArmOf(_qi), asserted UNBALANCED so nobody can quietly go back to it.
+        foreach (int nCards in new[] {{ 1, 2, 3, 4 }})
+        foreach (int reps in new[] {{ 4, 8 }})
+        {{
+            for (int k = 0; k < nCards; k++)
+            {{
+                int nA = 0, nB = 0, sumA = 0, sumB = 0;
+                for (int r = 0; r < reps; r++)
+                {{
+                    int qi = r * nCards + k;                 // card k's r-th run in the blocked queue
+                    if (Sched.ArmOf(qi / nCards) == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
+                }}
+                Ok(nA == nB && sumA == sumB,
+                   $"{{nCards}} card(s) x {{reps}} reps, card {{k}}: {{nA}}A/{{nB}}B, sum {{sumA}}/{{sumB}} — "
+                   + "each card's OWN arm sequence must be balanced");
+            }}
+        }}
+        {{
+            // 2 cards x repeat 4 under the OLD rule: equal counts, mean position 1 vs 2 within c1.
+            int nA = 0, nB = 0, sumA = 0, sumB = 0;
+            for (int r = 0; r < 4; r++)
+            {{
+                int qi = r * 2 + 0;
+                if (Sched.ArmOf(qi) == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
+            }}
+            Ok(nA == nB && sumA != sumB,
+               $"counterfactual: bare ArmOf(_qi) must leave card 0 equal-count ({{nA}}/{{nB}}) but "
+               + $"UNBALANCED in mean position ({{sumA}}/{{sumB}}) — the defect this indexing fixed");
         }}
 
         // --- 3. No assignment: the live config value passes straight through ------------------

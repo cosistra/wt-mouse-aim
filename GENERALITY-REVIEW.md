@@ -96,7 +96,7 @@ evidence in [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md); finding 
 
 **Also corrected by the R32 decompile audit, because it changes what "the game protects it" means:**
 `ControlsFilter.GLimiter` is **dead code** (one occurrence in 181 878 lines, never instantiated,
-`LimitG` never called), and the FBW's alpha limiter is gated `if (num2 < 1f)` (`:64860`) so it is
+`LimitG` never called), and the FBW's alpha limiter is gated `if (num2 < 1f)` (`:65033`) so it is
 **inactive above corner q — where every shipped card flies** (97.7% of R32 rows). The law's
 "probed ceiling + live AoA" pattern is therefore not backstopped by the game the way findings 1/2/10
 assume; the mod's AoA block is the *only* alpha protection in the loop at card speeds.
@@ -313,6 +313,34 @@ channel can close the error rather than on how big the error is. Also flags **de
 `targetBank`/`linBank`/`azBank`/`bankGain`/`bankBlend` are passed to `ApplyEvolvedLegacy` and never
 read — they reach only the recorder, the `[chase]` trace and the `over-roll` detector.
 
+> **RESOLVED 2026-08-02, HALF-CONFIRMED — and the wrong half is the durable lesson.** R39-D
+> (`debugtests/R39-D-sustained-ab.md`, 8 lanes × n=8) swept `MarkerRateFeedForward` directly. The
+> **observation reproduces**, and off the `lateralHold` rail this time (`bWt` 0.000–0.040, so this is
+> not the railed regime above): mean `|outR|` is **0.0068–0.0109 on BOTH arms**. The **inference is
+> refuted.** The feed-forward is worth **55–58% of the standing azimuth error** (`fixedWindowOffDeg`
+> 5.08–6.38° → 1.46–2.18° on 7 of 8 lanes, `rms` down 8/8, effect/replicate-SD −10 to −960), and with
+> it OFF the aircraft **skids** instead — mean `|outY|` 2–4× higher, `_iYaw` saturating against the
+> deficit the bank channel should have supplied. It was never inert.
+>
+> **Why the reasoning failed, stated generally because it will recur: for a term that moves a
+> TARGET, the servo output that HOLDS the target is the wrong observable.** The feed-forward acts on
+> `bankTR` (+10.4 to +15.4°, achieved bank +4 to +14°); roll stick is what trims the aircraft *to*
+> a bank and returns to ~0 once there, so reading it to decide whether a bank-target term fired
+> measures the settling, not the command. `bankClampActivePct` made the same class of error on a
+> different column and cost the corpus its rail detector (`debugtests/R40-metric-repair.md`).
+>
+> What survives of this finding: the `blendWeight` hand-off critique in the paragraph above stands
+> unaltered and is still OPEN — it is a separate claim from the feed-forward's reach. The "dead code"
+> list also stands, with one consequence now measured: `targetBank` reaching only the recorder is
+> exactly why nobody noticed it had stopped tracking the law.
+>
+> **New, and not clean:** ON is also what puts the fast lanes on the 72° `MaxBankAngle` wall
+> (Fighter1 61.6° OFF → 73.6° ON), so on 94–100% of settled samples three airframes command 1.6–3.1°
+> of bank they cannot have. The default is still right — the skid it prevents is worse — but the
+> 57% figure was measured *on the rail*, and the discriminating re-fly is eight lanes entered at
+> `startSpeedCorner: 0.75` with the throttle pinned. If standing `|azErr|` climbs back toward the
+> 3.5° OFF-arm figure once the rail is gone, this vindication is narrower than it reads.
+
 ### 17. MEDIUM — v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` — OPEN (STRUCTURAL, unflown)
 The lead itself is correct (it is the true derivative of the align channel's own error). The side
 effect is not: with `phi` in degrees and `rollRate` in rad/s, against a stationary marker the lead
@@ -370,7 +398,7 @@ on all 31 clean pre-onset replicates of the same card and airframe.
 R32 promotes it, because "not shown to cost anything" is no longer true:
 
 - `:1152` `qSched = Mathf.Clamp(qRatio, 0.3f, 1f)` — this one is **defensible**: it deliberately
-  mirrors the game's own `:64861` clamp, so it is a reconstruction of a game constant, not a mod
+  mirrors the game's own `:65034` clamp, so it is a reconstruction of a game constant, not a mod
   constant. Leave it. Note it never bound in R32 (`qRatio` = 2.03 at the entry condition).
 - `:1296` `omegaMax *= Mathf.Max(0.3f, aoaGateUp)` — the v0.67 AoA-margin turn cap, floored "so a
   wing AT the ceiling still holds a sustained turn (mirrors the qSched floor)". Same hardcoded 0.3,
@@ -399,7 +427,7 @@ the standing candidate for. Fixing the stand-down first would make a departed ai
 sometimes, which is worse than a departure that is legible.
 
 **Do NOT reach for a mod-side G-limiter as the fix** — see R32 §9. The over-G is a *readout* of the
-departure, it damages only the pilot (`Pilot.TakeGForceDamage`, `:85779`, 20 g threshold, one part
+departure, it damages only the pilot (`Pilot.TakeGForceDamage`, `:85989`, 20 g threshold, one part
 index), and clipping it removes the most visible failure signal while changing nothing about the
 authority problem. It would also be a sixth de-authorizing term on a law whose defect is that it
 already has five.

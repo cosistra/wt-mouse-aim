@@ -1,0 +1,22 @@
+{
+  "name": "oblique-6-dwell-t040",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "count": 16,
+  "note": "LOW-THROTTLE ARM of the q axis. Geometry, entry condition, altitude, lane list and lane count are byte-identical to 'oblique-6-dwell'; the ONLY differences are the pinned ScenarioThrottle (0.40 instead of the 0.70 default) and repeat 4 instead of 8. WHY IT EXISTS: measured on R37, oblique-6-dwell does NOT hold the aerodynamic state it claims. Every lane enters at 0.95x its own FBW corner speed, but at the 7-8 s scoring window leg 1 reads V/Vcorner 0.94 (CAS1) to 1.35 (Multirole1), and by leg 4 the same lanes read 1.03 to 2.49 -- an airframe-dependent drift of 1.10x (CAS1) to 2.04x (Darkreach) ACROSS ONE CAPTURE at fixed throttle 0.70. So the card's four legs are four different flight conditions, the amount of difference is set by thrust-to-weight, and 'airframe spread' in this card is not identified from 'live-state spread'. Throttle is the only lever that persists through a 30 s leg (entry speed does not: Darkreach enters at 95 m/s and is at 122 by 7 s of leg 1, 249 by leg 4). PAIRED WITH: 'oblique-6-dwell' itself (0.70, the anchor, already 314 captures in the corpus) and 'oblique-6-dwell-t100' (1.00). Read all three as one within-lane, within-airframe axis; NOTHING here is a between-airframe claim. TAGS carry a t04 suffix so no tool can pool them with the 0.70 anchor's legs; the suffix resolves to oblique_step by prefix. WATCH: a lane that decelerates below ~0.7x corner will rail its demand -- read turnRateDemandRatio and blendRailPct per lane before reading anything else.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 4,
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.40" }
+  ],
+  "segments": [
+    { "tag": "arm",      "dur": 6,  "az": 0,     "el": 4.24 },
+    { "tag": "obDR6t04", "dur": 30, "az": 4.24,  "el": 0    },
+    { "tag": "obDL6t04", "dur": 30, "az": 0,     "el": -4.24 },
+    { "tag": "obUL6t04", "dur": 30, "az": -4.24, "el": 0    },
+    { "tag": "obUR6t04", "dur": 30, "az": 0,     "el": 4.24 }
+  ]
+}

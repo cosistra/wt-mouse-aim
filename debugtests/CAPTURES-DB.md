@@ -25,6 +25,10 @@ python debugtests/index-captures.py --query "SELECT …" # read-only by default
    silently averages whatever handful of rows happen to have it. See
    [the matrix](#the-metric--segment-type-matrix) and [the NULL idioms](#the-three-null-idioms) —
    both traps return a plausible number rather than an error.
+3. **A non-NULL pointing metric can still be float grain.** `off` resolves no finer than 0.0198°, and
+   `terminalOffDeg` is anchored at the segment END so it means different things on an 8 s and a 30 s
+   leg. Both produce a confident four-decimal number that orders nothing —
+   [the resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check).
 
 ---
 
@@ -110,6 +114,15 @@ jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
 
 ### `segments` — one row per (capture, segment) (62 columns: 12 fixed + 50 dynamic metrics)
 
+> **Three metric columns are newer than this database.** `fixedWindowOffDeg`, `settleTime95` and
+> `offFloorPct` (2026-08-01, see [the resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check))
+> exist in `scorecard.py` but **appear in SQLite only after a re-index** — `no such column` here means
+> "re-index", not "never flown". It must be `--rebuild`: the warm path skips any capture whose
+> `(mtime, size)` is unchanged, and a metric change moves neither, so a plain re-run picks up nothing.
+> ```bash
+> python debugtests/index-captures.py "<game>/BepInEx" debugtests/archive --rebuild   # ~30 s
+> ```
+
 | column | type | provenance |
 |---|---|---|
 | `capture_id` | INTEGER FK → `captures.id` | `ON DELETE CASCADE` |
@@ -154,7 +167,9 @@ a number below the type's `n` means it exists but was skipped or is conditional.
 | `aoaPeakDeg` `gPeak` `gSustained` `gJitterG` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
 | `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` `authBank` `authAoa` `authStick` `authorityUsedFrac` | all | all | all | all | all | 120–124¹ | — |
 | `blendRailPct` | all | 217¹ | 64¹ | — ¹ | — ¹ | 1¹ | — |
-| `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` | all | all | all | all | all | all | — |
+| `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` `offFloorPct` | all | all | all | all | all | all | — |
+| `fixedWindowOffDeg` | ≥8 s legs only³ | all | **—**³ | all | all | partial³ | — |
+| `settleTime95` | settled legs only⁴ | partial⁴ | partial⁴ | partial⁴ | partial⁴ | partial⁴ | — |
 | `overshootAzDeg` `overshootElDeg` | partial² | partial² | partial² | all | partial² | partial² | — |
 | `settleBandDeg` `demandDeg` `riseTime90` `settleTime` `overshootDeg` | partial² | **—** | partial² | **—** | settle/overshoot only | **—** | — |
 | `meanTurnRateDegS` `deltaTAS` `deltaEnergyHeightM` | **—** | all | **—** | **—** | **—** | **—** | — |
@@ -166,6 +181,14 @@ a number below the type's `n` means it exists but was skipped or is conditional.
 ¹ era / missing column — see NULL idiom 2 and 3.  ² conditional on the segment's own shape (no
 overshoot happened; the step was too short; `wobble_scan` only emits a frequency when it finds an
 episode). Both are legitimate NULLs; `count()` them.
+³ `fixedWindowOffDeg` is the mean `off` over a window **anchored at segment start** (7–8 s,
+`scorecard.FIXED_WINDOW_START_S`), so it is NULL — with a reason in `skipped` — on any segment
+shorter than 8 s. That is most `micro_step`/`az_step` segments and **every `oblique_step` before
+R35**, whose legs are 8 s exactly (measurable) or shorter (not). It is also NULL when the window mean
+lands under the resolution floor. ⁴ `settleTime95` is NULL when the segment never settles, which is
+not rare and **not random**: over R35's 384 scorable 30 s legs it is NULL on 43%, and the censoring
+tracks distance to the world origin (near lanes 192/192 settled, far lanes 26/192). `count()` it
+beside `avg()` or you are averaging the survivors.
 
 **Segment types with metric columns that do not exist yet**, because nothing has flown them:
 `alpha_step` / `alpha_hold` (`aoaAboveCeilingPct`, `aoaCeilDeg`, `aoaPeakOverCeiling`,
@@ -246,6 +269,57 @@ first is worth chasing.
 
 ---
 
+## The resolution floor — the trap that survives every NULL check
+
+Every trap above is about a **missing** number. This one is about a number that is *present*,
+*non-NULL*, printed to four decimals, and **is not a measurement**.
+
+`off` is `Vector3.Angle(t.forward, aimDir)` — `acos(dot)` in float32, written `{off:0.00}`. Float32
+spacing below `dot = 1.0` is `5.96e-8`, so the smallest non-zero angle it can return is
+`sqrt(2·5.96e-8)` rad = **0.0198°**, and the first printed rung above zero is `0.02`. Proof rather
+than inference: across 279k R35 oblique rows the value `0.01` **never occurs**, while `0.00` (43,285)
+and `0.02` (15,122) both occur tens of thousands of times. `scorecard.OFF_FLOOR_DEG` (= 2 × that
+quantum, 0.0396°) is the threshold below which an `off`-derived number carries no orderable signal.
+
+**What it does to a ranking.** R35 (`oblique-6-dwell`, 30 s legs, six airframes flown on both a
+near lane group and a far one — same batch, same card, only the distance to the world origin
+differs) ranked by `terminalOffDeg`: near vs far Spearman **+0.03**. The same six cells ranked by
+`rmsPointingErrorDeg`: **+1.00**. By the new `fixedWindowOffDeg`: **+1.00**. Terminal error was
+ranking float grain — **94 of the 192 near-lane terminal windows read exactly 0.0000**, and three
+airframes tied there.
+
+```sql
+-- The floor, in one query -- NEEDS A --rebuild first (three of these columns are newer than the db).
+-- offFloorPct is the % of samples on the 0.00/0.02 rungs.
+SELECT c.airframe, count(*) legs,
+       sum(s.terminalOffDeg < 0.0396) at_floor, round(avg(s.offFloorPct),1) floor_pct,
+       round(avg(s.terminalOffDeg),4) term, round(avg(s.fixedWindowOffDeg),4) fixedwin
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R35' AND s.type = 'oblique_step' AND s.railed = 0
+ GROUP BY 1 ORDER BY fixedwin;
+```
+
+Reading rules, in order:
+
+1. **`terminalOffDeg` is not deleted and not redefined** — 5,692 archived segments and every existing
+   analysis key to it — but it is only a score when `terminalOffDeg >= 0.0396`. Below that, scorecard
+   emits an `AT THE RESOLUTION FLOOR` warning into `segments.warnings`; **filter on the metric, never
+   on that prose** (gotcha 9). On R35 it fires on 309 of 384 legs.
+2. **`terminalOffDeg` is anchored at the segment END, so it is not one quantity across leg lengths.**
+   An 8 s leg's terminal window scores a *mid-transient* and a 30 s leg's scores a settled residual.
+   R35 settled no earlier than **9.0 s** on any of the 384 legs (median 15.5 s), i.e. every 8 s
+   `oblique_step` in this corpus — 5,194 segments across 15 cards — ends before the response does.
+   Use `fixedWindowOffDeg` to compare an 8 s batch with a 30 s one: R33-terminal vs R35-terminal
+   correlates +0.10, R33-terminal vs R35-`fixedWindowOffDeg` +0.78.
+3. **`settleTime95` is the metric `terminalOffDeg` was being used as a proxy for** — first `t` after
+   which `off` stays inside `max(0.05°, 1.05 × terminalOffDeg)` for the rest of the segment, held at
+   least 1 s. Its virtue is that on a leg that is still decaying it returns **NULL**, not a plausible
+   wrong number. See matrix note ⁴ before averaging it.
+4. `minOffDeg` is at the floor almost everywhere on modern captures (R35: five of six airframes
+   average exactly 0.0000 on both lane groups). It answers "did it ever touch", not "how well".
+
+---
+
 ## The six `sc_` twins — which one to join on
 
 Six sidecar scalars duplicate a fixed column. **Always use the fixed one:**
@@ -291,6 +365,10 @@ SELECT c.airframe, count(s.terminalOffDeg) n, round(avg(s.terminalOffDeg),4) mea
  GROUP BY 1 ORDER BY mean;
 --  trainer 192 0.0622 … SmallFighter1 192 0.2926 … Darkreach 30 2.605  <- n=30: the dead lane
 ```
+**Swap the metric for `fixedWindowOffDeg` (or `rmsPointingErrorDeg`) before you believe an ordering
+like that.** Several of those means are under the `off` column's 0.0396° resolution floor, where the
+ranking is float grain — that is
+[the trap this exact query walked into](#the-resolution-floor--the-trap-that-survives-every-null-check).
 
 #### Q3. Does the effect hold across batches? — *works today*
 ```sql
@@ -427,8 +505,13 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
    reword away from silently marking the corpus clean.
 10. Assuming a metric column exists. It is created only when some capture produced it; `no such
     column` means "never flown", not "typo".
-11. Comparing replicate spread across batches without checking `gJitterG` first. The game's world
-    origin follows the OPERATOR'S CAMERA (`OriginShift`, decompile `:19361`), and a lane's physics
+11. Ranking anything on `terminalOffDeg` without checking it is above `0.0396` — the `off` column's
+    resolution floor. It is non-NULL, four decimals wide, and orders nothing;
+    [see above](#the-resolution-floor--the-trap-that-survives-every-null-check). Same query, same
+    trap, pooling an 8 s leg with a 30 s one: that column is anchored at the segment END, so it is
+    two different quantities. Use `fixedWindowOffDeg` / `settleTime95`.
+12. Comparing replicate spread across batches without checking `gJitterG` first. The game's world
+    origin follows the OPERATOR'S CAMERA (`OriginShift`, decompile `:19365`), and a lane's physics
     jitter — which is the dominant term in `terminalOffDeg` scatter (r = 0.886 over 9 lanes,
     `R33-FINDINGS.md`) — moves with it, **mid-batch, without warning and in opposite directions on
     different lanes**. Check the per-*replicate* series, not the mean: R33's flip is invisible in a

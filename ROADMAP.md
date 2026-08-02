@@ -243,18 +243,18 @@ Found 2026-07-30 by reading the 0.34 decompile against R29/R32. Full evidence in
 **exactly once in 181 878 lines**, as its own `protected class` declaration; no field of that type
 exists, nothing instantiates it, and its `LimitG(...)` has zero call sites. CLAUDE.md's Conventions
 line *"No mod-side G-limiter — the game's stability control governs"* is false for G. What exists is
-the FBW's `targetPitchAngVel = pitch · gLimitPositive · 9.81 / max(V, 0.75·Vc)` (`:64859`) — a rate
+the FBW's `targetPitchAngVel = pitch · gLimitPositive · 9.81 / max(V, 0.75·Vc)` (`:65032`) — a rate
 command *scaled by* g-limit, with no feedback on achieved G. The mod already reconstructs it
 correctly as `rpsRef`; that is a feed-forward cap on demand, not a governor on outcome.
 
-**Worse, the FBW's alpha limiter is gated `if (num2 < 1f)` (`:64860`) and is therefore inactive
+**Worse, the FBW's alpha limiter is gated `if (num2 < 1f)` (`:65033`) and is therefore inactive
 above corner q — which is where every shipped card flies.** On R32, `num2 < 1` on 2.3% of rows; of
 the 5 541 rows past the airframe's own 10° `alphaLimiter`, 86.3% had the game's limiter structurally
 off. **The mod's AoA block is the only alpha protection in the loop at card speeds.**
 
-**2. Over-G damages the pilot, never the airframe.** `Pilot.TakeGForceDamage` (`:85779`) fires above
+**2. Over-G damages the pilot, never the airframe.** `Pilot.TakeGForceDamage` (`:85989`) fires above
 20 g and applies `(sqrG − 400)·0.007` as `impactDamage` to **one part index — the pilot's own**
-(`Unit.Damage(byte index, DamageInfo)`, `:88655`). No structural-G path for the airframe exists
+(`Unit.Damage(byte index, DamageInfo)`, `:88865`). No structural-G path for the airframe exists
 anywhere in the decompile. R32 confirms it: three drones ended `despawned (pilot killed)` while
 `aeroPartCount` stayed 35 and `massKg` constant on all 63 captures.
 
@@ -292,7 +292,7 @@ p90 13.0×, max 28.2×; clean captures 1.56×). Over the 2 314 rows past |AoA| 2
 **Why it is a ONE-LAW defect and not just a bad airframe.** `schedFloor = 0.3f`
 (`ChaseController.cs:1255`) is a hardcoded constant terminating the schedule's range at the same
 place for a 27° ceiling on an 8.7 t `Fighter1` and a 10° ceiling on a 105 t `Darkreach`. Its two
-siblings are the same shape (`:1152`, defensible — it mirrors the game's own `:64861` clamp; and
+siblings are the same shape (`:1152`, defensible — it mirrors the game's own `:65034` clamp; and
 `:1296` `Max(0.3f, aoaGateUp)`, which is not). And the law's *entire* response to a non-responding
 plant is five terms that each **reduce authority** — including `aoaRecover *= _pitchEff` (`:1557`),
 which scales the one term documented as "the term that flies the nose back INSIDE the envelope" by an

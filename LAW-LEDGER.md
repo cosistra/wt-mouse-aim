@@ -22,6 +22,24 @@ given where it is not obvious.
 
 A RAILED segment is **no signal**. Nothing scored from one appears in ESTABLISHED.
 
+**BATCH SUSPECT — R31 (`20260730-215053`, 96 captures) — every ARM CONTRAST in it must be re-flown,
+not re-scored.** R31 is the corpus's only **multi-card armed** batch: 3 airframes × **2 cards**
+(`oblique-12-fwd`, `oblique-12-rev`) × 8 replicates, sweeping `BelowAlignSuppress`. The pre-v0.99.1
+ABBA index keyed the **queue** position, and a multi-card selection blocks the queue, so within *each
+card* the arm is confounded with position — roughly **12 `rec` positions of systematic separation**,
+with the two cards leaning in **opposite** directions. That is why nothing warned: the balance tally
+ran over the whole queue and cancelled, while `compare-runs.py` groups by (airframe, **card**, arm)
+and slices along exactly the confounded axis. **A position confound is not recoverable by
+re-analysis** — there is no unconfounded contrast in the data to recover. Consequences, precisely:
+
+- **Suspect, do not cite:** **I5** (it certified the concurrent A/B *using the schedule that was
+  broken*), **D11** and **D12** — all three are arm-vs-arm contrasts.
+- **Unaffected, still citable:** **D8**, **D9**, **D10** (within-segment observations),
+  **D1**'s R31 down/up ratio (geometry, pooled across arms), **X12** (a reading of the source),
+  **X15**, **X16**.
+- **No other batch is affected**: every other armed batch is one card per lane, where `_block == 1`
+  makes the old and new index identical.
+
 ---
 
 ## 1. ESTABLISHED
@@ -71,10 +89,10 @@ A RAILED segment is **no signal**. Nothing scored from one appears in ESTABLISHE
 
 | # | Claim | Evidence |
 |---|---|---|
-| P1 | **The game has NO G governor.** `ControlsFilter.GLimiter` is dead code — the identifier occurs **exactly once** (`:65069`, its own `protected class` declaration), no field of that type exists, nothing instantiates it, and `LimitG(...)` (`:65104`) has **zero call sites**. | R32 §1.1 |
-| P2 | **Over-G damages the PILOT, never the airframe.** `Pilot.TakeGForceDamage` (`:85779`) fires above 20 g and applies `(sqrG − 400)·0.007` to **one part index — the pilot's own**. No structural-G path exists anywhere in the decompile. | R32 §2; confirmed in flight — 3 R32 lanes ended `despawned (pilot killed)` with `aeroPartCount` **35 on all 63 captures** and `massKg` constant to 5 kg |
-| P3 | **The game's alpha limiter is gated `if (num2 < 1f)` (`:64860`) and is therefore INACTIVE above corner q — which is where every shipped card flies.** The mod's own AoA block is the only alpha protection in the loop at card speeds. | R32 §1.3 — `num2 < 1` on **2.3 %** of 37 868 R32 rows; **86.3 %** of the 5 541 rows past the airframe's own 10° `alphaLimiter` had the limiter structurally inactive |
-| P4 | **`aeroPartCount` cannot see damage.** Nothing on the detach path calls `RemoveFromUnit()`, the only caller of `DeregisterAeroPart` (`AeroPart:74558-74564`), so it never decreases. | CLAUDE.md `Recording.cs` bullet; v0.96 replaced it with `dmgFrac` off `partDamageTracker.GetDetachedRatio()` |
+| P1 | **The game has NO G governor.** `ControlsFilter.GLimiter` is dead code — the identifier occurs **exactly once** (`:65242`, its own `protected class` declaration), no field of that type exists, nothing instantiates it, and `LimitG(...)` (`:65277`) has **zero call sites**. | R32 §1.1 |
+| P2 | **Over-G damages the PILOT, never the airframe.** `Pilot.TakeGForceDamage` (`:85989`) fires above 20 g and applies `(sqrG − 400)·0.007` to **one part index — the pilot's own**. No structural-G path exists anywhere in the decompile. | R32 §2; confirmed in flight — 3 R32 lanes ended `despawned (pilot killed)` with `aeroPartCount` **35 on all 63 captures** and `massKg` constant to 5 kg |
+| P3 | **The game's alpha limiter is gated `if (num2 < 1f)` (`:65033`) and is therefore INACTIVE above corner q — which is where every shipped card flies.** The mod's own AoA block is the only alpha protection in the loop at card speeds. | R32 §1.3 — `num2 < 1` on **2.3 %** of 37 868 R32 rows; **86.3 %** of the 5 541 rows past the airframe's own 10° `alphaLimiter` had the limiter structurally inactive |
+| P4 | **`aeroPartCount` cannot see damage.** Nothing on the detach path calls `RemoveFromUnit()`, the only caller of `DeregisterAeroPart` (`AeroPart:74749-74755`), so it never decreases. | CLAUDE.md `Recording.cs` bullet; v0.96 replaced it with `dmgFrac` off `partDamageTracker.GetDetachedRatio()` |
 
 ### 1.5 The Darkreach failure
 
@@ -129,7 +147,7 @@ on, and turned out to be wrong.
 | # | The claim that was believed | What killed it | Where it still lives (fix or annotate) |
 |---|---|---|---|
 | X1 | *"No mod-side G-limiter — the game's stability control governs."* | `GLimiter` is dead code: one occurrence in 181 878 lines, `LimitG` zero call sites. **THE GAME HAS NO G GOVERNOR.** | Corrected in CLAUDE.md Conventions (v0.96), R32 §1.1 |
-| X2 | *"The law is bending airframes."* Stated to the maintainer. | Over-G damages the pilot only (`Pilot.TakeGForceDamage :85779`, one part index). No structural-G path exists. `aeroPartCount` 35 on all 63 R32 captures. | Retracted explicitly in R32 §2. **"The law bent an airframe" is not a possible diagnosis.** |
+| X2 | *"The law is bending airframes."* Stated to the maintainer. | Over-G damages the pilot only (`Pilot.TakeGForceDamage :85989`, one part index). No structural-G path exists. `aeroPartCount` 35 on all 63 R32 captures. | Retracted explicitly in R32 §2. **"The law bent an airframe" is not a possible diagnosis.** |
 | X3 | v0.88's **aoaTrim theory** — that writing the placement velocity at AoA = 0 caused the entry thump. | Gate B / R23: run 01 is the run's *first* placement, so it was written **untrimmed** — the exact condition v0.88 blamed — and it has the **cleanest entry of the four** (AoA 0.07→1.46° with no overshoot, `off` peak 0.59° vs 1.72–2.87° on the three trimmed ones). | Reverted in v0.89. FLIGHT-PROTOCOL §Gate B finding 1 |
 | X4 | Gate A: *"`iPitch`/`iYaw` read 0.0000 on every first row, so `ctrlReset` does what it claims."* | R21 measured `_iPitch` at ±0.001 for an entire 30 s turn — it is ~0 coming out of a turn **whether or not anything reset it**. The observation stands; the inference does not. | Retracted in FLIGHT-PROTOCOL §"This retracts one Gate A claim" |
 | X5 | #20: *"the `PEffRevThresh` floor branch is unreachable, so `_pitchEff` never goes below 0.15."* | True only of the **self-probe path**. Corpus-wide, 28 209 rows (4.50 % of 627 110) sit below the threshold, min 0.000, on two fixed-wing airframes — genuine reversed-plant measurements where the no-floor branch is *correct*. | Premise corrected v0.96; re-scoped from experiment to hygiene (LAW-CHARACTERIZATION §7 #20). The old "5.2 % / 8 captures / three airframes" figure **reproduces against no batch** |

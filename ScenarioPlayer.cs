@@ -166,6 +166,12 @@ namespace NuclearOptionMouseAim
         private int        _acId;           // aircraft the card started on (respawn => abort)
         private int        _lastLogSeg = -1;
         private float      _derivedRate;    // per-airframe sweep rate for deriveAzRate segments
+        // Replicates this run lost to an abort. Reported once at suite end so a lane that aborted
+        // every replicate is distinguishable IN THE LOG from a lane that never ran — the per-capture
+        // half is already there (each aborted replicate now writes its own CSV with its own
+        // `# stop … reason=abort:` line), and before v0.99.1 there was no such half, because the
+        // first abort ended the lane and the missing replicates left no artifact at all.
+        private int        _aborted;
 
         // --- entry placement audit (see AuditEntry) ---
         private Aircraft   _auditAc;
@@ -191,6 +197,10 @@ namespace NuclearOptionMouseAim
         // nothing to save, nothing to restore and nothing for two suites to fight over.
         private ConfigEntry<bool> _armEntry;      // the toggle THIS suite is alternating; null = no schedule
         private int               _armIdx = -1;   // arm the current card is flying (-1 = no schedule)
+        // Cards per replicate — the BLOCK the queue is built from (SelectCards repeats the whole
+        // selection, c1,c2,c1,c2…). The arm is indexed by `_qi / _block`, i.e. by REPLICATE; see
+        // ApplyArm for what indexing by queue position did instead.
+        private int               _block = 1;
 
         // =========================================================================================
         // THE REGISTRY (v0.86) — one player per aircraft, keyed by Aircraft.GetInstanceID(), the same
@@ -452,9 +462,10 @@ namespace NuclearOptionMouseAim
         // ConfigurationManager panel IS the enable/disable checklist. EVERY card defaults OFF,
         // built-ins included (v0.96; they defaulted ON as "the designed set" until the shipped grid
         // moved to disk and left them the legacy path). Registered first, they land at sel[0] — and
-        // sel[0] alone dictates airframe/count/repeat/armToggle/startAlt/startSpeed for the whole
-        // spawn, so one built-in checkbox nobody ticked collapsed a 10-lane fleet card to a single
-        // Multirole1 at Cfg defaults: a capture that scores fine and answers a different question.
+        // sel[0] alone dictates the FLEET (airframe/count/repeat/armToggle + the spawn alt/speed; see
+        // SelectRaw for the per-card half), so one built-in checkbox nobody ticked collapsed a 10-lane
+        // fleet card to a single Multirole1 at Cfg defaults: a capture that scores fine and answers a
+        // different question.
         // Cfg.ScenarioCardSet overrides the whole thing for a scripted run.
         // =========================================================================================
         public static void BindCards(ConfigFile cf)
@@ -658,13 +669,47 @@ namespace NuclearOptionMouseAim
                 foreach (var c in _cards)
                     if (_enable.TryGetValue(c.name, out var e) && e.Value) sel.Add(c);
             }
-            // Everything the SPAWN is configured from — airframe, count, repeat, armToggle, alt,
-            // speed — comes from sel[0]; the rest contribute only their segments. That is invisible
-            // in F1, where N ticked boxes look like N equal cards, so say which one is driving.
-            if (!quiet && sel.Count > 1)
-                WTMouseAimPlugin.Log.LogWarning(
-                    $"[card] {sel.Count} cards selected — '{sel[0].name}' is first and decides the whole "
-                    + "spawn (airframe/count/repeat/armToggle/alt/speed); the others only add segments.");
+            // WHAT sel[0] ACTUALLY DECIDES, because the earlier wording here overstated it and cost a
+            // design cycle. Two different questions get answered from this list:
+            //
+            //   SPAWN-TIME, answered ONCE per fleet with no aircraft in hand (Preview -> TestDrone):
+            //   airframe, count, repeat, armToggle, and the alt/speed the drone is first placed at.
+            //   These come from sel[0] alone and CANNOT vary per card — one drone is one airframe for
+            //   its whole life, and the replicate/arm schedule indexes the queue as a block.
+            //
+            //   PER-CARD, re-answered at every card boundary (NextCard -> Tick): the card's segments,
+            //   its config overrides (ApplyOverrides/RestoreOverrides), and its OWN entry condition —
+            //   `_placed` resets per card and Tick calls PlaceOnCondition(ac, _card), not sel[0], so
+            //   card 2 is flown to its own startAlt/startSpeed/startSpeedCorner before it is timed.
+            //
+            // So a multi-card selection is already a SEQUENCE OF DIFFERENT EXPERIMENTS on one airframe,
+            // not one experiment with extra segments bolted on. Say only what is true: the ceiling is
+            // the airframe roster and the replicate/arm schedule, not the test.
+            //
+            // WARN ON THE DISAGREEMENT, NOT ON THE COUNT (v0.99.1). This used to fire whenever
+            // sel.Count > 1, which is the CORRECT case — a multi-card entry is the recommended shape
+            // now — so the line was noise the operator learned to skip, and it was silent on the
+            // actual mistake: a LATER card declaring a fleet field. Those are dropped on the floor,
+            // the batch flies sel[0]'s fleet, and the capture scores fine against a different
+            // question. Only a field that DIFFERS from sel[0]'s is lost; one that agrees is merely
+            // redundant and says nothing worth a line. `quiet` is honoured around the whole loop, not
+            // per warning: the run board polls this on repaint, twice a frame.
+            if (!quiet)
+                for (int i = 1; i < sel.Count; i++)
+                {
+                    var c = sel[i];
+                    var lost = new List<string>(4);
+                    if (!string.IsNullOrEmpty(c.airframe)  && c.airframe  != sel[0].airframe)  lost.Add($"airframe '{c.airframe}'");
+                    if (c.count  > 0 && c.count  != sel[0].count)  lost.Add($"count {c.count}");
+                    if (c.repeat > 0 && c.repeat != sel[0].repeat) lost.Add($"repeat {c.repeat}");
+                    if (!string.IsNullOrEmpty(c.armToggle) && c.armToggle != sel[0].armToggle) lost.Add($"armToggle '{c.armToggle}'");
+                    if (lost.Count == 0) continue;
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{c.name}' declares {string.Join(", ", lost.ToArray())}, but it is not the "
+                        + $"FIRST card in this selection — '{sel[0].name}' owns the fleet and those are "
+                        + "IGNORED. Put it first, or give it its own entry in Scenario/ScenarioBatchQueue "
+                        + "(a ';' starts a new fleet, which re-resolves airframe/count/repeat/armToggle).");
+                }
             return sel;
         }
 
@@ -852,11 +897,16 @@ namespace NuclearOptionMouseAim
         // nothing at all read as significant. ABBA spreads a monotonic trend evenly over both arms,
         // which turns it from a confound into nuisance variance.
         //
-        // ABBA by QUEUE INDEX: ((i+1) >> 1) & 1 gives 0,1,1,0, 0,1,1,0, … With more than one card in
-        // the selection the queue is already blocked (c1,c2,c1,c2 — see SelectCards), so indexing on
-        // the queue also alternates each card's own arms. Balanced when the total run count is a
-        // multiple of 4; the suite-start log prints the whole schedule and its A/B tally so an
-        // unbalanced batch is visible BEFORE it flies rather than after.
+        // ABBA by REPLICATE INDEX: ((i+1) >> 1) & 1 gives 0,1,1,0, 0,1,1,0, … Balanced when the
+        // REPLICATE count is a multiple of 4; the suite-start log prints the whole schedule and its
+        // per-card A/B tally so an unbalanced batch is visible BEFORE it flies rather than after.
+        //
+        // v0.99.1 — REPLICATE, not queue position, and the difference only shows with two cards up.
+        // The queue is blocked (c1,c2,c1,c2 — see SelectCards), so `ArmOf(_qi)` handed card c1 the
+        // arms at 0,2,4,6 = A,B,A,B: equal counts, mean position 1 vs 2 inside c1's OWN sequence,
+        // while the queue-wide tally matched perfectly and nothing warned. `ApplyArm` divides by
+        // `_block` first; `ArmOf` itself is unchanged, which is why the extracted program in
+        // debugtests/test-arm-schedule.py still compiles against it.
         //
         // ponytail: one toggle, one fixed sequence, no factorial designs, no per-card arms. The
         // ceiling is a single boolean knob swept over one batch. If a real 2-factor experiment is
@@ -897,7 +947,8 @@ namespace NuclearOptionMouseAim
         // ArmOf lives between markers because debugtests/test-arm-schedule.py extracts and compiles
         // it verbatim — a Python copy of the sequence would agree with itself forever.
         // --- ARM-SCHEDULE BEGIN ---
-        internal static int ArmOf(int queueIndex) => ((queueIndex + 1) >> 1) & 1;
+        // `replicateIndex`, not the queue index — the caller divides by _block first (v0.99.1).
+        internal static int ArmOf(int replicateIndex) => ((replicateIndex + 1) >> 1) & 1;
         // --- ARM-SCHEDULE END ---
 
         // =========================================================================================
@@ -983,9 +1034,87 @@ namespace NuclearOptionMouseAim
         // silently retune the mod for the rest of the session, and the next hand-flown capture would
         // measure a law nobody chose.
         // =========================================================================================
-        private ConfigEntryBase[] _ovEntries;      // entries THIS card pinned, in apply order
-        private object[]          _ovSaved;        // their pre-card values, index-matched to the above
+        private ConfigEntryBase[] _ovEntries;      // pins THIS aircraft holds, in apply order = its release list
         private string            _ovNote = "";    // what was applied, verbatim into the '# override' header
+
+        // -----------------------------------------------------------------------------------------
+        // THE PINS ARE PROCESS-GLOBAL; THE PLAYERS ARE NOT — SO THE PINS ARE REFCOUNTED (v0.99.1).
+        //
+        // A `Cfg` entry is one per process and a ScenarioPlayer is one per AIRCRAFT, so a 16-lane
+        // fleet ran ApplyOverrides sixteen times over the same entries and RestoreOverrides sixteen
+        // times — and the FIRST lane to finish its card handed the knob back while the other fifteen
+        // were still flying under it. Measured on one batch: 1469 rows across 61 of 512 legs flew at
+        // the wrong ScenarioThrottle, stepping in exactly the 3 s launch stagger. Lanes 2..N also
+        // "saved" the already-pinned value, so their own restores later RE-pinned it — which is why
+        // the corruption reads as a square wave and not as one step, and why `_ovSaved` is gone: a
+        // per-aircraft copy of a shared value is the defect, not the bookkeeping around it.
+        //
+        // One shared table keyed by the entry. The FIRST holder saves the pre-card value and writes
+        // it; every later holder only increments; the value goes back when the LAST holder releases.
+        // Static for the same reason the card library is: it describes a process-global resource, not
+        // a flight. Every exit releases — Finish (normal end and, via it, Abort), NextCard at each
+        // card boundary, and Forget(int), which Aborts BEFORE dropping the registry entry so a drone
+        // that dies mid-card still lets go. A whole fleet lost without any of those (a scene unload)
+        // self-heals: the next For() miss runs Sweep, which Forgets every dead player.
+        private sealed class Pin
+        {
+            public object Saved;    // the value to put back when the last holder releases
+            public int    Refs;     // how many aircraft are flying under it
+            public string Text;     // the TOML text it was pinned to, i.e. what a second card must match
+            public string Owner;    // the card that pinned it first, named in the disagreement warning
+        }
+        private static readonly Dictionary<ConfigEntryBase, Pin> _pins =
+            new Dictionary<ConfigEntryBase, Pin>();
+
+        // Acquire one pin. Returns false — having ALREADY logged — in exactly one case: another
+        // aircraft holds this entry at a DIFFERENT value. A refcount cannot resolve that, because a
+        // process-global knob has room for one answer and two concurrently-flying cards are asking
+        // for two. First value wins, so the lanes already flying under it keep flying ONE condition;
+        // the refused card is named, and since a refused pin never reaches `_ovNote` its capture's
+        // '# override' header does not advertise a pin it did not get.
+        // ponytail: one value per knob per process, plus a warning. If two concurrent cards ever
+        // legitimately need different values, the upgrade is per-aircraft reads the way
+        // ChaseController.Arm() already does it for the five A/B levers — far bigger than this defect.
+        private static bool PinShared(ConfigEntryBase e, object v, string text, string card)
+        {
+            if (_pins.TryGetValue(e, out var pin))
+            {
+                if (pin.Text != text)
+                {
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] '{card}' pins '{e.Definition.Key}' to '{text}', but '{pin.Owner}' is already "
+                        + $"flying with it pinned to '{pin.Text}' on another aircraft — that override is "
+                        + "SKIPPED and the first value stands. A Cfg entry is process-global: two cards in "
+                        + "the air at once cannot pin one knob to two values. Give them their own entries "
+                        + "in Scenario/ScenarioBatchQueue (a ';' starts a new fleet, which flies alone).");
+                    Notify($"OVERRIDE REFUSED: '{e.Definition.Key}' is pinned by another card");
+                    return false;
+                }
+                pin.Refs++;
+                return true;
+            }
+            _pins[e] = new Pin { Saved = e.BoxedValue, Refs = 1, Text = text, Owner = card };
+            e.BoxedValue = v;
+            return true;
+        }
+
+        // Release one pin; the value goes back only when the LAST holder lets go. An entry that is not
+        // held is a no-op rather than a decrement, so releasing twice cannot drive the count negative
+        // and strand the knob — see check-architecture.py's card-pin invariant, which is what stops a
+        // future edit from writing BoxedValue around this pair.
+        private static void UnpinShared(ConfigEntryBase e)
+        {
+            if (e == null || !_pins.TryGetValue(e, out var pin)) return;
+            if (--pin.Refs > 0) return;
+            _pins.Remove(e);
+            try { e.BoxedValue = pin.Saved; }
+            catch (System.Exception ex)
+            {
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] could not restore '{e.Definition.Key}' ({ex.Message}) — it is left at the "
+                    + "card's value. Reset it in F1 before flying anything else.");
+            }
+        }
 
         private void ApplyOverrides(Card c)
         {
@@ -998,7 +1127,6 @@ namespace NuclearOptionMouseAim
             if (ovs == null || ovs.Length == 0) return;
 
             var entries = new List<ConfigEntryBase>(ovs.Length);
-            var saved   = new List<object>(ovs.Length);
             var note    = new System.Text.StringBuilder();
             foreach (var o in ovs)
             {
@@ -1034,9 +1162,10 @@ namespace NuclearOptionMouseAim
                     // anything else that is bindable — a hand-rolled parser here would be a second,
                     // subtly different definition of what a config value looks like.
                     object v = TomlTypeConverter.ConvertToValue(o.value, e.SettingType);
-                    saved.Add(e.BoxedValue);
+                    // ACQUIRE, never write. PinShared owns the save and the write, so the value is
+                    // taken once for the whole fleet and handed back once — see the refcount above.
+                    if (!PinShared(e, v, o.value, c.name)) continue;
                     entries.Add(e);
-                    e.BoxedValue = v;
                     note.Append(note.Length > 0 ? " " : "").Append(sec).Append('/').Append(key)
                         .Append('=').Append(o.value);
                 }
@@ -1053,7 +1182,6 @@ namespace NuclearOptionMouseAim
             // Assigned even when everything failed, so the re-entry guard above still holds and the
             // warnings are printed once per card rather than once per tick until the card starts.
             _ovEntries = entries.ToArray();
-            _ovSaved   = saved.ToArray();
             _ovNote    = note.ToString();
             if (_ovEntries.Length > 0)
                 WTMouseAimPlugin.Log.LogInfo(
@@ -1061,22 +1189,16 @@ namespace NuclearOptionMouseAim
                     + "(restored when the card ends).");
         }
 
-        // Hand every pinned knob back. IDEMPOTENT — called from Finish, from Abort (via Finish) and at
-        // every card boundary in NextCard, and one card must never inherit the previous one's pins.
+        // Hand back every pin THIS AIRCRAFT holds. IDEMPOTENT — called from Finish, from Abort (via
+        // Finish) and at every card boundary in NextCard, and one card must never inherit the previous
+        // one's pins. The `_ovEntries == null` early return plus nulling it below is what makes a
+        // double release impossible: the second call has no list to walk, so it cannot decrement a
+        // refcount someone else is still holding.
         private void RestoreOverrides()
         {
             if (_ovEntries == null) return;
-            for (int i = 0; i < _ovEntries.Length && i < _ovSaved.Length; i++)
-            {
-                try { _ovEntries[i].BoxedValue = _ovSaved[i]; }
-                catch (System.Exception e)
-                {
-                    WTMouseAimPlugin.Log.LogWarning(
-                        $"[card] could not restore '{_ovEntries[i].Definition.Key}' ({e.Message}) — it is "
-                        + "left at the card's value. Reset it in F1 before flying anything else.");
-                }
-            }
-            _ovEntries = null; _ovSaved = null; _ovNote = "";
+            for (int i = 0; i < _ovEntries.Length; i++) UnpinShared(_ovEntries[i]);
+            _ovEntries = null; _ovNote = "";
         }
 
         // Put the current card's arm onto THIS AIRCRAFT, once per card, BEFORE the recorder opens — so
@@ -1086,10 +1208,20 @@ namespace NuclearOptionMouseAim
         // forced the old stand-down (one knob, N aircraft) and what made a card's own pin of the swept
         // knob dangerous. Nothing here touches the operator's config, so his own aircraft goes on
         // flying whatever F1 says while a fleet sweeps around him.
+        //
+        // v0.99.1: THE INDEX IS THE REPLICATE, `_qi / _block` — NOT the queue position. With more than
+        // one card selected the queue is BLOCKED (c1,c2,c1,c2… — see SelectCards), so `ArmOf(_qi)` gave
+        // card c1 the arms at queue indices 0,2,4,6 = A,B,A,B: equal counts, but mean position 1 vs 2
+        // WITHIN c1's own sequence. `SetUpArmSchedule`'s balance check ran over the whole queue (A at
+        // 0,3,4,7 and B at 1,2,5,6, both summing 14) and reported balanced, while `compare-runs.py`
+        // groups by (airframe, CARD, arm) — slicing along exactly the confounded axis. That is the R21
+        // confound ABBA exists to kill, reintroduced by ticking a second checkbox and reported as fine.
+        // Dividing first gives every card in a replicate the same arm and every card the same balanced
+        // ABBA over replicates; `_block == 1` makes a single-card selection byte-identical to v0.99.
         private void ApplyArm()
         {
             if (_armEntry == null) { _armIdx = -1; return; }
-            _armIdx = ArmOf(_qi);
+            _armIdx = ArmOf(_qi / _block);
             ChaseController.SetArm(_acId, _armEntry.Definition.Key, _armIdx == 1);
         }
 
@@ -1187,12 +1319,17 @@ namespace NuclearOptionMouseAim
             // it here purely to NAME ITS SOURCE. A card that carries its own `repeat` and a global left
             // at something else look identical in the run count, and the operator has to be able to see
             // which one he is actually flying before three minutes a run go by.
-            ResolveRepeat(sel[0], out string repSrc);
+            int rep = ResolveRepeat(sel[0], out string repSrc);
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
                 + $"replicates from {repSrc}.");
+            // The block the queue was built from — cards per replicate, i.e. the post-class-filter card
+            // count, recovered from the expansion rather than re-counted so the two cannot disagree.
+            // ApplyArm indexes the A/B by `_qi / _block`; see there for what queue-indexing cost.
+            _block = Mathf.Max(1, sel.Count / Mathf.Max(1, rep));
             _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
+            _aborted = 0;
             IndexCard();             // run-board caches; must follow every write to _card/_qi/_queue
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
             _rec.EntryNote = "";     // an UNGATED card must not inherit the last one's note
@@ -1216,33 +1353,44 @@ namespace NuclearOptionMouseAim
             _armEntry = ResolveArm(spec, armSrc);
             if (_armEntry == null) return;
 
-            // The balance check is on the SUM OF RUN INDICES per arm, not on the counts. Equal counts
-            // are not the point — ABBA works by giving both arms the same average position in the
-            // batch, so that a trend linear in run order cancels. A,B (n=2) has equal counts and is
-            // still a fully confounded blocked design; ABBAAB (n=6) has equal counts and still leans A
-            // early. Both are caught by comparing sum(i), and neither is by comparing n. Balanced
-            // exactly when the run count is a multiple of 4.
+            // The balance check is on the SUM OF INDICES per arm, not on the counts. Equal counts are
+            // not the point — ABBA works by giving both arms the same average position, so that a
+            // trend linear in run order cancels. A,B (n=2) has equal counts and is still a fully
+            // confounded blocked design; ABBAAB (n=6) has equal counts and still leans A early. Both
+            // are caught by comparing sum(i), and neither is by comparing n.
+            //
+            // v0.99.1 — THE SUBJECT OF THAT CHECK IS THE CARD, NOT THE QUEUE, and that is the fix. The
+            // arm is now indexed by REPLICATE (`_qi / _block`, see ApplyArm), so the sequence a single
+            // card flies is ArmOf over the replicate index — and the card is the analysis unit, since
+            // `compare-runs.py` groups by (airframe, card, arm). Tallying over the whole queue was what
+            // let the old defect through: 2 cards x repeat 4 gave every card A,B,A,B internally while
+            // the queue-wide sums matched exactly and nothing warned. Balanced exactly when the
+            // REPLICATE count is a multiple of 4; the display below is still the whole queue, because
+            // that is the sequence the operator will watch fly.
+            int reps = Mathf.Max(1, runs / Mathf.Max(1, _block));
             var sb = new System.Text.StringBuilder(runs);
+            for (int i = 0; i < runs; i++) sb.Append(ArmOf(i / _block) == 1 ? 'B' : 'A');
             int nA = 0, sumA = 0, sumB = 0;
-            for (int i = 0; i < runs; i++)
+            for (int r = 0; r < reps; r++)
             {
-                bool b = ArmOf(i) == 1;
-                sb.Append(b ? 'B' : 'A');
-                if (b) sumB += i; else { nA++; sumA += i; }
+                if (ArmOf(r) == 1) sumB += r; else { nA++; sumA += r; }
             }
-            int nB = runs - nA;
+            int nB = reps - nA;
             string key = _armEntry.Definition.Key;
             WTMouseAimPlugin.Log.LogInfo(
-                $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — {nA} A / {nB} B. "
+                $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — "
+                + $"{reps} replicate(s) x {_block} card(s), {nA} A / {nB} B per card. "
                 + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
                 + $"THIS AIRCRAFT only (v0.94): the arm is per-aircraft state read through the controller, "
                 + $"so other aircraft sweep their own schedules and the F1 value of '{key}' is never written.");
             if (nA != nB || sumA != sumB)
                 WTMouseAimPlugin.Log.LogWarning(
-                    $"[card] arm schedule is UNBALANCED over {runs} run(s): {nA}/{nB} runs, mean run index "
-                    + $"{(nA > 0 ? (float)sumA / nA : 0f):0.0} vs {(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm "
-                    + "sits earlier in the batch than the other, so a one-way session drift will still lean on it "
-                    + "— use a run count that is a MULTIPLE OF 4 (cards x ScenarioRepeat).");
+                    $"[card] arm schedule is UNBALANCED WITHIN EACH CARD over {reps} replicate(s): {nA}/{nB}, "
+                    + $"mean replicate index {(nA > 0 ? (float)sumA / nA : 0f):0.0} vs "
+                    + $"{(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm sits earlier in every card's own "
+                    + "sequence than the other, so a one-way session drift will still lean on it — use a "
+                    + "REPLICATE count that is a MULTIPLE OF 4 (card 'repeat' / ScenarioRepeat; the number "
+                    + "of cards selected does not enter into it).");
             Notify($"ARMS {sb} on {key}");
         }
 
@@ -1419,56 +1567,93 @@ namespace NuclearOptionMouseAim
         // or complex physics: merged parts share the root's Rigidbody and are skipped by the identity
         // check below, so there is no physics-mode branch at all.
         //
-        // v0.96.1 — AND IT CHECKS ITSELF AFTERWARDS, because a part the loop does not reach is not a
-        // cosmetic miss: it is a DETACHED part one fixed step later. `AeroPart.CheckAttachment`
-        // (decompile :74158-74174) detaches purely on GEOMETRY — 0.5 m between a part's transform and
-        // the pose recorded at Awake, measured in its parent part's frame, no force and no damage
-        // anywhere in the test — and `UnitPart.TakeDamage`'s detach clause explicitly excludes
-        // AeroParts (`&& !(this is AeroPart)`, :84095), so for an aircraft, whose `partLookup` is
-        // ALL AeroPart (only AeroPart and ShipPart derive from UnitPart, :73900/:81119, and
-        // SetComplexPhysics casts every entry unconditionally, :61278), that geometric test is the
-        // ONLY way a part can leave. R33 caught one: Darkreach shed a part (ratio 0.029 = 1/35) two
-        // fixed steps after a placement, off four byte-identical replicates. It reads as
-        // intermittent because the detector is a SAMPLER — `Aircraft.PartChecker` (:59984-60005,
-        // driven from LocalSimFixedUpdate :61803) checks ONE part per fixed step, round-robin — so a
-        // short-lived excursion is caught with probability ~k/N and missed the rest of the time.
+        // TWO THINGS HAVE BEEN TRIED HERE AND BOTH ARE GONE. Read this before adding a third; the
+        // graveyard is the point of the comment.
         //
-        // The skip below assumes a part that shares the root body (zero mass, or merged) RIDES the
-        // root's transform. That holds only while it is still a descendant of it, and
-        // `AeroPart.CreateRB` (:74227) unparents every part it hands a body to — so the assumption is
-        // about hierarchy shape, which is prefab data this code cannot see. Rather than reason about
-        // it, re-impose the map on the outcome: snapshot every part's pose in the ROOT's frame before
-        // the move (a frame the rigid map leaves unchanged BY DEFINITION, so this is the same
-        // definition of the move, not a second one), then put back anything that did not follow.
-        // The warning line is the measurement: if it never fires, nothing is being left behind and
-        // the excursion has some other source; if it fires, it names how many parts and how far.
+        // The problem both were aimed at is REAL and is still open (ledger #51). `AeroPart
+        // .CheckAttachment` (decompile :74349-74365) detaches purely on GEOMETRY — 0.5 m between the
+        // part's TRANSFORM and `attachInfo.localPosition`, the pose recorded at Awake (:84155),
+        // measured in its PARENT PART's frame, no force and no damage anywhere in the test — and
+        // `UnitPart.TakeDamage`'s detach clause explicitly excludes AeroParts (`&& !(this is
+        // AeroPart)`, :84304), so for an aircraft that geometric test is the ONLY way a part can
+        // leave. It reads as intermittent because the detector is a SAMPLER: `Aircraft.PartChecker`
+        // (:60157-60180, driven from LocalSimFixedUpdate :61976) checks ONE part per fixed step,
+        // round-robin, so a short-lived excursion is caught with probability ~k/N and missed
+        // otherwise. Observed rate: R33 Darkreach 1/35; R35 4/35, 2/35, and EW1 1/38.
         //
-        // ponytail: the pre-existing joint stretch is carried through the move rather than removed.
-        // It is millimetres in level flight against a 0.5 m threshold; revisit only if the line below
-        // starts reporting errors it did not cause.
-        private const float PartSnapTol = 0.10f;   // 5x inside the game's 0.5 m; ~4x above the float
-                                                   // grain at the 60-100 km world coords a lane flies
+        // (1) v0.96.1's MOD-SIDE AUDIT COULD NEVER FIRE. It iterated the same list the move loop had
+        // just written, skipped every part the move loop skipped, and rebuilt its target with the
+        // same expression the move used — with `pivot == rb.position` at both call sites
+        // (`PlaceOnCondition` here, `PlayerSpawn.Place`) and `dRot == rot1 * Inverse(rb.rotation)`,
+        // `pivot + dRot*(p0-pivot) + dPos` and `(pivot+dPos) + rot1*inv0*(p0-pivot)` are the same
+        // number, so `err` was float noise by construction. Zero `[place]` lines over R35's 186
+        // placements is what a tautology returns, not evidence that nothing was left behind — and the
+        // skip meant it never examined the shared-body parts it was written to check.
+        //
+        // (2) v0.97.0 CALLED THE GAME'S OWN `AeroPart.Repair` (:74231) on every non-detached part,
+        // reasoning that it writes exactly the quantity CheckAttachment compares, in the frame it
+        // compares in. That part is right — `Repair` does write exactly that — and it is as far as
+        // the reasoning goes: R36, the first batch flown with it, lost **32 of 32 placements —
+        // 100%, every airframe**. Picking the correct quantity does not make it safe to write here.
+        //
+        // WHY, PRECISELY — the ban below is drawn around the MECHANISM, not around `Repair`, and the
+        // first telling of this got the mechanism wrong. `Rigidbody.position` writes the PhysX pose
+        // and leaves the Transform holding its OLD value until the next simulation step, and
+        // `Physics.SyncTransforms` copies Transform -> PhysX, NEVER the reverse. So when the Repair
+        // loop ran, every part transform still held the PRE-teleport pose: it read one
+        // (`attachInfo.parentPart.xform`) and wrote another (`xform.position/rotation`), both
+        // pre-teleport, so its arithmetic was near-correct and beside the point. The write DIRTIES
+        // the transform, and since `AeroPart.CreateRB` (:74418) unparents every part it bodies, a
+        // dirty transform plus a sync IS a body teleport — the parts went straight back to the OLD
+        // lane. `Aircraft.rb` was untouched (the root part has `attachInfo == null`, so `Repair`
+        // no-ops on it) and stayed at the anchor, so `Physics.Simulate` ran with the root 13.8-41 km
+        // from its own parts. That is a CANCELLATION of the move, not a small displacement paid back
+        // at ~err/dt, and deleting only the second sync would NOT have saved it — the physics step
+        // syncs dirty transforms before simulating regardless. THE LETHAL ACT IS WRITING A TRANSFORM
+        // IN HERE AT ALL. `Repair` never threw, so the try/catch logged nothing: a green build, a
+        // green checker and a silent log meant exactly nothing here.
+        //
+        // THE SIGNATURE, AND THE NATURAL EXPERIMENT IN THE SAME LOG. Each kill lands on a
+        // `PlaceOnCondition` at `segment arm at 0.0s`, speed going ~150 m/s -> 10602-172586 m/s in ONE
+        // fixed step, log reading `ABORT (aircraft gone)` / `despawned (pilot killed)`, with
+        // `Pilot.TakeGForceDamage` (:85989) doing the rest. **Replicate 1 is NOT placement-free** —
+        // every one of R36's 32 carries a `# entry … snapBackM=0.0 … ctrlReset=1` line, so the
+        // placement RAN on all of them, as a ZERO-DISPLACEMENT one. That is the experiment: 32
+        // placements of 0 m — same unconditional `MoveAssembly` call, `Repair` loop included — were
+        // 32/32 CLEAN, against 32/32 FATAL for the 32 of 13.8-41 km. The fault scales with the SIZE OF
+        // THE MOVE and with nothing else; no code path was skipped. (Do not read the 10602-172586 m/s
+        // spread as err/dt either — it is saturated by breakForce and solver clamps and is not
+        // reproducible run to run: 20415 m at the rig's measured 19x predicts ~388000 m/s and read
+        // 60147.)
+        //
+        // SO THE MOVE STAYS A RIGID TRANSFORM AND NOTHING ELSE, for the reasons at the top of this
+        // comment. #51 stays open and INSTRUMENTED rather than fixed — `dmgFrac` (column 65) records it per
+        // row and the v0.96 damage abort ends the run — because a 1-in-35 intermittent shed is
+        // enormously cheaper than a 100% kill, and that is the trade a third attempt has to beat. Its
+        // premise is now in doubt too: this method is an EXACT rigid transform whose float32 grain at
+        // the 60-100 km a lane flies is ~0.004 m, ~125x under CheckAttachment's 0.5 m, so the
+        // placement cannot produce an attach failure at all.
+        // ponytail: if you do try again, fix the DISPLACEMENT, not the detection, and pick ONE of
+        // exactly two shapes — MIXING THEM IS WHAT KILLED R36. (i) ALL-TRANSFORM MOVE: write
+        // `xform.position/rotation` for every part AND the root with the same rigid formula, then one
+        // `Physics.SyncTransforms()` as the last statement, and NO `rb.position` anywhere. Safe for
+        // the exact reason the Repair loop was not — transform reads are uniformly stale, so the
+        // formula lands on a self-consistent pre-move pose and the single sync commits one coherent
+        // new one. It is what `FloatingOrigin.OriginShift` (:19380-19384) does. (ii) RE-CAPTURE, NOT
+        // RESTORE: `UnitPart.CreateAttachInfo(attachInfo.parentPart)` (:84151) rebaselines to the
+        // CURRENT pose, writes no transform and reads only relative geometry, so stale transforms
+        // cannot hurt it; its costs are an `onParentDetached` subscription leaked on every call
+        // (:84156, `+=` with no `-=`, replacing the game's own detach reference for the rest of the
+        // flight) and a silently cleared `detachedFromParentPart`. Note also that `PartChecker`
+        // iterates the PRIVATE `Aircraft.partsWithAero` (:60559), not `partLookup`, so a mod-side
+        // re-derivation is already looking at the wrong set. Do NOT move `xform` alongside `rb` in
+        // the loop below — that is the mixed scheme, which is precisely what R36 flew — and do not
+        // reintroduce either graveyard entry above.
         internal static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
                                           Vector3 dPos, Quaternion rot1, Vector3 vel)
         {
             var parts = ac.partLookup;
             int n = parts != null ? parts.Count : 0;
-
-            // Pose in the root's frame, BEFORE the move. The audit below reads own-body parts only
-            // (see there), and this reads a part's own body wherever it has one, so the two never
-            // compare a pose taken from one source against a pose taken from the other.
-            Quaternion inv0 = Quaternion.Inverse(rb.rotation);
-            Vector3[]    lp = n > 0 ? new Vector3[n]    : null;    // once per replicate, not a hot path
-            Quaternion[] lr = n > 0 ? new Quaternion[n] : null;
-            for (int i = 0; i < n; i++)
-            {
-                var p = parts[i]; var x = p != null ? p.xform : null;
-                if (x == null) continue;
-                var pr = p.rb;
-                bool own = pr != null && pr != rb;
-                lp[i] = inv0 * ((own ? pr.position : x.position) - rb.position);
-                lr[i] = inv0 *  (own ? pr.rotation : x.rotation);
-            }
 
             for (int i = 0; i < n; i++)
             {
@@ -1484,48 +1669,9 @@ namespace NuclearOptionMouseAim
             rb.velocity        = vel;
             rb.angularVelocity = Vector3.zero;
 
-            // DID EVERY PART COME WITH US? Fail-soft around the whole pass: an aircraft that has been
-            // moved but not audited is still a correctly placed aircraft, and this must never be the
-            // thing that throws into a fixed step.
-            try
-            {
-                int snapped = 0; float worst = 0f;
-                for (int i = 0; i < n; i++)
-                {
-                    var p = parts[i]; var x = p != null ? p.xform : null;
-                    if (x == null) continue;
-                    var pr = p.rb;
-                    // OWN-BODY PARTS ONLY, and that is not a narrowing — it is what keeps the warning
-                    // below a DISCRIMINATOR. A part sharing the root body rides the root transform,
-                    // which Unity has not written yet (rb.position propagates to the transform at
-                    // Physics.SyncTransforms, three lines down), so reading x.position here would
-                    // measure the move we just made and report every such part as left behind on
-                    // every placement. Nothing is lost: SetComplexPhysics gives EVERY partLookup
-                    // entry its own body (decompile :61278 -> AeroPart.CreateRB :74227), so this
-                    // skips nothing in the mode a card places in; and in simple physics
-                    // AeroPart.CheckAttachment (:74160) early-returns, so there is no detachment to
-                    // prevent there in the first place.
-                    if (pr == null || pr == rb) continue;
-                    Vector3 tgt = rb.position + rot1 * lp[i];
-                    float err = (pr.position - tgt).magnitude;
-                    if (err <= PartSnapTol) continue;
-                    // Absolute target from the pre-move snapshot, so the pass is idempotent rather
-                    // than order-dependent.
-                    pr.position = tgt; pr.rotation = rot1 * lr[i];
-                    pr.velocity = vel; pr.angularVelocity = Vector3.zero;
-                    snapped++; if (err > worst) worst = err;
-                }
-                if (snapped > 0)
-                    WTMouseAimPlugin.Log.LogWarning(
-                        $"[place] {snapped} of {n} part(s) did not follow the assembly move (worst {worst:0.00} m) "
-                        + "— snapped back. Left alone, AeroPart.CheckAttachment detaches at 0.50 m.");
-            }
-            catch (Exception e)
-            {
-                WTMouseAimPlugin.Log.LogWarning("[place] assembly audit failed (placement itself stands): " + e.Message);
-            }
-
-            Physics.SyncTransforms();                              // parts hang off transforms, not body poses
+            // The one sync, and it is the last statement on purpose: everything above wrote BODY
+            // poses, and this is what pushes them to PhysX before the next `Physics.Simulate`.
+            Physics.SyncTransforms();
         }
 
         // AUDIT THE PLACEMENT, two frames on. The joint spike showed up one or two ticks after the
@@ -1551,13 +1697,51 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[card] entry audit: {v:0} m/s, clean (commanded {_auditSpeed:0}).");
         }
 
-        public void Abort(string reason)
+        // =========================================================================================
+        // ABORT — AND WHETHER IT KILLS THE REPLICATE OR THE WHOLE LANE (v0.99.1).
+        //
+        // It used to always kill the lane, because `Finish` nulls `_queue` and `_queue` IS the
+        // replicate expansion (SelectCards repeats the selection in place). Measured on the STOL
+        // batch: a 10-airframe fleet at ScenarioRepeat 4 was expected to write 40 captures and wrote
+        // **13**. Nine lanes hit the altitude floor 19-26 s into replicate 1 and each abort took that
+        // lane's other three replicates with it; the one lane that stayed up wrote its full 4. No
+        // airframe missing, nothing damaged — the entire shortfall was this teardown.
+        //
+        // So the caller says which it is, and the DEFAULT IS FATAL: every existing caller keeps its
+        // behaviour and only a reason that is demonstrably per-replicate opts out. Today that is the
+        // altitude floor alone. The three that stay fatal each have a reason of their own:
+        //   * airframe damage — an aircraft with a part missing is not the airframe the previous
+        //     replicate flew (the same argument the abort itself is built on), so every remaining
+        //     replicate would be non-comparable; and since the check is re-armed the moment the next
+        //     card starts, a recoverable version would burn the queue in a few fixed steps writing
+        //     one one-row capture per replicate.
+        //   * aircraft changed or gone / Forget — there is no aircraft left to fly the next one.
+        //   * the operator's keys, and the instructor declining — intent, not a mishap.
+        //
+        // WHAT MAKES THE NEXT REPLICATE VALID is `NextCard`, reused rather than re-implemented: it
+        // already closes the recorder, releases this card's pins, advances `_qi`, resets `_si`,
+        // `_tSeg`, `_frameSet`, `_placed`, `_lastLogSeg` and `_rec.EntryNote`, re-indexes the board
+        // caches, and ends the suite properly when the queue runs out. The next tick then re-places
+        // (which is also what re-drops the controller) and re-arms. `_anchorSet` is deliberately NOT
+        // reset — the anchor is per RUN, and re-anchoring here would let a lane that aborted low and
+        // downrange restart the rest of its replicates somewhere else, which is the confound the
+        // anchor exists to remove. `_armEntry` is not cleared either: the next replicate's ApplyArm
+        // needs the schedule it is halfway through. check-architecture.py's card-reset invariant is
+        // what keeps that field list honest as fields are added.
+        public void Abort(string reason, bool fatal = true)
         {
             if (_recording) { StopRecord(reason); return; }
             if (_card == null) return;
+            _aborted++;
             WTMouseAimPlugin.Log.LogWarning($"[card] ABORT ({reason}) — '{_card.name}' segment "
-                + $"{(_card.segments != null && _si < _card.segments.Length ? _card.segments[_si].tag : "?")} at {_tSeg:0.0}s.");
-            Finish("abort: " + reason);
+                + $"{(_card.segments != null && _si < _card.segments.Length ? _card.segments[_si].tag : "?")} at {_tSeg:0.0}s"
+                + (fatal ? " — the suite ends here." : $" — REPLICATE {_qi + 1} only; the lane flies on."));
+            if (fatal) { Finish("abort: " + reason); return; }
+            // Stop with the ABORT's reason before handing over: NextCard would otherwise stamp
+            // "card '<name>' complete" into a CSV that was truncated, and `# stop` is what the scorer
+            // and index-captures.py read to exclude a truncated run. Its own Stop is then a no-op.
+            _rec.Stop("abort: " + reason);
+            NextCard();
         }
 
         private void Finish(string reason)
@@ -1579,6 +1763,18 @@ namespace NuclearOptionMouseAim
             if (_armEntry != null) { ChaseController.SetArm(_acId, null, false); _armEntry = null; }
             _armIdx = -1;
             _anchorSet = false;
+            // THE SHORTFALL, NAMED, while _queue is still here to count against. A lane that aborted
+            // every replicate and a lane that never ran both end up as "fewer captures than expected"
+            // on the analysis side; this is the line that tells them apart, and it says CAPS ABORTED
+            // for the same reason the skip line says SKIPPING — so `index-captures.py --check`'s short
+            // replicate counts have something to grep for.
+            if (_aborted > 0)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] suite ended with {_aborted} of {(_queue != null ? _queue.Count : 0)} "
+                    + "replicate(s) ABORTED. Each one wrote its own capture with its reason on the "
+                    + "'# stop' line, so a short count for this lane is those aborts and not a dropped "
+                    + "recording — which is the distinction the analysis side could not make before.");
+            _aborted = 0;
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
             IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
         }
@@ -1622,7 +1818,14 @@ namespace NuclearOptionMouseAim
             if (_frameSet && ac.GlobalPosition().y < FloorAltM)
             {
                 SetDemand(HeadingFrame(ac) * (Quaternion.Euler(-RecoverElDeg, 0f, 0f) * Vector3.forward));
-                Abort($"altitude floor ({FloorAltM:0} m MSL)");
+                // NOT FATAL (v0.99.1) — this is THE recoverable abort, and the only one. A card that
+                // ran out of energy says nothing about the airframe: it is intact, still flying, and
+                // the next replicate's placement lifts it back to the entry altitude and drops the
+                // controller, which is exactly the state a fresh lane starts from. Nine of ten lanes
+                // in the STOL batch died here on replicate 1 and lost their other three. The level
+                // demand written above is what keeps it out of the water for the tick or two until
+                // that placement runs.
+                Abort($"altitude floor ({FloorAltM:0} m MSL)", fatal: false);
                 return;
             }
 
@@ -1631,7 +1834,7 @@ namespace NuclearOptionMouseAim
             // damage this rig produces — and it is enough to end the run, because an aircraft with a
             // part missing is not the same airframe the previous replicate flew and cannot contribute
             // a comparable sample. THRESHOLD IS ANY DETACHMENT, deliberately not the game's own 0.12
-            // (the AI's "abandon this aircraft" test, decompile :12203/:13463): that number asks
+            // (the AI's "abandon this aircraft" test, decompile :12206/:13466): that number asks
             // whether the thing can still fight, and this is a measurement rig.
             // Same _frameSet gate and the same CLEAN TRUNCATION as the floor above — the reason names
             // the ratio, so the CSV's '# stop' line says how bent it was without opening the rows;
@@ -1672,7 +1875,23 @@ namespace NuclearOptionMouseAim
                 if (Cfg.ScenarioForceEntry.Value && EntrySpeed(_card) > 0f && !_placed)
                 {
                     _placed = true;
-                    if (!PlaceOnCondition(ac, _card)) { Finish("entry condition could not be set"); }
+                    var placed = PlaceOnCondition(ac, _card);
+                    // SKIP THE CARD, DO NOT END THE QUEUE (v0.99.1). An infeasible entry means this
+                    // one pairing of card and airframe is wrong; the rest of the queue is unaffected
+                    // and an unattended night must not lose it. NextCard is safe here: no recorder was
+                    // opened (Stop is a no-op with no writer), RestoreOverrides is idempotent, and it
+                    // ends the suite properly if this was the last entry. A `Failed` placement is the
+                    // other thing entirely — the state is half-written — so that still ends the run.
+                    if (placed == Placement.Infeasible)
+                    {
+                        WTMouseAimPlugin.Log.LogWarning(
+                            $"[card] SKIPPING '{_card.name}' — its entry condition is outside this "
+                            + "airframe's envelope (the refusal above names the bound). The rest of the "
+                            + "queue still flies; this card contributes no capture, so a short replicate "
+                            + "count for it means READ THE LOG, not a dropped recording.");
+                        NextCard();
+                    }
+                    else if (placed == Placement.Failed) Finish("entry condition could not be set");
                     return;
                 }
                 StartCard(ac);
@@ -1686,6 +1905,15 @@ namespace NuclearOptionMouseAim
             var s = segs[_si];
             if (_si != _lastLogSeg)
             {
+                // THE ENTRY CONDITION IS WRITTEN ONCE AND HELD BY NOTHING (v0.99.1) — so check that it
+                // survived the `arm` segment, at the one boundary where it still means something.
+                // Segment 0 is always `arm` (Validate refuses a card whose first tag is anything else)
+                // and every segment after it is scored, so `_si == 1` is the last instant before the
+                // measurement starts. Same root cause as the envelope gate above, one level further
+                // on: EntryConditionError already answers "is this aircraft on the card's declared
+                // condition?" and had exactly ONE call site — StartSuite's pre-flight refusal, which
+                // ScenarioForceEntry (default ON) skips, i.e. the check nobody reaches.
+                if (_si == 1) AuditHold(ac);
                 _lastLogSeg = _si;
                 WTMouseAimPlugin.Log.LogInfo($"[card] {_card.name} seg {_si + 1}/{segs.Length} '{s.tag}' ({s.dur:0.#}s)");
             }
@@ -1710,6 +1938,18 @@ namespace NuclearOptionMouseAim
         private const float SustainedFrac = 0.6f;
         private const float RateMinDegS = 3f, RateMaxDegS = 30f;
 
+        // THE CLAMP IS KEPT AND MADE VISIBLE (v0.99.1). A `deriveAzRate` card's premise is that every
+        // airframe flies the same FRACTION OF ITS OWN structural g — that is what makes one card
+        // comparable across the roster under the one-law rule. The clamp breaks that premise for any
+        // airframe whose derived rate lands outside 3..30 deg/s (measured: 4 of 10 on the STOL batch's
+        // roster), and until now it did so silently: the card, the log and the capture all read as
+        // though the demand were airframe-derived. The rate is still clamped — 30 deg/s bounds the
+        // demand at something the roster can actually be asked for, and the number predates this fix
+        // — but a clipped lane now says so by name at every card start, so a batch that pools those
+        // four with the other six is a decision someone made rather than one nobody saw.
+        // ponytail: a log line, not a column. The rate is constant for the whole capture, the card
+        // name plus the sidecar's gLimit recover it, and the recorder's column contract is not worth
+        // spending on a value that cannot vary within a run.
         private static float SustainableTurnRate(Aircraft ac)
         {
             float n = 7f, v = 250f;                        // fail-soft: a mid jet, if nothing reads
@@ -1721,7 +1961,17 @@ namespace NuclearOptionMouseAim
             }
             catch { /* probe convention: never throw, fly the default */ }
             float w = Mathf.Rad2Deg * (9.81f * Mathf.Sqrt(Mathf.Max(0f, n * n - 1f)) / v);
-            return Mathf.Clamp(w * SustainedFrac, RateMinDegS, RateMaxDegS);
+            float want = w * SustainedFrac;
+            float got  = Mathf.Clamp(want, RateMinDegS, RateMaxDegS);
+            if (Mathf.Abs(got - want) > 0.05f)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[card] SWEEP RATE CLIPPED: {SustainedFrac:0.00} x this airframe's own instantaneous "
+                    + $"rate is {want:0.0} deg/s at {v:0} m/s and {n:0.0} g, outside the "
+                    + $"{RateMinDegS:0}..{RateMaxDegS:0} deg/s band — it will fly {got:0.0}. A deriveAzRate "
+                    + "card claims every airframe flies the same FRACTION of its own structural limit; "
+                    + "for this one it does not, so do not read its rate-derived metrics as the same "
+                    + "stimulus the unclipped lanes flew.");
+            return got;
         }
 
         // =========================================================================================
@@ -1857,18 +2107,43 @@ namespace NuclearOptionMouseAim
         //     silently stopped performing shows up as a drifting `snapBackM` and a failing audit.
         //   - WALL-CLOCK / SESSION AGE. Unresettable by definition; already a column (`tWall`), which
         //     is what lets a batch covary it out instead of arguing about it.
-        private bool PlaceOnCondition(Aircraft ac, Card c)
+        //
+        // WHY A THREE-STATE RESULT AND NOT A BOOL (v0.99.1). The two ways a placement can fail need
+        // OPPOSITE degradations, and collapsing them cost either a whole suite or a run flown from a
+        // half-written state. `Infeasible` = the envelope gate refused BEFORE anything was written, so
+        // the aircraft is untouched and the honest degradation is "skip this card, fly the rest of the
+        // queue" — an unattended night must not lose nine cards to one bad pairing. `Failed` = the
+        // write threw somewhere in the middle, so the state is unknown and the suite ends, which is
+        // what the catch below has always argued for.
+        private enum Placement { Placed, Infeasible, Failed }
+
+        private Placement PlaceOnCondition(Aircraft ac, Card c)
         {
             try
             {
                 var rb = ac.rb;
-                if (rb == null) return false;
+                if (rb == null) return Placement.Failed;
 
                 // THE ONE READ of the card's entry speed on this path (v0.93). Resolved once here and
                 // used by the velocity write, the audit, the header note and both notices below — a
                 // second `c.startSpeed` anywhere in this function would write one speed and report
                 // another the moment a card is corner-relative.
                 float vTgt = EntrySpeed(c);
+
+                // THE v0.92 ENVELOPE GATE, ON THE PER-CARD PATH (v0.99.1). Until now it guarded only
+                // the SPAWN velocity — sel[0]'s speed, once, in TestDrone.LaunchDue — so a later card
+                // in a multi-card selection could ask 250 m/s of a CAS1 (Vmax 205.6) and the write
+                // below would happily do it: the airframe cannot hold it, the capture measures the
+                // decay, and it scores fine while answering a different question. That is the v0.92
+                // failure one level down, and §0 of plans/multi-card-queue.md makes multi-card entries
+                // the recommended shape, so it gets exercised. Ahead of every write, so an infeasible
+                // card costs nothing and leaves the aircraft exactly as it was. Fail-soft in the same
+                // direction as the spawn site: an unreadable envelope returns true and never refuses.
+                if (vTgt > 0f && !TestDrone.EntrySpeedFlyable(JsonKeyOf(ac), vTgt))
+                {
+                    Notify($"CARD SKIPPED: '{c.name}' entry speed is outside this airframe's envelope");
+                    return Placement.Infeasible;
+                }
 
                 var g = ac.GlobalPosition();                    // the game's own datum-relative struct
                 Vector3 gp0 = new Vector3(g.x, g.y, g.z);
@@ -1958,7 +2233,7 @@ namespace NuclearOptionMouseAim
                     + " to the anchor heading, controller reset.");
                 Notify($"ON CONDITION  {vTgt:0} m/s  {c.startAlt:0} m"
                     + (fuel0 >= 0f ? $"  fuel {fuelTgt:P0}" : ""));
-                return true;
+                return Placement.Placed;
             }
             catch (System.Exception e)
             {
@@ -1967,7 +2242,7 @@ namespace NuclearOptionMouseAim
                 // in and score it as if it were on condition. Refuse instead.
                 WTMouseAimPlugin.Log.LogWarning($"[card] could not set entry condition ({e.GetType().Name}: {e.Message}) — refusing the run.");
                 Notify("CARD REFUSED: could not set entry condition — see log");
-                return false;
+                return Placement.Failed;
             }
         }
 
@@ -1990,6 +2265,31 @@ namespace NuclearOptionMouseAim
             }
             catch { return null; }                          // unreadable state gates nothing
             return null;
+        }
+
+        // DID THE DECLARED ENTRY CONDITION SURVIVE THE `arm` SEGMENT? (v0.99.1) Called once per card,
+        // at the arm -> first-scored-segment boundary. Instrument only: it changes nothing about what
+        // flies, because the harness deliberately writes only the aim demand and the throttle pin, and
+        // a speed-holding loop here would be the harness controlling the thing it is measuring.
+        //
+        // The failure it makes visible, measured on the STOL batch: a card declaring `startSpeed: 90`
+        // was placed at 90 and, with the throttle pinned at 1.00 and no `config` override, was doing
+        // 144-147 m/s by the end of a 6 s arm and 340-381 m/s by the last scored segment. Every metric
+        // below that point describes an airframe at 4x the dynamic pressure the card asked for, and
+        // nothing in the capture or the log said so. The FIX is card-side (pin a throttle the declared
+        // speed can be trimmed at); this is the part that stops it being silent.
+        private void AuditHold(Aircraft ac)
+        {
+            string bad = EntryConditionError(_card, ac);    // null for an ungated card, so rotor-* is quiet
+            if (bad == null) return;
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[card] ENTRY CONDITION NOT HELD: '{_card.name}' was placed on condition and the 'arm' "
+                + $"segment has already left it — {bad}. The placement WRITES the state; nothing HOLDS "
+                + "it. Throttle is pinned to ScenarioThrottle (Cfg, or the card's own 'config' pin) and "
+                + "the airframe runs to whatever that trims at, so every scored segment below is flown "
+                + "at the drifted state and not the declared one. Pin a throttle the declared speed can "
+                + "hold, or declare a speed the pinned throttle holds.");
+            Notify($"ENTRY NOT HELD: {bad}");
         }
 
         private void StartCard(Aircraft ac)

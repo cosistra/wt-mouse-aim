@@ -15,9 +15,9 @@ Copy-Item cards\*.json $dest -Force        # then restart the game: cards bind a
 
 Built-in cards (`fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) are **not** here — they live in
 `ScenarioPlayer.cs`. This grid is additive: 16 baseline cards, ~11 min of flying, sized against the
-law's own thresholds (below) to cover the regimes the built-ins leave open — plus **5 `e*`
+law's own thresholds (below) to cover the regimes the built-ins leave open — plus **4 `e*`
 attribution cards**, each one A/B experiment wired into its own file (see
-[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-5-cards)), and **3 follow-up cards**
+[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-4-cards)), and **3 follow-up cards**
 written against a specific finding rather than a regime (see
 [Follow-ups](#follow-ups--cards-written-against-a-finding-3-cards)).
 
@@ -172,7 +172,17 @@ run key is pressed; the pilot only has to be *in* the right aircraft. What the d
 `rotor-hover`/`rotor-bob`, the two that still need a human, because an ungated card gets no placement
 and the hover has to exist before the card starts.
 
-### Attribution A/B — one checkbox per experiment (5 cards)
+### Attribution A/B — one checkbox per experiment (4 cards)
+
+> **`e2-rel-turn-lead` was DELETED**, along with the `Control/RelativeTurnLead` knob and its branch,
+> after its A/B came back spent: the lever separated `leadDeg` 38× and moved the standing error
+> 0.2–3.8%, inside that batch's own 0.1–4.7% null contrast. The card had to go with the knob because
+> **`ResolveArm` fails soft** — with the toggle unresolvable it warns once and then flies every
+> replicate on the same arm while each capture still labels itself `arm=0`/`arm=1`, i.e. a complete,
+> well-formed, entirely fictional A/B. That is the exact silent null the arm machinery exists to
+> prevent, so a deleted card beats a card that warns. Its R39-D captures are archived and analysed.
+> **The sweepable set is now four levers at five `Arm()` sites** (`BelowAlignSuppress`,
+> `AlignRateLead`, `MarkerRateFeedForward` ×2, `IntegralStallGate`), down from five at six.
 
 [`LAW-CHARACTERIZATION.md`](../LAW-CHARACTERIZATION.md) → *Batch 4* is the spec. Each card is an
 **existing** card's geometry copied verbatim with the knob wired in via `armToggle` and `repeat: 8`
@@ -180,14 +190,14 @@ and the hover has to exist before the card starts.
 one checkbox and the spawn key, and the capture says which arm it flew. Only the segment tags are
 renamed (suffix `bs`/`bc`/`al`/`rtl`/`mff`), because `compare-runs.py` keys segments by tag alone.
 
-**All five used to carry `"count": 1`; they no longer do.** It was forced until v0.94: the swept knob
+**All of them used to carry `"count": 1`; they no longer do.** It was forced until v0.94: the swept knob
 was one process-global `Cfg` entry the control law read globally, so with more than one drone the arm
 scheduler **stood down**, the whole batch flew one arm while every capture still labelled itself
 `arm=0`/`arm=1`, the A/B read as "no difference" and no artifact said why. v0.94 moved the arm onto the
 aircraft (read through `ChaseController.Arm()`), so **every lane now sweeps its own independent ABBA**.
 With that gone, `count: 1` was a pure waste: wall clock is set by *replicates per lane*, not by lane
 count (R28 flew 384 captures across 8 lanes in 30m14s), so nine of the ten lanes a launch can hold were
-being left empty for nothing. All five now name the **eight fixed-wing keys that clear the v0.92
+being left empty for nothing. All four now name the **eight fixed-wing keys that clear the v0.92
 envelope gate at their 250 m/s entry** — `Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1,
 EW1, FastBomber1, Darkreach`; `CAS1` (0.95 × Vmax = 195.3), `COIN` (134.6) and all three rotorcraft are
 left out rather than shipped as guaranteed pre-spawn refusals. `compare-runs.py` groups by
@@ -207,12 +217,11 @@ made every previous A/B measure the clamp.
 | `e1-below-suppress` | `Control/BelowAlignSuppress` | `oblique-below` | on-arm `terminalOffDeg`/`rollYawOpposedPct` below the off arm and the mirror pairs closer together. No separation = the v0.85 fix does nothing where it was aimed |
 | `e1-below-control` | `Control/BelowAlignSuppress` | `oblique-6` | **the control — the arms must be indistinguishable.** `alignFracH` is ~0 on the horizon-centred diamond, so any arm separation beyond this card's own mirror-pair spread is a regression *and* invalidates `e1-below-suppress` |
 | `e1b-align-lead` | `Control/AlignRateLead` | `oblique-below` | on-arm `overshootAzDeg`/`stickFlipRateR` down at no cost in `terminalOffDeg`. Up = finding 17's 64% roll-damping side effect is what the knob actually does |
-| `e2-rel-turn-lead` | `Control/RelativeTurnLead` | `sweep-slow` | gate on `blendRailPct` ≈ 0 (the v0.83 A/B ran at 96.9% clamped and measured the clamp), then on-arm `terminalOffDeg` down. `leadDeg` moving while `terminalOffDeg` does not = correct and worthless |
 | `e3-marker-ff` | `Control/MarkerRateFeedForward` | `sweep-slow` | same rail gate, then on-arm mean \|azErr\| down. Arms matching *while unrailed* extends finding 16 (0.0000 of roll stick above the rail) rather than closing it; `aimRate` on both arms is what separates a null from "never fired" |
 
 `e1b` is a separate card rather than a second arm on `e1-below-suppress` for the reason Batch 4
 gives: armed together, a below-suppression change and a 64% roll-damping change are unattributable.
-Each is 8 replicates — 5.1 min for an oblique card, 6.1 for a sweep, ~28 min for all five, **and that
+Each is 8 replicates — 5.1 min for an oblique card, 6.1 for a sweep, ~22 min for all four, **and that
 is the same ~28 min whether each flies one airframe or eight** (see the paragraph above).
 
 ### Follow-ups — cards written against a finding (3 cards)
@@ -486,7 +495,7 @@ to make. Three things to know before copying this shape:
   state read through the controller and every lane runs its own ABBA. What is left is arithmetic, and
   it is smaller than it looks: the replicate count is **per lane**, so `repeat: 8` across a 10-airframe
   roster is 80 *captures* but still 8 replicates of wall clock, because the lanes fly at once. Each
-  lane needs its own multiple of 4 to stay balanced. The `e*` set is the attribution half and all five
+  lane needs its own multiple of 4 to stay balanced. The `e*` set is the attribution half and all four
   now name the eight-key 250 m/s roster for exactly this reason.
 
 Five rules `scorecard.py --selftest` enforces, because nothing at runtime will:

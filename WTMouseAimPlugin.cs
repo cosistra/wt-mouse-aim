@@ -20,7 +20,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.96.2";
+        public const string PluginVersion = "0.99.1";
 
         internal static ManualLogSource Log;
 
@@ -501,9 +501,15 @@ namespace NuclearOptionMouseAim
             // PER VALUE, not one marker for the line: airframe, altitude and speed fall back
             // independently, and "the card is driving this run" is only true of the ones marked so.
             // This distinction is the whole reason the panel is worth drawing before a launch.
+            // ALTITUDE DECKS ARE THE OPERATOR'S KNOB LANDING ON TOP OF THE CARD'S ALTITUDE (v0.99), so
+            // the altitude marked `[from card]` beside it is then the MEAN of two decks and no lane
+            // flies it. Built here and shown only when decks are on: the same DeckText the launch log
+            // prints, so the panel cannot promise a spread the spawn does not use.
+            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadM());
+            if (deck.Length > 0) deck = "   " + deck + " [from F1]";
             BoardLine(2, BoardDim,
                 $"  plant {TestDrone.AirframeOf(p)} {Src(!string.IsNullOrEmpty(p.Airframe))}   "
-              + $"{TestDrone.AltOf(p):0} m {Src(p.StartAlt > 0f)}   "
+              + $"{TestDrone.AltOf(p):0} m {Src(p.StartAlt > 0f)}{deck}   "
               // SpeedText, not a number: a v0.93 corner-relative card has a DIFFERENT entry speed per
               // lane, so it reads "1.00x corner (per airframe)". Printing one number here would be a
               // promise the spawn does not keep — on a panel whose whole job is that it cannot be.
