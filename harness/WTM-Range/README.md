@@ -1,10 +1,20 @@
 # WTM-Range test mission
 
-Purpose-built, empty mission for the automated sweep harness
-([`plans/instructor-feedback-loop.md`](../../plans/instructor-feedback-loop.md) S5.1
-"Isolation"). No units, pinned weather/wind/time-of-day, wreck cleanup wired up so a multi-hour
-sweep doesn't accumulate corpses forever. Schema and pinning rationale:
-[`plans/research/research-D-batch.md`](../../plans/research/research-D-batch.md) S8.
+Purpose-built, empty mission for the automated sweep harness. No units, pinned
+weather/wind/time-of-day, wreck cleanup wired up so a multi-hour sweep doesn't accumulate corpses
+forever.
+
+> **Link repair 2026-08-02.** This paragraph used to cite `plans/instructor-feedback-loop.md` §5.1
+> and `plans/research/research-D-batch.md` §8 for the isolation requirement and the schema
+> rationale. **Neither file exists any more** (`plans/` is git-ignored and both were removed), so
+> both links were dead. The rationale now lives in executable form instead — prefer it, it cannot
+> rot the same way:
+> - **`python debugtests/check-mission.py`** validates this file against the isolation/pinning
+>   invariants and is the authority on what they are.
+> - [`../../CLAUDE.md`](../../CLAUDE.md) → *Validating the test range* explains the one
+>   counter-intuitive invariant: **isolation is NOT an empty faction list.**
+>   `Mission.EnsureFactionExists` auto-inserts a default `MissionFaction` with `AIAircraftLimit = 6`,
+>   so `"factions": []` means "both factions, six AI aircraft each, deploying about five seconds in."
 
 ## Install
 
@@ -32,8 +42,9 @@ metadata.
 
 ## Verify the game loads it
 
-Boot straight into it — this is also the harness's own boot line
-(`research-D-batch.md` S8.4):
+Boot straight into it — this is also the harness's own boot line (the `research-D-batch.md` §8.4
+citation that stood here pointed at a file that no longer exists; the command itself is unchanged
+and still correct):
 ```
 NuclearOption.exe -autoHost -mission "WTM-Range" -state SinglePlayer -socket Offline -limitframerate 60
 ```

@@ -1,4 +1,10 @@
-# R40 — the STOL batch: the card never delivered 90 m/s, and the one segment that did is unflyable at 2500 m, v0.98.1
+# R39 — the STOL batch: the card never delivered 90 m/s, and the one segment that did is unflyable at 2500 m, v0.98.1
+
+> **Renamed 2026-08-02 (was `R40-stol.md`).** These captures carry run tag **R39**, not R40 — R40 is
+> the later v0.99.1 batch (`place-noop` / `place-deflect` / `alpha-pullup`). A redirect stub stood at
+> the old path for one working session; its inbound references in `.py` and `SESSION-2026-08-02.md`
+> were repointed in **v1.0.0** and the stub is **gone**. Body text was already correct and is
+> unchanged.
 
 Run tag `R39`, plugin **v0.98.1**, session `20260802-083849`, cards **`stol-steps`** (40 captures,
 `rec` 311–350, lanes d57–d66) and **`stol-sweep`** (13 captures, `rec` 351–363, lanes d67–d76).

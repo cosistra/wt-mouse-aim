@@ -1,7 +1,9 @@
 # `captures.db` — the flight-capture index, for an agent who has never seen this repo
 
 `debugtests/captures.db` is a SQLite index over every recorder CSV the mod has ever written
-(1604 captures / 7081 segments / ~954k recorder rows as of R32). It exists so a question spanning
+(**2576 captures / 11015 segments / ~2.12M recorder rows / 31 batches as of R40, 2026-08-02** — the
+older "1604 / 7081 / ~954k as of R32" figures are retired; re-derive with `--stats` rather than
+trusting any number written here). It exists so a question spanning
 batches — *"does this effect hold in R28, R29 AND R30?"* — is one `GROUP BY`, not three tool runs
 stitched into prose.
 
@@ -133,7 +135,7 @@ jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
 | `duration_s` | REAL | last `t` − first `t` |
 | `excluded` | INTEGER | `type = 'arm'` — the settling window, **no metrics at all** (1482 of 7081 rows) |
 | `railed` | INTEGER | `scorecard.is_railed()` — sat on a limit ≥90% of samples. **Its metrics are no signal, not a score** (285 rows) |
-| `slack` | INTEGER | scorecard's mirror flag: nothing railed, under 50% of available authority — *the law is the limit* (8 rows; sustained turns only) |
+| ~~`slack`~~ | INTEGER | **DEAD — no longer written (v0.99.1).** The SLACK flag and the `authorityUsedFrac` it thresholded were deleted: that quantity was `mean\|bank\|/maxBank`, not a fraction of authority, and it exceeded 1.0 in practice. The column survives in databases built before the change and holds its 8 historical rows; a fresh index leaves it NULL. **Do not filter on it.** See `R40-metric-repair.md`. |
 | `unknown_tag` | INTEGER | the tag matched no `TAG_TYPE_RULES` entry → scored with the generic set only (2 rows) |
 | `warnings` | TEXT | scorecard's RAILED/SLACK/unknown-tag prose, newline-joined. NULL = clean. **Match on the flags above, never on this prose** |
 | `skipped` | TEXT (JSON) | `{metric: reason}` for metrics that could not be computed. See [NULL idiom 3](#3-not-applicable-vs-not-measured--segmentsskipped) |
@@ -165,7 +167,7 @@ a number below the type's `n` means it exists but was skipped or is conditional.
 | metric (group) | oblique_step<br>4894 | sustained_turn<br>241 | micro/az/el_step<br>299 | fine_track<br>16 | reversal/astern<br>25 | unknown<br>124 | arm<br>1482 |
 |---|---|---|---|---|---|---|---|
 | `aoaPeakDeg` `gPeak` `gSustained` `gJitterG` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
-| `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` `authBank` `authAoa` `authStick` `authorityUsedFrac` | all | all | all | all | all | 120–124¹ | — |
+| `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` (~~`authBank` `authAoa` `authStick` `authorityUsedFrac` — **all four DELETED v0.99.1**~~) | all | all | all | all | all | 120–124¹ | — |
 | `blendRailPct` | all | 217¹ | 64¹ | — ¹ | — ¹ | 1¹ | — |
 | `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` `offFloorPct` | all | all | all | all | all | all | — |
 | `fixedWindowOffDeg` | ≥8 s legs only³ | all | **—**³ | all | all | partial³ | — |
@@ -410,15 +412,21 @@ SELECT c.run_tag, c.airframe, s.tag, count(*) n,
  WHERE s.railed = 1 GROUP BY 1,2,3 ORDER BY n DESC LIMIT 20;
 ```
 
-#### Q7. Slack segments — the law, not the airframe, is the limit — *works today*
+#### Q7. ~~Slack segments — the law, not the airframe, is the limit~~ — **REMOVED (v0.99.1). Does not work; do not restore.**
+Both the `slack` flag and `authorityUsedFrac` were **deleted** from `scorecard.py`. The query below
+is kept only so nobody re-derives it from scratch:
 ```sql
-SELECT c.run_tag, c.airframe, s.tag, count(*) n, round(avg(s.authorityUsedFrac),3) used
-  FROM segments s JOIN captures c ON c.id = s.capture_id
- WHERE s.slack = 1 GROUP BY 1,2,3;
---  R27  trainer  turn360creep  8  0.462
+-- DEAD. authorityUsedFrac and slack are no longer written. Returns nothing on a fresh index.
+-- SELECT c.run_tag, c.airframe, s.tag, count(*) n, round(avg(s.authorityUsedFrac),3) used
+--   FROM segments s JOIN captures c ON c.id = s.capture_id  WHERE s.slack = 1 GROUP BY 1,2,3;
 ```
-Read a SLACK row as "look here", never as a verdict — its 0.5 threshold is uncalibrated
-(`scorecard.py`, `SLACK_FRAC`).
+**Why it was deleted rather than re-thresholded:** `authorityUsedFrac` was `mean|bank| / maxBank` —
+a bank-angle ratio, not a fraction of authority. It read **0.977–1.084** on R39 `alpha_hold`, i.e.
+a "fraction used" above 1.0, which is the tell that the apparatus was never connected to the
+quantity. It fired 8 times in 9,137 segments in its whole life, all 8 in one cell.
+**The gap is still real: nothing in the corpus detects "the law is leaving authority unused."**
+A replacement needs a normalizer of the form `omega_target = min(omega_avail, off/tau)` —
+`LAW-CHARACTERIZATION.md` §7 #36. See `R40-metric-repair.md` and `LAW-WEAKNESS-MAP.md` W5.
 
 #### Q8. Why is this metric NULL? — *works today*
 ```sql
@@ -501,8 +509,16 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
    `(card, tag)`.
 7. `sc_maxSpeed` is a normalizer (flat 600). Use `sc_infoMaxSpeed`.
 8. `aircraft` is the unit name, `airframe` is the jsonKey. Group on `airframe`.
-9. Matching on `segments.warnings` prose instead of the `railed`/`slack`/`unknown_tag` flags — a
-   reword away from silently marking the corpus clean.
+9. Matching on `segments.warnings` prose instead of the `railed`/`unknown_tag` flags — a
+   reword away from silently marking the corpus clean. (`slack` is **dead**, see Q7 — a
+   `WHERE slack = 1` now marks the corpus clean by construction.)
+9b. **`WHERE dmgFrac = 0` as "undamaged" — it selects EVERYTHING and is the sharpest live instance
+   of the zero-vs-never-measured trap.** The column is a guaranteed constant: **641,555 rows, 0
+   non-zero, against 8 known damage aborts.** The recorder writes the row *after* the abort check,
+   so a damaged replicate's damage is never written. The real damage signal is **the abort itself
+   and the truncated capture** (`# stop` reason), plus the sidecar's `detachedRatioAtStart`. Four
+   analyses have already been misled by this constant. Fix is `LAW-CHARACTERIZATION.md` §7 (Tier 1e:
+   write the row before the abort check).
 10. Assuming a metric column exists. It is created only when some capture produced it; `no such
     column` means "never flown", not "typo".
 11. Ranking anything on `terminalOffDeg` without checking it is above `0.0396` — the `off` column's

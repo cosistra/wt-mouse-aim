@@ -84,7 +84,7 @@ discarded turn demand". Measured, both directions:
 | direction | why | measured |
 |---|---|---|
 | **under-reads** | on a sustained turn `bigTurn → 1` zeroes the blend and `azErr → 0` collapses `linBank` | R39 `Fighter1·turn360rtl` **0.0%** vs `bankTR` 30.8% and mean\|bank\| 68.0 of 72; R27 `FastBomber1·turn360` **5.2% → 97.7%**; R28 `Darkreach·obUR12` **12.5% → 81.0%** |
-| **over-reads** | a large azimuth step on a yaw-weak airframe drives `bankGain` to 3.0·(1+5.0·0.7) = **13.5**, so 5.4° of `azErr` already saturates | R28 `Darkreach·obUR6low` **100.0% → 0.0%**; R29 `Darkreach·obUR2` **42.3% → 0.0%**; the parallel STOL batch (`R40-stol.md` H3) measured 70.7% vs a `bankTR` at 4.6% |
+| **over-reads** | a large azimuth step on a yaw-weak airframe drives `bankGain` to 3.0·(1+5.0·0.7) = **13.5**, so 5.4° of `azErr` already saturates | R28 `Darkreach·obUR6low` **100.0% → 0.0%**; R29 `Darkreach·obUR2` **42.3% → 0.0%**; the parallel STOL batch (`R39-stol.md` H3) measured 70.7% vs a `bankTR` at 4.6% |
 
 **The over-read is one variable, not a coincidence of three.** `bankBlend`, `assist` and `azDz` all
 key off the *same* `yawWeak·(1−bigTurn)`: the weakness that blends `bankTR` **in** is simultaneously

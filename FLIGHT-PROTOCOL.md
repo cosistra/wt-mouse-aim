@@ -1,5 +1,17 @@
 # Flight protocol — v0.82 … v0.89
 
+> **HISTORICAL RECORD as of 2026-08-02 (current plugin v0.99.1). Do not fly from this file.**
+> Its lasting value is the **Gate A–D validation record** (R22–R25): the evidence that a drone flies
+> the real control law bit-for-bit, that ABBA arming works, and that the entry reset only partly
+> works. That evidence is still load-bearing and is why this file is kept.
+> - **The "Experiments" section is SUPERSEDED** by [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md),
+>   which says so in its own header. It was written when one card could be flown and assumed a human
+>   in the seat; both are false now.
+> - **`RelativeTurnLead` appears throughout as the A/B arm and NO LONGER EXISTS** — knob, branch and
+>   card were deleted in v0.99.1. Every `armKnob=RelativeTurnLead` line below is a *record of what
+>   was flown in R23–R25*, not an instruction. Setting that arm today sweeps nothing.
+> - Gate results reference mod versions 0.87–0.89; the law has moved on ~12 minor versions since.
+
 Six changes shipped without a single flight. This is the order to fly them in, and it is an
 **order, not a menu**: each gate validates the instrument the next step measures with. A gate that
 fails invalidates everything below it, so stop there rather than collecting data that cannot mean

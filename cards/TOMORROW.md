@@ -1,5 +1,20 @@
 # TOMORROW — the unattended multi-airframe campaign
 
+> **MOSTLY EXECUTED 2026-08-02 (R39/R40). Do not run this end to end.** Of the campaign's launches:
+> `alpha-sweep` (§5–6) flew and **the card is retired** — replaced by `alpha-pullup`
+> (`cards/ALPHA-CARD-REDESIGN.md`); `alpha-steps` flew; `e2-rel-turn-lead` flew and **the card and its
+> knob were deleted in v0.99.1**; `e3-marker-ff` flew; the `rotor-*` and `stol-*` cards flew and both
+> produced **invalid** data for their intended purpose (see `debugtests/R39-rotor.md` §1a and
+> `debugtests/R39-stol.md` §2).
+>
+> **Still live and still worth flying: §1–4's `e1-below-suppress` / `e1-below-control` /
+> `e1b-align-lead`, and §7's `oblique-above-c`** — the belowness axis, which is §4 Batch 4 experiment
+> **E1** in `LAW-CHARACTERIZATION.md` and the only never-flown group left in `cards/`. §0's install
+> and preflight steps are current and still the right way to set up a launch.
+>
+> **Before any launch, run `python debugtests/check-card.py cards/*.json`** — it did not exist when
+> this runbook was written, and three of the cards below failed on arithmetic it now catches.
+
 The runbook for one morning. Seven launches, ~42 min of flying, ~480 captures, and it closes out the
 **10 shipped cards that have never been flown**. Everything below is one checkbox (or one text field)
 and the spawn key; nothing in F1 needs to be hand-matched to a card, and the two places where that is

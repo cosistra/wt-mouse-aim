@@ -6,10 +6,25 @@ knowledge* document, not a plan: [`ROADMAP.md`](ROADMAP.md) says what to do next
 [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md) §7 is the numbered backlog, and this says what
 those two are entitled to rest on.
 
-**Corpus as of this writing** (`python debugtests/index-captures.py --stats`): **1 681 captures,
-7 462 segments, 999 942 recorder rows, 27 batches (R1…R33), 11 airframes, 24 cards flown of 31
-shipped.** Every SQL figure below is reproducible against `debugtests/captures.db`; the query is
-given where it is not obvious.
+**Corpus** — ~~1 681 captures, 7 462 segments, 999 942 recorder rows, 27 batches (R1…R33), 11
+airframes, 24 cards flown of 31 shipped~~ → **updated 2026-08-02: 2 576 captures, 11 015 segments,
+2 117 598 recorder rows, 31 batches (R1…R40), 13 airframes, 38 cards flown of 36 shipped + 3
+built-ins.** Every SQL figure below is reproducible against `debugtests/captures.db`; the query is
+given where it is not obvious. **Re-derive with `--stats` rather than trusting any count in this file
+— they were written at R33 and the corpus has since grown ~53%.**
+
+> **TWO CORPUS-WIDE INVALIDATIONS LANDED 2026-08-02. Apply them before reading any line below.**
+> Both are in `debugtests/SESSION-2026-08-02.md` §3, which is authoritative.
+> 1. **The metric repair (v0.99.1).** `bankClampActivePct` read a column written by a law deleted in
+>    v0.60 (27.5% of segments move > 5 pp; 17 verdicts flip to RAILED); the wobble detector was
+>    measuring entry transients (318 "episodes" → **5**); and `authorityUsedFrac` / `authBank` /
+>    `authAoa` / `authStick` **and the SLACK flag are DELETED**. **Every `authorityUsedFrac` claim in
+>    this file is withdrawn, not re-scaled** — the quantity was `mean|bank|/maxBank`, so it never
+>    measured effort. See `debugtests/R40-metric-repair.md`.
+> 2. **The multi-card ABBA confound is wider than the R31 note below says.** v0.99.1 found `ArmOf`
+>    keyed the **queue** index, and a multi-card selection blocks the queue — so **every multi-card
+>    A/B batch on disk carries it and must be RE-FLOWN, not re-scored.** R31 is the worst case, not
+>    the only one. Single-card batches are unaffected (`_block == 1`).
 
 **Bucket rules, applied without mercy:**
 

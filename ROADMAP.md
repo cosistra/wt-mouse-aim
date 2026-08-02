@@ -43,8 +43,24 @@ them. That is the reason the loop stalled, and it is why the fix order below is 
 law second* — a law change measured on a broken instrument is worse than no law change, because it
 produces a confident number.
 
-**The instrument is now believed sound.** R28 (384 captures, 8 airframes) is the first batch flown
-entirely after all three fixes. Its `Q0` verdict is the gate on everything below.
+~~**The instrument is now believed sound.** R28 (384 captures, 8 airframes) is the first batch flown
+entirely after all three fixes. Its `Q0` verdict is the gate on everything below.~~
+
+> **REFUTED 2026-08-02 — and this was the premise the whole decision tree rested on.** The instrument
+> was **not** sound; it was lying in three independent places across the whole modern corpus, R28
+> included. `bankClampActivePct` was reading `targetBank`, a column written by a control law **deleted
+> in v0.60**; the wobble detector was measuring entry transients (318 corpus "episodes" → **5** real);
+> and `authorityUsedFrac` was `mean|bank|/maxBank`, which read **above 1.0** and never measured effort
+> at all — it and the SLACK flag are now deleted. Two further structural blind spots landed the same
+> day: `dmgFrac` is **0 on all 641,555 rows** because the row is written after the abort, and the
+> multi-card ABBA index keyed the queue, so **every multi-card A/B batch on disk must be re-flown**.
+>
+> **What this does to the document below:** the fix order (*instrument first, law second*) was
+> **right** and is vindicated — but it was declared finished ~15 batches too early. Any branch below
+> that resolves on a `bankClampActivePct`, a wobble count, or an authority figure needs re-reading
+> against `debugtests/R40-metric-repair.md` and `debugtests/SESSION-2026-08-02.md` §3 first.
+> The lesson is working rule (a) in [`ORIENTATION.md`](ORIENTATION.md): **a zero and a
+> never-tested reading are indistinguishable, and we kept reading the zero as a pass.**
 
 ---
 

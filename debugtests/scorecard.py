@@ -27,6 +27,12 @@ won't have them. Every column is looked up BY HEADER NAME (csv.DictReader), neve
 and a metric whose input column is missing is simply skipped with a reason recorded in that
 segment's "skipped" dict — never a crash.
 
+EXPOSURE: the same "skipped" dict also carries the metrics that WERE computable and are being
+withheld anyway, because the condition they measure was never created — reason prefixed
+"NOT EXPOSED: ". A metric whose stimulus did not arrive publishes NULL, never the 0.0 its formula
+returns when nothing happened; see require_exposure() for the rule and the five documented false
+passes that motivated it.
+
 SEGMENTATION: consecutive rows sharing the same `segTag` form one segment; a CSV with no segTag
 column at all becomes a single segment named "unsegmented". The segment TYPE is inferred from the
 tag via TAG_TYPE_RULES (az_step, el_step, oblique_step, fine_track, sustained_turn, alpha_step,
@@ -738,6 +744,92 @@ def aoa_ceiling(fbw):
     return lim - min(4.0, 0.15 * lim) if lim else None
 
 
+def aoa_fade(fbw):
+    """The WIDTH of the ceiling gate's fade band, mirrored from ChaseController.Apply
+    (max(4, min(6, 0.25*alphaLimiter)), :1222) — the line above the one aoa_ceiling() mirrors.
+    None on a pre-v0.55 capture.
+
+    Offline this is only needed for one thing, and it is the reason it is here rather than inlined:
+    `aoaCeil - aoaFade` is the AoA at which either gate can FIRST move off 1.0
+    (aoaGateUp = clamp01((aoaCeil - aoaPredUp)/aoaFade), :1238-1239), i.e. it is the onset the
+    gateMin* exposure test needs. Two copies of that constant is how the offline read and the law
+    drift apart."""
+    lim = fbw.get("alphaLimiter")
+    return max(4.0, min(6.0, 0.25 * lim)) if lim else None
+
+
+# --- EXPOSURE PRECONDITIONS: "not exposed" is NULL, never 0.0 ------------------------------------
+# THE GENERALISATION of osc_mode()'s rule, and deliberately the same rule rather than a second one.
+# osc_mode publishes a frequency only when three independent pieces of evidence hold (the
+# autocorrelation peak clears 3/sqrt(N), an independent Hann DFT lands in the same 1/T bin, four
+# cycles fit in the window) and NULL otherwise — never the crossing detector's floor value.
+# Everything below is that same shape applied to the other half of the instrument: a metric whose
+# STIMULUS never arrived publishes NULL, not the number its formula happens to return when nothing
+# happened, which is almost always 0.0.
+#
+# WHY IT KEEPS BITING. A 0.0 from "the law behaved" and a 0.0 from "the condition was never created"
+# print the same character, sort the same way, and average the same way — and every analysis so far
+# has read the zero as a pass. Five documented cases, four documents (SESSION-2026-08-02.md 1.2 and
+# 1.15):
+#   * commandIntoCeilingPct = 0.00 on all 512 oblique-6-dwell legs — nine of ten airframes never
+#     closed a gate, so the count is structurally zero (R39-B 5);
+#   * commandIntoCeilingPct = 0.00 on 5 of 8 alpha-sweep lanes — the gate never went below
+#     GATE_BITING (min 0.719), and it reads 0.00 both for "behaved" and "never looked" (R39-E 6);
+#   * aoaRecoverActivePct = 0 on 8/8, read as a law defect — the term is identically zero below the
+#     ceiling by construction (ChaseController.cs:1280) and nothing crossed (R39-E 2);
+#   * qSchedMin = 1.000 across all 36,516 rotorcraft rows — the floor sits inside a branch hover
+#     cannot enter, so hover is the one regime where it CANNOT fire (R39-rotor 3d);
+#   * bankClampActivePct = 100% and a RAILED stamp on a rotorcraft roll channel that never moved,
+#     because bankTR is computed upstream of the blend that deletes it (R39-rotor 1d).
+#
+# THE MECHANISM is the one already in the file, not a new channel: WITHDRAW the key from `metrics`
+# and record the reason in `skipped`, exactly as pointing_metrics already withholds
+# fixedWindowOffDeg at the resolution floor and wobble_scan already withholds wobbleFreqHz*. That
+# makes NULL unrankable BY CONSTRUCTION, everywhere downstream, with no new plumbing and nothing for
+# a consumer to coerce: compare-runs.py builds a spread from the keys that are present (and skips
+# None besides), index-captures.py writes no value so the SQL column is NULL and every aggregate
+# ignores it, and railed_metrics() cannot threshold a key that is not there. The reason is prefixed
+# so it stays greppable inside the `skipped` JSON blob and can never be confused with the
+# missing-column reasons that share the dict.
+NOT_EXPOSED = "NOT EXPOSED: "
+
+
+def require_exposure(m, skipped, names, exposed, why):
+    """Withdraw `names` from `m` unless their precondition holds; no-op when it does.
+
+    `exposed` must be FALSE when it cannot be EVALUATED (a column the precondition itself needs is
+    missing), never optimistically true — "we could not check whether we looked" is not a pass
+    either, and that is the whole failure mode this exists to close. A name already absent from `m`
+    (its own input column missing) is left exactly as that put it: one reason per metric, and the
+    missing column is the more specific one.
+    """
+    if exposed:
+        return
+    for k in names:
+        if k in m:
+            del m[k]
+            skipped[k] = NOT_EXPOSED + why
+
+
+# |out{P,R,Y}| at or past this = that control channel is on its stop. The recorder writes the
+# channels as "{:0.000}" (Recording.cs:571), so the rail is a literal 1.000 and this is a
+# print-quantum test, not a tolerance.
+STICK_RAILED = 0.999
+
+# MEDIAN heliBlend at or past this = most of the bank demand is being deleted before it reaches the
+# plant, because ChaseController scales it by (1 - heliBlend) at :1875. 0.5 is "the typical sample
+# keeps less than half its bank demand", and it is a read threshold on a recorded signal like every
+# other literal in this file -- a capture can be re-scored with another.
+#
+# NOT 0.999, which was the first attempt and is wrong on real data: the rotorcraft batch runs
+# heliBlend 0.94-1.00, never a clean 1.000 (AttackHelo1 rec364: `hover` min 0.940, EVERY sample
+# under 0.999), so an equality-ish test published the very clamp reading it exists to withdraw. Six
+# percent of a bank demand is not a flown demand -- the same captures measure |tBankE| p95 = 0.00 and
+# |outR| median 0.005. MEDIAN, not min, for the same reason: one unblended sample does not make the
+# segment's occupancy a measurement.
+HELI_BLEND_DELETES = 0.5
+
+
 def saturation_metrics(rows, cols, cfg, fbw):
     """Is the LAW at a limit, or the PLANT? (metrics, skipped), same shape as aoa_g_metrics.
 
@@ -819,6 +911,16 @@ def saturation_metrics(rows, cols, cfg, fbw):
                               LATCHED side, where roll does not participate. A segment that
                               straddles it is two regimes averaged together, so read this before
                               pooling anything. Absent pre-v0.85 (bWt is a v0.85 column).
+      stickRailPct{P,R,Y}   - % samples with that control channel on its stop (|out| >= 1.000).
+                              THE FOURTH LIMIT, and it was not a metric at all until R39-rotor went
+                              looking for it by hand: "yaw stick at +-1.0 -- not a metric; not a
+                              fixed-wing failure mode -- 0-88% of samples, the dominant rail"
+                              (R39-rotor 1d). The rotorcraft yaw relay (0.11-0.19 Hz, +-19-56 deg,
+                              pedal on the stop 40-87% of the time) had NO column reporting it: the
+                              three occupancy metrics above are all demand-side or roll-side, and a
+                              bang-bang pedal moves none of them. All three axes are published
+                              because the axis that rails is the finding (pitch 0.0-1.8%, roll 0.0%
+                              on the same captures) -- but only YAW is in RAIL_METRICS, see there.
     THE MIRROR QUESTION -- "did the LAW leave performance on the table?" -- USED TO BE ANSWERED HERE,
     by authBank / authAoa / authStick / authorityUsedFrac and the SLACK flag on top of them. All five
     were DELETED in R40 and nothing replaced them, because the quantity was not a fraction of
@@ -883,6 +985,31 @@ def saturation_metrics(rows, cols, cfg, fbw):
         m["blendRailPct"] = 100.0 * sum(1 for r in rows if r.get("bWt", 0.0) >= BLEND_RAILED) / n if n else 0.0
     else:
         skipped["blendRailPct"] = "missing column: bWt (pre-v0.85 capture)"
+
+    # The control-surface rails. `if axis in cols` with no skipped entry, exactly like wobble_scan's
+    # stickFlipRate{P,R,Y} next door: out{P,R,Y} are base recorder columns, so their absence means a
+    # synthetic/legacy row set, not a capture with a story to tell about it.
+    for axis, lbl in (("outP", "P"), ("outR", "R"), ("outY", "Y")):
+        if axis in cols:
+            m[f"stickRailPct{lbl}"] = (100.0 * sum(1 for r in rows
+                                                   if abs(r.get(axis, 0.0)) >= STICK_RAILED) / n
+                                       if n else 0.0)
+
+    # EXPOSURE. bankTR is computed UPSTREAM of `tBankE *= (1 - heliBlend)` (ChaseController.cs:1875),
+    # so at heliBlend = 1 the law throws the entire bank demand away before it reaches the plant.
+    # Measured: |bankTR| p95 76-86 deg against a 72 deg clamp while |tBankE| p95 is 0.00 and |outR|
+    # median is 0.005 -- and scorecard stamped rotor-hover/AttackHelo1/hoveryawR RAILED at 100.0% on
+    # that basis (R39-rotor 1d). A clamp on a demand nothing flew is not a measurement.
+    # On a fixed wing heliBlend is identically 0, so dead_columns has already withdrawn the column
+    # and this cannot fire; a tiltrotor flying wing-borne reads ~0 and keeps its clamp metric.
+    blend = (statistics.median(r.get("heliBlend", 0.0) for r in rows)
+             if rows and "heliBlend" in cols else 0.0)
+    require_exposure(m, skipped, ("bankClampActivePct", "bankDemandExcessDeg"),
+                     blend < HELI_BLEND_DELETES,
+                     f"median heliBlend = {blend:.3f} -- ChaseController scales the bank demand by "
+                     f"(1 - heliBlend) at :1875, downstream of the bankTR this reads, so the clamp "
+                     f"discarded a demand the aircraft was never going to fly (measured on these "
+                     f"captures: |tBankE| p95 = 0.00, |outR| median 0.005, R39-rotor 1d)")
     return m, skipped
 
 
@@ -890,10 +1017,19 @@ def saturation_metrics(rows, cols, cfg, fbw):
 # Occupancy at/above this = the segment spent essentially all of itself on that limit.
 RAILED_PCT = 90.0
 
-# The four occupancy metrics that mean "a limit, not the law, is doing the flying" — three from
+# The occupancy metrics that mean "a limit, not the law, is doing the flying" — four from
 # saturation_metrics, one from alpha_metrics. They are ALTERNATIVES, not additives: any ONE of them
 # near 100% is already enough to make the segment's other numbers unresponsive.
-RAIL_METRICS = ("bankClampActivePct", "turnRateCapActivePct", "blendRailPct", "aoaAboveCeilingPct")
+#
+# stickRailPctY is the R39-rotor addition and the only one of the three stick rails in here. Yaw
+# because a pedal pinned for 90% of a segment is not something any healthy law does on any airframe
+# — it was 0-88% on the rotorcraft batch and is the mechanism behind the 0.11-0.19 Hz relay, while
+# the segment's pointing numbers went on printing like scores. Pitch and roll are PUBLISHED but not
+# flagged: a pitch rail is a normal part of a large step's transient on a fixed wing, so thresholding
+# it at 90% would need a corpus measurement nobody has made yet, and an un-calibrated flag reads like
+# a verdict (which is why SLACK was deleted). Add them when a batch justifies the threshold.
+RAIL_METRICS = ("bankClampActivePct", "turnRateCapActivePct", "blendRailPct", "aoaAboveCeilingPct",
+                "stickRailPctY")
 
 # THE MIRROR FLAG, SLACK, IS GONE (R40). It thresholded authorityUsedFrac, which was not a fraction
 # of authority -- see saturation_metrics' docstring for the measurement that killed it. Nothing
@@ -1124,6 +1260,69 @@ def alpha_metrics(rows, cols, fbw):
         m["commandIntoCeilingPct"] = 100.0 * into / n if n else 0.0
     else:
         skipped["commandIntoCeilingPct"] = "missing column(s): aoaGU/aoaGD/tgtPRaw"
+
+    # --- EXPOSURE (see require_exposure) ----------------------------------------------------------
+    # Five of the metrics above read their INERT value both when the law behaved and when the card
+    # never created the condition, and every one of those readings has already been published as a
+    # pass somewhere in R39-E / R39-B / R39-rotor. Each precondition below is the reading
+    # cards/ALPHA-CARD-REDESIGN.md 5 names as "not exposed" for that criterion, expressed in columns.
+    # All the locals are read BEFORE any withdrawal, so one metric being withheld cannot silently
+    # change another's exposure test.
+    gu, gd, above = m.get("gateMinUp"), m.get("gateMinDn"), m.get("aoaAboveCeilingPct")
+    gate_moved = (gu is not None and gu < 0.999) or (gd is not None and gd < 0.999)   # == aoaLimiterActive
+    gate_bit = (gu is not None and gu < GATE_BITING) or (gd is not None and gd < GATE_BITING)
+    fade = aoa_fade(fbw)
+    onset = ceil - fade if (ceil and fade) else None    # AoA at which a gate can first leave 1.0
+    aoas = [r.get("aoa", 0.0) for r in rows] if ("aoa" in cols and rows) else []
+
+    # gateMin{Up,Dn}: exposed if the gate DEMONSTRABLY moved, or if the recorded AoA reached that
+    # side's fade band (so 1.000 means "provoked and held", a real reading). The first clause is what
+    # keeps this from ever false-NULLing: the gate runs on PREDICTED AoA, which leads the recorded
+    # column, so a gate can bite before `aoa` enters the band -- and if it bit, it is published.
+    # ALPHA-CARD-REDESIGN 5 flags gateMinDn specifically: alpha-pullup has no mirror push, so it will
+    # read 1.000 "by design, not a pass". Same rule, both sides, because which side a card provokes
+    # is the card's business and not this function's.
+    why_gate = ("the {0} ceiling gate never left 1.000 and the recorded AoA never reached its fade "
+                "band (onset {1}) -- a gate that was never provoked reads 1.000 whether the guard is "
+                "sound or the card missed the regime (ALPHA-CARD-REDESIGN 5, gateMinDn)")
+    onset_s = "unknown: no alphaLimiter on the '# fbw' header" if onset is None else f"{onset:.2f} deg"
+    require_exposure(m, skipped, ("gateMinUp",),
+                     gu is not None and (gu < 1.0 or (onset is not None and aoas
+                                                      and max(aoas) >= onset)),
+                     why_gate.format("up", onset_s))
+    require_exposure(m, skipped, ("gateMinDn",),
+                     gd is not None and (gd < 1.0 or (onset is not None and aoas
+                                                      and min(aoas) <= -onset)),
+                     why_gate.format("down", onset_s))
+
+    # C4. qSched cuts the demand as a function of AoA UTILIZATION, so with no gate activity at all
+    # there was nothing for it to cut and 1.000 is the regime's absence restated. This is also the
+    # rotorcraft case: qSched/aoaGU/aoaGD take exactly one value each -- 1.000 -- across all 36,516
+    # hover rows, because the floor sits inside `if (!_collective)` (R39-rotor 3d).
+    require_exposure(m, skipped, ("qSchedMin",), gate_moved,
+                     "nothing shows a ceiling gate leaving 1.000 (aoaGU/aoaGD flat, or absent), so "
+                     "the AoA-utilization schedule had no utilization to schedule against: "
+                     "qSchedMin = 1.000 is the regime being absent, not the schedule being inert "
+                     "(R39-E 2; R39-rotor 3d, where the floor is inside a branch hover cannot enter)")
+
+    # C5. aoaRecover is (max(0, aoaPredSym - aoaCeil) - max(0, -aoaPredSym - aoaCeil)) / aoaFade
+    # (ChaseController.cs:1280) -- IDENTICALLY zero below the ceiling. A 0 with nothing across the
+    # ceiling carries no information about the recovery bias whatsoever, and was read as a law defect
+    # on 8 of 8 lanes.
+    require_exposure(m, skipped, ("aoaRecoverActivePct", "aoaRecoverPeak"),
+                     above is not None and above > 0.0,
+                     "AoA is not shown to have crossed the ceiling, and aoaRecover is identically "
+                     "zero below it by construction (ChaseController.cs:1280) -- 0.0 here says "
+                     "nothing about the recovery bias (R39-E 2: 0 on 8/8, read as a law defect)")
+
+    # C3. The count REQUIRES a gate below GATE_BITING to increment at all, so with no gate that deep
+    # it is 0.00 by arithmetic. This is the single most-repeated false pass in the corpus.
+    require_exposure(m, skipped, ("commandIntoCeilingPct",), gate_bit,
+                     f"no ceiling gate ever closed past GATE_BITING ({GATE_BITING}), so no sample "
+                     f"could be counted and the 0.00 reads identically for 'the law backed off' and "
+                     f"'we never looked' (R39-B 5: all 512 oblique-6-dwell legs, nine of ten "
+                     f"airframes never closed a gate; R39-E 6: 5 of 8 alpha-sweep lanes, gate min "
+                     f"0.719)")
     return m, skipped
 
 
@@ -1471,6 +1670,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
                                               [r["posY"] for r in rows], [r["posZ"] for r in rows]))
             else:
                 skipped["positionRMSM"] = skipped["driftRateMS"] = "missing column(s): posX/posY/posZ"
+            metrics.update(wobble_scan(t, rows, cols, dur))   # see the note on the bobup branch
 
         elif seg_type in ("translate", "bobup"):
             if {"posX", "posY", "posZ"} <= cols:
@@ -1495,6 +1695,17 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
                     skipped["riseTime90"] = "segment too short (<2 samples)"
             else:
                 skipped["riseTime90"] = "missing column(s): posX/posY/posZ"
+            # THE DETECTOR WAS NEVER WIRED TO THE ROTORCRAFT TYPES (fixed here). infer_type resolves
+            # hover/hoveryaw/bobup/bobdn correctly -- it has since v0.71 and the selftest asserts it
+            # -- but the dispatch above only ever called wobble_scan for fine_track, reversal,
+            # astern_wrap, oblique_step and alpha_*. hover_hold and bobup got position/step metrics
+            # and NOTHING ELSE, so the one batch in the corpus with a measured rail-to-rail limit
+            # cycle (R39-rotor 1c: 0.11-0.19 Hz, +-19-56 deg of azErr, two of three airframes) was
+            # the one batch the oscillation detector never ran on. It had to be measured by hand.
+            # It stays honest about the answer: 4 cycles of 0.11 Hz is 36 s against 12-15 s segments,
+            # so osc_mode will correctly publish NULL for the frequency on most of them -- the
+            # evidence is wobbleCoherence* beside it, and stickRailPctY from saturation_metrics.
+            metrics.update(wobble_scan(t, rows, cols, dur))
 
         elif seg_type == "transition":
             if "alt" in cols:
@@ -1502,6 +1713,12 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
                 metrics["altExcursionM"] = max(alt) - min(alt)
             else:
                 skipped["altExcursionM"] = "missing column: alt"
+            # Same gap R40 closed on hover_hold/bobup: a rotorcraft arm that called no wobble_scan.
+            # A tiltwing handing over from wing-borne to rotor-borne lift is the likeliest place in
+            # the envelope for a hand-off oscillation, and this was the one arm with no detector on
+            # it. osc_mode still gates itself, so a leg too short for four periods publishes NULL
+            # rather than a number.
+            metrics.update(wobble_scan(t, rows, cols, dur))
         # "unknown" (incl. "unsegmented"): AoA/G discipline above is the whole generic set.
 
         # Disk-card extras, ON TOP of the step/turn block the chain above already ran for them (an
@@ -1517,6 +1734,19 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             metrics.update(m)
             skipped.update(s)
             metrics.update(wobble_scan(t, rows, cols, dur))   # incl. wobbleEpisodesAoa: the relay
+            # ...but the relay question is only ASKED where the guard acted. C2 of
+            # cards/ALPHA-CARD-REDESIGN.md 5 names gateMinUp = 1.000 as its not-exposed reading: a
+            # gate that never moved cannot have chattered, so a 0 there is the card missing the
+            # regime restated. It was reported as "PASS 8/8" on exactly such lanes (R39-E 2), and
+            # SESSION 1.15 has since found the metric near-vacuous corpus-wide (5 episodes in 7,837
+            # segments) -- which makes an unexposed 0 worth even less. Scoped to alpha_* because
+            # that is where the metric is read as evidence about the AoA guard.
+            gate_up = metrics.get("gateMinUp")
+            require_exposure(metrics, skipped, ("wobbleEpisodesAoa",),
+                             gate_up is not None and gate_up < 1.0,
+                             "the up ceiling gate never left 1.000, so the AoA guard never acted "
+                             "and cannot have relayed -- 0 episodes is non-exposure, not a graded "
+                             "guard (ALPHA-CARD-REDESIGN 5, C2)")
 
     return {
         "tag": tag,
@@ -2227,13 +2457,49 @@ def selftest():
     assert abs(am["aoaRecoverPeak"] - 0.6) < 1e-9, am
     # rows 1 (gateUp 0.2, nose-up) and 3 (gateDn 0.3, nose-down) count; row 2's gate is 0.6, open.
     assert abs(am["commandIntoCeilingPct"] - 50.0) < 1e-9, am
-    # ...and "the card never reached the regime" must be 0.0, not missing -- the two are different
-    # answers and only one of them means the run is worthless.
-    calm, _ = alpha_metrics([dict(arows[0])], acols, afbw)
-    assert calm["aoaAboveCeilingPct"] == 0.0 and calm["commandIntoCeilingPct"] == 0.0, calm
-    # pre-v0.55 capture: no alphaLimiter on the header -> the ceiling half skips, the rest computes.
+    # THE NOT-EXPOSED CASE, and it is the one this whole mechanism exists for. One quiet sample:
+    # AoA 5 deg against a 17 deg ceiling, both gates wide open, the law commanding a mild nose-up.
+    # THIS ASSERTION USED TO READ THE OTHER WAY -- it required commandIntoCeilingPct == 0.0, "not
+    # missing", on the reasoning that "the card never reached the regime" is a real answer. It is a
+    # real answer about the CARD and it is no answer at all about the LAW, and published as a 0.00 it
+    # became a PASS on 512 oblique legs and 5 of 8 alpha lanes (SESSION-2026-08-02.md 1.15).
+    #   aoaAboveCeilingPct STAYS 0.0: it is the exposure signal, not a score (ALPHA-CARD-REDESIGN 5),
+    #   and NULLing it would leave nothing to test the others against.
+    calm, cskip_a = alpha_metrics([dict(arows[0])], acols, afbw)
+    assert calm["aoaAboveCeilingPct"] == 0.0, calm             # exposure signal: always published
+    for k in ("commandIntoCeilingPct", "qSchedMin", "aoaRecoverActivePct", "aoaRecoverPeak",
+              "gateMinUp", "gateMinDn"):
+        assert k not in calm, (k, calm)                        # NULL, never the inert value
+        assert cskip_a[k].startswith(NOT_EXPOSED), (k, cskip_a[k])
+    assert "GATE_BITING" in cskip_a["commandIntoCeilingPct"], cskip_a     # the reason names the gate
+    assert ":1280" in cskip_a["aoaRecoverActivePct"], cskip_a            # ...and the line of law
+    # The ONE-SIDED card (ALPHA-CARD-REDESIGN 5, gateMinDn): alphaPull provokes the up gate only, so
+    # gateMinUp is a measurement and gateMinDn is non-exposure -- on the SAME segment.
+    pull = [dict(r, aoaGD=1.0) for r in arows]
+    pm, pskip = alpha_metrics(pull, acols, afbw)
+    assert abs(pm["gateMinUp"] - 0.2) < 1e-9 and "gateMinDn" not in pm, pm
+    assert pskip["gateMinDn"].startswith(NOT_EXPOSED), pskip
+    # ...and the clause that stops it ever false-NULLing a gate that DID bite: the gate runs on
+    # predicted AoA, so a gate below 1.0 is published even when the recorded AoA stayed out of the
+    # band entirely (here: |aoa| <= 5, band onset 12 deg).
+    early = [dict(r, aoa=5.0, aoaGD=0.4) for r in arows]
+    em, _ = alpha_metrics(early, acols, afbw)
+    assert abs(em["gateMinDn"] - 0.4) < 1e-9, em
+    # ...and the mirror: AoA reaches the band, gate holds at 1.000. That IS a reading -- "provoked
+    # and held" -- and must survive.
+    held = [dict(r, aoa=13.0, aoaGU=1.0, aoaGD=1.0) for r in arows]
+    hm, _ = alpha_metrics(held, acols, afbw)
+    assert hm["gateMinUp"] == 1.0, hm                          # onset 12.0, aoa 13.0: exposed
+    assert aoa_fade(afbw) == 5.0 and aoa_ceiling(afbw) == 17.0, afbw     # mirrors :1222 / :1216
+    assert aoa_fade({"alphaLimiter": 10.0}) == 4.0 and aoa_fade({}) is None    # the max(4,..) floor
+    # pre-v0.55 capture: no alphaLimiter on the header -> the ceiling half skips, and the recovery
+    # pair goes with it, because "did AoA cross the ceiling" is exactly what cannot be answered
+    # without one. Unevaluable is NOT exposed -- see require_exposure.
     _, s_nolim = alpha_metrics(arows, acols, {})
-    assert set(s_nolim) == {"aoaCeilDeg", "aoaAboveCeilingPct", "aoaPeakOverCeiling"}, s_nolim
+    assert set(s_nolim) == {"aoaCeilDeg", "aoaAboveCeilingPct", "aoaPeakOverCeiling",
+                            "aoaRecoverActivePct", "aoaRecoverPeak"}, s_nolim
+    assert s_nolim["aoaRecoverPeak"].startswith(NOT_EXPOSED), s_nolim
+    assert not s_nolim["aoaCeilDeg"].startswith(NOT_EXPOSED), s_nolim    # missing column != unexposed
 
     # allocation_metrics — mean|outR| = 0.4, mean|outY| = 0.1 -> 0.8 roll; 1 of 4 samples has both
     # channels live with opposite signs (row 2); the sub-deadband row 4 must NOT count as opposed.
@@ -2275,6 +2541,89 @@ def selftest():
     assert abs(ah["metrics"]["aoaAboveCeilingPct"]["value"] - 25.0) < 1e-9, ah
     assert compute_segment("alphaPull", "alpha_step", ah_rows,
                            acols | {"t"}, {"fbw": afbw})["metrics"]["gateMinUp"]["value"] == 0.2
+    # C2's exposure, through compute_segment because that is where it is applied: the AoA relay
+    # count is a measurement where the gate moved, and non-exposure where it never did.
+    assert "wobbleEpisodesAoa" in ah["metrics"], ah                       # gateMinUp 0.2: exposed
+    quiet_alpha = [dict(arows[0], t=i * 0.1) for i in range(40)]          # gates flat at 1.0
+    qa = compute_segment("alphaHold", "alpha_hold", quiet_alpha, acols | {"t"}, {"fbw": afbw})
+    assert "wobbleEpisodesAoa" not in qa["metrics"], qa["metrics"]
+    assert qa["skipped"]["wobbleEpisodesAoa"].startswith(NOT_EXPOSED), qa["skipped"]
+
+    # --- (A) THE ROTORCRAFT SEGMENTS REACH THE OSCILLATION DETECTOR ------------------------------
+    # The gap: infer_type has resolved hover/hoveryaw/bobup/bobdn correctly since v0.71 (asserted
+    # above), but compute_segment's TYPE GATE only ever called wobble_scan for fine_track, reversal,
+    # astern_wrap, oblique_step and alpha_*. So the one batch in the corpus carrying a measured
+    # rail-to-rail limit cycle (R39-rotor 1c) is the one batch the detector never ran on. A 25 s
+    # square-wave azErr with the pedal on both stops is that batch's shape, exaggerated to something
+    # the evidence rule can actually resolve.
+    hf, hdt = 0.4, 0.0625
+    sq = lambda i: 1.0 if math.sin(2 * math.pi * hf * i * hdt) >= 0 else -1.0
+    hov_rows = [{"t": i * hdt, "azErr": 40.0 * sq(i), "outY": sq(i), "outR": 0.005, "outP": 0.0,
+                 "posX": 0.0, "posY": 0.0, "posZ": 0.0, "alt": 2160.0}
+                for i in range(400)]
+    hcols = {"t", "azErr", "outY", "outR", "outP", "posX", "posY", "posZ", "alt"}
+    for tag, st in (("hoveryawR", "hover_hold"), ("bobdn", "bobup")):
+        hs = compute_segment(tag, st, hov_rows, hcols, {"cfg": satcfg, "fbw": satfbw})
+        hm2 = hs["metrics"]
+        assert "wobbleCoherenceAzErr" in hm2, (tag, sorted(hm2))       # the detector ran at all
+        assert abs(hm2["wobbleFreqHzAzErr"]["value"] - hf) < 0.02, (tag, hm2["wobbleFreqHzAzErr"])
+        assert hm2["stickFlipRateY"]["value"] > 0.5, (tag, hm2["stickFlipRateY"])
+        # ...and the column that did not exist at all: a pedal on the stop for the whole segment.
+        assert abs(hm2["stickRailPctY"]["value"] - 100.0) < 1e-9, (tag, hm2["stickRailPctY"])
+        assert hm2["stickRailPctR"]["value"] == 0.0 and hm2["stickRailPctP"]["value"] == 0.0, tag
+        assert is_railed(hs) and "stickRailPctY=100.0%" in rail_warning(hs), rail_warning(hs)
+    # the rail threshold is an occupancy, not a peak: one sample on the stop is not a railed segment.
+    one_hit = [dict(r, outY=(1.0 if i == 0 else 0.2)) for i, r in enumerate(hov_rows)]
+    assert saturation_metrics(one_hit, hcols, satcfg, satfbw)[0]["stickRailPctY"] < 1.0
+
+    # --- (B) NULL IS NOT RANKABLE ----------------------------------------------------------------
+    # The rotorcraft false rail, end to end. bankTR is 81.75 against a 72 deg clamp -- a textbook
+    # 100% -- but heliBlend is 1.000, so ChaseController deleted that demand at :1875 and the roll
+    # channel never moved (|outR| 0.005). scorecard stamped exactly this segment RAILED at 100.0%
+    # and the flag is in captures.db today (R39-rotor 1d).
+    rot_rows = [dict(r, bankTR=81.75, spd=25.0, airDensity=1.2, assist=1.0, aoaGU=1.0, heliBlend=1.0)
+                for r in hov_rows]
+    rot_cols = hcols | {"bankTR", "spd", "airDensity", "assist", "aoaGU", "heliBlend"}
+    rm2, rskip2 = saturation_metrics(rot_rows, rot_cols, satcfg, satfbw)
+    assert "bankClampActivePct" not in rm2 and "bankDemandExcessDeg" not in rm2, rm2
+    assert rskip2["bankClampActivePct"].startswith(NOT_EXPOSED), rskip2
+    assert ":1875" in rskip2["bankClampActivePct"], rskip2               # the reason names the gate
+    # ...and it is the BLEND that withdraws it, not the airframe or the tag: a wing-borne tiltrotor
+    # keeps its clamp metric, and so does a fixed wing (heliBlend 0 -> dead column -> not in `cols`).
+    assert abs(saturation_metrics([dict(r, heliBlend=0.1) for r in rot_rows],
+                                  rot_cols, satcfg, satfbw)[0]["bankClampActivePct"] - 100.0) < 1e-9
+    assert abs(saturation_metrics([dict(r, heliBlend=0.0) for r in rot_rows],
+                                  rot_cols - {"heliBlend"}, satcfg, satfbw)[0]["bankClampActivePct"]
+               - 100.0) < 1e-9
+    # THE THRESHOLD IS ON THE MEDIAN, AND IT IS NOT AN EQUALITY. The real captures run 0.94-1.00 and
+    # never a clean 1.000 -- AttackHelo1 rec364's `hover` has EVERY sample under 0.999 -- so a test
+    # for "identically 1" publishes the exact reading it exists to withdraw. Both cases asserted:
+    assert "bankClampActivePct" not in saturation_metrics(
+        [dict(r, heliBlend=0.94) for r in rot_rows], rot_cols, satcfg, satfbw)[0]
+    part = [dict(r, heliBlend=(0.0 if i < 5 else 1.0)) for i, r in enumerate(rot_rows)]
+    assert "bankClampActivePct" not in saturation_metrics(part, rot_cols, satcfg, satfbw)[0]
+
+    rot_seg = compute_segment("hoveryawR", "hover_hold", rot_rows, rot_cols,
+                              {"cfg": satcfg, "fbw": satfbw})
+    unexposed = {k for k, v in rot_seg["skipped"].items() if v.startswith(NOT_EXPOSED)}
+    # THE GUARANTEE, stated structurally: a withdrawn metric is absent from "metrics" entirely, so
+    # no consumer can rank, diff or threshold it -- compare-runs.py builds its spread from the keys
+    # present, index-captures.py writes no value so the SQL column is NULL, and railed_metrics()
+    # below cannot see it. There is no representation of it that a reader could coerce to 0.0.
+    assert unexposed and not (unexposed & set(rot_seg["metrics"])), (unexposed, rot_seg["metrics"])
+    # ...and the ranking consumer that lives in THIS file, on the exact case that misfired: the raw
+    # bankClampActivePct is 100.0 and it must be unable to produce a rail. The pedal rail, which is
+    # real, still does -- so this is the flag moving to the right column, not the flag going away.
+    assert not any(h.startswith("bankClampActivePct") for h in railed_metrics(rot_seg)), rot_seg
+    assert "stickRailPctY=100.0%" in rail_warning(rot_seg), rail_warning(rot_seg)
+    # require_exposure itself: exposed leaves a genuine 0.0 alone (a measured zero is a measurement),
+    # and a metric already absent gets no second reason written over its first.
+    _m, _s = {"x": 0.0}, {}
+    require_exposure(_m, _s, ("x",), True, "why")
+    assert _m == {"x": 0.0} and _s == {}, (_m, _s)
+    _m, _s = {}, {"x": "missing column: x"}
+    require_exposure(_m, _s, ("x",), False, "why")
+    assert _s == {"x": "missing column: x"}, _s
 
     # THE SHIPPED CARDS THEMSELVES (cards/*.json). This is the drift check CLAUDE.md warns about --
     # the card files and this table have no compile-time link, and that pair silently broke once

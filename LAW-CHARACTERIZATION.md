@@ -19,13 +19,13 @@ or a query named in place; re-derive rather than trusting this table's age.**
 
 | | |
 |---|---|
-| cards in `cards/` + built-ins | **34** (31 on disk + `fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) |
-| cards ever flown | **24** distinct ids — **19 of the 31** disk cards, 3 built-ins, 2 ad-hoc recordings |
-| disk cards never flown | **12** — both `alpha-*`, all five `e*`, `oblique-above-c`, both `rotor-*`, both `stol-*` |
-| captures / scored segments / recorder rows | **1 681 / 5 903 / 999 942** across **26** tagged batches R1–R33 |
-| airframes ever flown *on a card* | **10** (every fixed-wing key in `AIRFRAMES.md`; `AttackHelo1` has one hand-flown capture and no card) |
-| airframes the ONE-LAW rule names | **4** (light jet at high q, loaded jet near α, STOL trainer, hovering helo) — **3 of 4 covered**; the hovering helo is still §4 Batch 5, still blocked |
-| segments RAILED corpus-wide | **285 of 5 903 = 4.8%**, and they concentrate in five cards |
+| cards in `cards/` + built-ins | **39** (**36** on disk + `fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) — was 34 |
+| cards ever flown | **38** distinct ids (was 24) |
+| disk cards never flown | **4** (was 12) — `e1-below-control`, `e1-below-suppress`, `e1b-align-lead`, `oblique-above-c`. **The whole `e1*` belowness axis is what is left unflown**, and it is §4 Batch 4's E1. Both `alpha-*`, both `rotor-*`, both `stol-*`, `e2` and `e3` have now flown (R39) — but see the ONE-LAW row: flying is not measuring. |
+| captures / scored segments / recorder rows | ~~1 681 / 5 903 / 999 942 across 26 tagged batches R1–R33~~ → **2 576 / 11 015 / 2 117 598** across **31** tagged batches **R1–R40** (2026-08-02). Re-derive with `--stats`; do not trust this cell's age. |
+| airframes ever flown *on a card* | **13** (was 10) — all ten fixed-wing keys plus `AttackHelo1`, `UtilityHelo1`, `QuadVTOL1` since R39 |
+| airframes the ONE-LAW rule names | **4** — **2 of 4 genuinely covered, NOT 3 and not 4.** Both remaining cases now have captures and *still have no valid measurement*: the **hovering helo** flew 48 captures in R39 but `_heloOk` was **false on all 48**, so the v0.58 rotorcraft branch never executed and they measure the pre-v0.58 law (`debugtests/R39-rotor.md` §1a); the **STOL trainer** flew 53 but the card's declared 90 m/s was never held — eight of ten lanes reached **340–381 m/s, 2.1–2.4× corner** (`debugtests/R39-stol.md` §2). The **loaded jet** case has never been flown at all (a card cannot set stores). Both re-flies are gated on Tier 1 code fixes. |
+| segments RAILED corpus-wide | ~~285 of 5 903 = 4.8%~~ → **406 of 8 294 = 4.9%** (non-excluded, 2026-08-02) |
 
 **Saturation is no longer the project's defining constraint — it is a property of five cards.**
 Per-card mean over every scored segment (`GROUP BY card`, `excluded = 0`):
@@ -297,8 +297,8 @@ no comparability — neither has ever been flown. `cards/TOMORROW.md` is the ord
 |---|---|---|---|
 | E1 | `Control/BelowAlignSuppress` | `oblique-below-c` + `oblique-6-c` + **`oblique-above-c`** | **v0.96: a 3-POINT AXIS, not a mirror pair.** `alignFracH` at −20 / 0 / +20 makes the belowness response a line rather than a difference; `oblique-6-c` is the control and **must not move**. All three arms want the SAME session to be readable as an axis. |
 | E1b | `Control/AlignRateLead` | same | separate arm — it is also a 64% roll-damping change, unattributable if armed together |
-| E2 | `Control/RelativeTurnLead` | `sweep-slow` | the v0.83 A/B re-run *unsaturated*; the existing result measures the clamp |
-| E3 | `Control/MarkerRateFeedForward` | `sweep-slow`, `sweep-creep` | above the rail its roll contribution is identically 0.0000 |
+| ~~E2~~ | ~~`Control/RelativeTurnLead`~~ | ~~`sweep-slow`~~ | **RETIRED — UNFLYABLE 2026-08-02.** The knob and its branch were **deleted in v0.99.1**, and its card `e2-rel-turn-lead.json` was deleted with them. R39-D swept it and it is spent: the term stays relative, only the lever is gone. Do not schedule this arm; `Scenario/ScenarioArmToggle = RelativeTurnLead` now names nothing and will fail-soft to sweeping nothing. |
+| E3 | `Control/MarkerRateFeedForward` | `sweep-slow`, `sweep-creep` | ~~above the rail its roll contribution is identically 0.0000~~ **PREMISE REFUTED 2026-08-02 (R39-D) — but FLY IT ANYWAY, for the opposite reason.** Roll stick is the wrong observable for a term that moves a *target*: the feed-forward is worth **55–58% of the standing azimuth error**, and with it OFF the aircraft skids (`\|outY\|` 2–4× higher). What is still worth measuring is the **rail contamination**: the 57% was measured with three airframes on the 72° `MaxBankAngle` wall. Re-fly at `startSpeedCorner: 0.75`, throttle pinned. See `GENERALITY-REVIEW.md` finding 16. |
 | E4 | **#21** roll-to-align channel (`lateralHold` ⇒ `blendWeight`) as the arm — the **precursor** | `darkreach-05` geometry | R32 §4: 34–56° of `targetBank` at \|`azErr`\| < 5° on a card whose largest step is 0.35°, on **0 of recs 01–31** and **12 of recs 32–63**. Those 31 clean replicates are the baseline, on the same airframe and card. **Fly this before E5** — see #45. **⚠ AS WRITTEN THIS CANNOT RETURN A RESULT — see the note below.** |
 | E5 | **#45** `schedFloor`, expressed relative to a probed quantity | same | Only after E4. Fixing the stand-down first makes *some* departures survivable, which is worse than a departure that is legible. |
 
@@ -389,7 +389,9 @@ assigned numbers concurrently. Three rules, because all three were broken at onc
 
 1. **A number is allocated here first, and it is `max(existing) + 1`.** Never reuse a gap — the gaps
    (15–18, 22, 24, 26, 28, 32, 35, 40, 42, 43) are retired numbers, and a reused one reads as a
-   *different* item in every document that already cites it. Highest in use is **#46**.
+   *different* item in every document that already cites it. ~~Highest in use is **#46**.~~
+   **STALE — highest in use is #80, in a scheme this table does not carry. See RECONCILIATION below
+   before allocating or citing anything.**
 2. **`GENERALITY-REVIEW.md` findings are a SEPARATE namespace.** `R32-FINDINGS.md` cites
    "`GENERALITY-REVIEW.md` #16" and "#18"; those are that file's finding numbers, not backlog
    numbers, and backlog #16/#18 do not exist. Write the filename with the number or don't write it.
@@ -400,6 +402,92 @@ assigned numbers concurrently. Three rules, because all three were broken at onc
    and needs no number** — it is experiment **E1** in §4 Batch 4, its card (`cards/oblique-above-c.json`)
    is already written, and its runbook is `cards/TOMORROW.md` §8. A shipped card with a runbook entry
    is not backlog. Do not re-number E1 into this table.
+
+---
+
+### RECONCILIATION 2026-08-02 — this table is BEHIND, and three schemes are in play
+
+**Read this before citing any `#n`.** Rule 1 above still says "highest in use is #46". That is false as
+of 2026-08-02. Reconciled by reading every `#n` occurrence in the repo:
+
+| scheme | range | where it lives | status |
+|---|---|---|---|
+| **A — this table** | #14 … #46, gaps 15–18, 22, 24, 26, 28, 32, 35, 40, 42, 43 retired | `LAW-CHARACTERIZATION.md` §7 | The documented authority. **Behind by ~34 numbers.** |
+| **B — the working task list** | #1 … **#80** | the session task list; cited by `CHANGELOG.md` and `debugtests/SESSION-2026-08-02.md` | Live and in active use. **Not on disk anywhere** except through its citations. |
+| **C — per-document follow-ups** | `#53a–c`, `#54a–e`, `#55a–g` | `R36-FINDINGS.md` (53), `R37-FINDINGS.md` (54), `R39-*.md` (55) | Document-local. The **number is the document**, the letter is the item. Not backlog numbers. |
+
+**Where A and B disagree — the part that will cause a real misreading:**
+
+1. **`#46` means two different things.** In scheme A, #46 is the `SplitSpec` one-slash divergence,
+   **CLOSED in v0.96** — re-verified 2026-08-02, `python debugtests/test-spec-grammar.py` passes both
+   halves. In scheme B, #46 is **open**. They are not the same item. Never write a bare `#46`.
+2. **`ledger #51` and `ledger #12` do not exist in this table**, yet both are cited *as ledger numbers*
+   in `ARCHITECTURE.md`, `CLAUDE.md`, `CHANGELOG.md`, `cards/ALPHA-CARD-REDESIGN.md`,
+   `debugtests/R37-FINDINGS.md` and `debugtests/SESSION-2026-08-02.md`. They are **scheme B** numbers
+   mislabelled "ledger". Their meanings are unambiguous from context and worth recording here:
+   - **#51 — the placement part-shed bug.** OPEN and *instrumented, not fixed*; two attempted fixes are
+     in the `MoveAssembly` graveyard (v0.96.1 tautological audit; v0.97.0 `Repair`, which killed 32/32
+     placements). The bar for a third attempt is `R39-F-darkreach-damage.md` §9. See `CLAUDE.md` →
+     `ScenarioPlayer.cs`.
+   - **#12 — the per-replicate reset shape**: every field `Finish` resets must also be reset by
+     `NextCard`. Now enforced as a `check-architecture.py` invariant (v0.99.1).
+3. **Scheme-B numbers cited as shipped in v0.99.1 — #61, #63, #70, #71 — are CLOSED**, and are
+   correctly absent from the open list. This is a consistency check that scheme B is being maintained.
+4. **`GENERALITY-REVIEW.md` findings remain a fourth, separate namespace** (rule 2 above). Finding 16 ≈
+   backlog #21; finding 18 ≈ backlog #45. Write the filename or write nothing.
+
+**The open set as of 2026-08-02 (scheme B):**
+`#45 #46 #47 #51 #53 #54 #55 #59 #62 #64 #66 #72 #73 #74 #75 #76 #77 #78 #79 #80` — 20 items.
+
+**UNVERIFIED, and deliberately not guessed:** only **#45**, **#51** and **#64** (the wrong R35
+`alpha-steps` figure — *fixed* 2026-08-02 in `plans/next-card-grid.md` and `LAW-WEAKNESS-MAP.md`; the
+correct result is 7 of 8 airframes on the limiter, 2 of 8 past the ceiling) can be mapped to content
+from disk evidence. **#53/#54/#55 are probably the R36/R37/R39 document follow-up bundles** (scheme C),
+but that is an inference from the number matching, not a verified mapping. The remaining twelve —
+#47, #59, #62, #66, #72–#80 — **have no disk evidence of their content at all.** They are listed so a
+reset agent knows the count is 20 and that the ledger cannot yet resolve them.
+
+**The substantive open work IS recoverable from disk** even where the numbers are not — it is
+enumerated below and in `debugtests/SESSION-2026-08-02.md` §5, which is the authority on ordering.
+**To repair this properly: the next agent holding the live task list should write its 20 open items
+into the table below with their scheme-B numbers, then delete scheme A or renumber it into B.**
+Two schemes with one overlapping, contradictory number is the worst of the three states.
+
+---
+
+### Open work, from disk (2026-08-02) — content, ordered; numbers per the caveat above
+
+Source: `debugtests/SESSION-2026-08-02.md` §5, which carries the dependency argument for the ordering.
+
+**Tier 0 — before anything flies.** Deploy v0.99.1 and re-copy `cards/*.json` (every card written
+2026-08-02 pins `Scenario/ScenarioThrottle`, and on v0.98.1 those pins are **process-global** — the
+first lane to finish un-pins them under everyone still flying); delete `e2-rel-turn-lead.json` from the
+game load path; re-run `--with-rows` per batch (`rows` is **empty** after the rebuild); archive R39 out
+of `<game>` before `LogOutput.log` is overwritten.
+
+**Tier 1 — code fixes that gate a re-fly.** (a) the **helo probe call order** — re-probe when
+`_collective` changes, not only when the aircraft does; nothing rotorcraft is worth re-measuring until
+this lands. (b) `bankClampActivePct` must not fire on a rotorcraft. (c) `wobble_scan` on the
+`hover_hold` / `bobup` arms — two lines, and it is the entire rotorcraft wobble vocabulary.
+(d) the `qSched` 0.3 floor, before the STOL re-fly. (e) `dmgFrac` — write the row **before** the abort
+check. (f) `ArmOf(0) = 0`.
+
+**Tier 2 — docs the checker cannot see.** The v0.94 fleet-ABBA safety argument in `CLAUDE.md`; the
+`DroneAltDeckM` default contradiction; two load-bearing corrections to the `MoveAssembly` graveyard;
+`alpha-sweep`'s note miscalling the 5.0-gLimit airframes; the `[card] start` line's wrong derived sweep
+rate; `aoaPeakDeg` / `aoaLimiterActivePct` printed unqualified below ~20 m/s.
+
+**Tier 3 — design content, not yet decided.** `aoaFade`'s floor should key off the lead overshoot the
+mod already computes (**do not ship without `alpha-pullup` flown twice**); the **roll twin of
+`_pitchEff`** (= `LAW-WEAKNESS-MAP.md` W2, the largest structural ONE-LAW gap); the rotorcraft outer
+loop (`HeliYawScale`, `heliFwd`/`heliHover` and `kHelo` are all absolute constants — `AttackHelo1`
+**can never leave the hover regime at any speed it can fly**).
+
+**Standing holes.** The **loaded case (ONE-LAW case 2) is still unflown** and a card cannot set stores —
+it needs a hand-flown capture with heavy stores at `alpha-pullup`'s entry condition. Nothing in the
+corpus scores **gun-solution dispersion**, so "1° of nose wander at 0.43 Hz" has no cost attached.
+
+---
 
 Ordered by when it unblocks something, not by severity.
 
@@ -424,7 +512,7 @@ These are Q4. All four are invisible in a railed regime, which is why the baseli
 | **#38** | Card **altitude budget** unchecked at preflight. Measured on R27: `oblique-below` loses 4323 m worst-replicate, `sweep-lowq` 3069 m — both would finish **below sea level** from a 1500 m start. `FastBomber1` is the heaviest sinker on every card. | Same shape as v0.92's speed gate; no per-airframe bound exists, so the check is card-vs-floor, not card-vs-airframe. |
 | **#39** | `startSpeed: 0` means **both** "hover" and "not specified". | **Blocks the rotorcraft phase.** Fix with a nullable `float?` — Newtonsoft distinguishes absent from explicit 0, which `JsonUtility` could not. Do it together with the hover entry condition. |
 | **#25** | `RecordKey` silently fails to stop a capture when the local aircraft is gone. | Minor; operator-facing only. |
-| **#19** | Drone **loadout** matrix — the `Spawn` parameter is a `Loadout` object, not a name. | Blocked on one in-game dump. The sidecar already records resulting stations/masses/drag, so nothing on the analysis side changes when it lands. |
+| **#19** | Drone **loadout** matrix — the `Spawn` parameter is a `Loadout` object, not a name. | Blocked on one in-game dump. The sidecar already records resulting stations/masses/drag, so nothing on the analysis side changes when it lands. **Written up in `plans/drone-loadout-seam.md`** (every claim graded VERIFIED / INFERRED / UNKNOWN) — read it first: the slot already exists as the argument `TestDrone.Spawn` passes `null` for, so the work is *choosing what a config string names*, not plumbing. **This gates ONE-LAW standing case 2, the loaded jet, which has never been flown at all** — a card cannot set stores. |
 
 ### Closed by the last three releases
 

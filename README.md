@@ -99,6 +99,22 @@ flight model.
 
 ---
 
+## Known limitations
+
+Measured, not guessed — from the automated flight corpus (see `debugtests/`).
+
+- **Rotorcraft in a low-speed hover are the weakest case.** Every airframe flies off the reticle, but
+  in a near-zero-speed hover the yaw channel can fall into a slow side-to-side oscillation on some
+  helicopters. Forward flight is unaffected. Being worked on; if you fly helos mostly in the hover,
+  expect it to feel less settled than a jet does.
+- **Very high speed, very small corrections** can leave a fraction of a degree of standing aim error
+  rather than settling dead on. It is small enough to be a gunnery nicety, not a handling problem.
+
+Neither is a safety or stability issue — the game's own fly-by-wire still governs the envelope
+underneath the mod.
+
+---
+
 ## Install
 
 ### Option A — via NOMM (recommended, easiest)

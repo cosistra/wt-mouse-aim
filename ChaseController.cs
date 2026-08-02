@@ -278,6 +278,18 @@ namespace NuclearOptionMouseAim
         private TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
         private SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
         private bool _hasCompound;                        // CompoundHeloController present (log-only for now)
+        // THE _collective THIS PROBE LAST RAN UNDER (v1.0.0) — and the reason the probe is retryable.
+        // ResolveHelo reads _collective, which BeginFrame latches; it was called ONLY from ResolveFbw's
+        // aircraft-change edge, and on the DRONE path that edge fires from ManeuverRecorder's `# fbw`
+        // header write (ScenarioPlayer.StartCard -> Toggle -> FbwHeader -> ResolveFbw) BEFORE the
+        // aircraft's first BeginFrame. So the probe early-returned on _collective == false and the edge
+        // was CONSUMED: _heloOk stayed false for the life of the aircraft and the whole v0.58 rotorcraft
+        // branch was dead on every drone capture ever taken (48/48 in debugtests/R39-rotor.md, proven by
+        // reconstruction to a median 0.0005 stick units and by ZERO [helofbw] lines against 12 [canard]).
+        // The trigger was the wrong edge for an input written after it, so the probe now carries its own:
+        // ResolveFbw re-asks every call and re-probes when the answer has changed. Fixed-wing is
+        // BYTE-IDENTICAL — _collective is false at the edge and stays false, so the retry never fires.
+        private bool _heloProbedAs;
 
         // =========================================================================================
         // THE REGISTRY (v0.82) — one controller per aircraft, keyed by Aircraft.GetInstanceID(),
@@ -571,6 +583,11 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogWarning($"[fbw] probe failed for this airframe ({e.Message}) — v0.55 normalization inactive.");
                 }
             }
+            // v1.0.0 — RETRY the helo probe when the class latch it reads has changed since it last ran.
+            // One bool compare on the hot path; fires at most once per aircraft, and only for a rotorcraft
+            // whose first ResolveFbw beat its first BeginFrame (the drone order — see _heloProbedAs). `else`
+            // because the edge above has already re-probed under the current _collective.
+            else if (_collective != _heloProbedAs) ResolveHelo(ac);
             return _fbwEnabled && _fbwFbw != null && _fbwCorner > 1f && _fbwGLimit > 0.1f;
         }
 
@@ -635,6 +652,11 @@ namespace NuclearOptionMouseAim
         // the archetype refs null — exact pre-0.58 behaviour (hot direct gains, speed-only blend).
         private void ResolveHelo(Aircraft ac)
         {
+            _heloProbedAs = _collective;  // FIRST statement, and on every path: this is what makes the
+                                          // probe idempotent instead of one-shot. Set before the early
+                                          // return so a fixed-wing records "probed as fixed-wing" and
+                                          // never retries, and before the try so a throwing probe is not
+                                          // re-run every fixed step for the rest of the flight.
             _heloOk = false; _twc = null; _sds = null; _hasCompound = false;
             if (!_collective) return; // fixed-wing: nothing to probe, keep the refs null
             try
@@ -1740,6 +1762,10 @@ namespace NuclearOptionMouseAim
                         aircraft.flightAssist, fbwTgtPR, fbwPR,
                         tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn, _aimAzRateFilt,
                         iGate, leadDeg, _belowSup, _blendW, _phiLead,
+                        // v1.0.0 PROBE LIVENESS. fbwResolved is ResolveFbw's return (the probe), NOT the
+                        // narrower `fbwOk` local a few lines up. The canard bit is the bound controller,
+                        // the same thing the [canard] line reports as `field=`.
+                        fbwResolved, _rsCtrl != null, _heloOk,
                         aircraft); // M0: the recorder reads alt/airDensity/pos/vel off it (fail-soft)
                 }
 

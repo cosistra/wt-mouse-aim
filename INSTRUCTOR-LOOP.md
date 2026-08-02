@@ -106,7 +106,7 @@ means NOT MEASURED and is never rendered as `0.0`.
 | column | reads | fired when |
 |---|---|---|
 | `iGate~` / `iStal%` | the wind gate the fine integrator used; % of time it was open **outside the fine cone** | `iStal%` is 0.0 **by construction** with `IntegralStallGate` off (`iGate == fineBlend == 0` there), so any value > 0 is the v0.83 gate firing |
-| `lead` / `floor%` | median `\|leadDeg\|/\|azErr\|`; % of time `predFloor` bound | R21 baseline **0.84 / 100%**. `RelativeTurnLead` working in a matched turn drives `lead` toward 0 |
+| `lead` / `floor%` | median `\|leadDeg\|/\|azErr\|`; % of time `predFloor` bound | R21 baseline **0.84 / 100%**. ~~`RelativeTurnLead` working in a matched turn drives `lead` toward 0~~ — knob **deleted v0.99.1**; the lead term is now unconditionally relative, so this row has no arm behind it |
 | `bSup~` / `r(bSup)` | below-nose suppression applied; its correlation with `\|azErr\|` | `r(bSup)` is the **disarm signature**: the deleted `(1 − lateralHold)` factor made the suppressor shrink as the error it creates grew. Clearly negative ⇒ that factor is back |
 | `bWt~` / `r(bWt)` / `sham` | the roll blend weight after suppression — the loop gain — its correlation with `\|azErr\|`, and the **definitional twin's** correlation | see below |
 | `phiL%` | % of time the `AlignRateLead` bearing lead was non-zero | 0 with the lever off or inside the `phiWrapGate` stand-down |

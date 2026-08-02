@@ -1,5 +1,21 @@
 # Generality review — one control law for all airframes
 
+> **READ THIS FIRST — the status blocks below stop at v0.65; the file's content runs to v0.99.1.**
+> The per-finding verdicts are the authority, not the summary blocks. As of **2026-08-02 (v0.99.1)**:
+> - **Finding 16 is a SPLIT verdict, not OPEN.** Its "the feed-forward is inert" inference is
+>   **REFUTED** by R39-D — `MarkerRateFeedForward` is worth 55–58% of the standing azimuth error, and
+>   turning it off makes the aircraft *skid*. The `blendWeight` hand-off critique in the same finding
+>   still stands. The generalisable lesson is inside finding 16 and is the most reusable paragraph in
+>   this file: **for a term that moves a TARGET, the servo output that HOLDS the target is the wrong
+>   observable.**
+> - **The law referenced throughout is `ApplyEvolvedLegacy`, and it is the ONLY law.** `Legacy`,
+>   `BankToTurn` (v0.60) and `Unified` with its enum and hotkey (v0.65) are all deleted. Findings
+>   that read "FIXED by Unified" describe a state that **no longer exists** — each already carries
+>   its own v0.65 revert note; believe the revert note.
+> - **`RelativeTurnLead` (finding-adjacent, v0.83) was DELETED in v0.99.1**, knob and branch. The
+>   term stays relative; the *lever* is gone.
+> - Findings 14, 15, 17, 18 are unaffected by the above and remain as their headings state.
+
 Audit of the control law (`ChaseController.cs`, v0.59) against the core design requirement in
 [CLAUDE.md](CLAUDE.md#conventions): **one algorithm that works for every airframe at every load
 and speed**, parameterized only by (a) per-airframe values probed from the game's own components
@@ -295,7 +311,7 @@ normalisation `Clamp01(closeRate / 6f)` is also the absolute-deg/s form the v0.8
 comment explicitly forbids as "a per-airframe constant in disguise"; the right denominator
 (`omegaMax`, probed + live) is computed two blocks away.
 
-### 16. HIGH — `lateralHold` rails and disconnects the ENTIRE bank pipeline — OPEN (STRUCTURAL + MEASURED)
+### 16. HIGH — `lateralHold` rails and disconnects the ENTIRE bank pipeline — SPLIT VERDICT (2026-08-02): the `blendWeight` hand-off critique is OPEN; the "feed-forward is inert" inference is **REFUTED**
 `lateralHold` rails at `FineBankDeadzone + EvolvedAlignHoldDeg` = **7.5°**, and at the rail
 `blendWeight = 1`, so `eFine` — the only carrier of `tBankE` — has weight **exactly zero**. A
 standing lag above 7.5° therefore disconnects the machinery whose job is to reduce it, and the

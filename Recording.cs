@@ -243,7 +243,29 @@ namespace NuclearOptionMouseAim
             // six lanes they correlate with jitter at -0.810 and +0.962 respectively.
             "datumX," +
             "datumY," +
-            "datumZ";
+            "datumZ," +
+            // v1.0.0. PROBE LIVENESS, one bit each — did the FBW / canard / helo probe actually RESOLVE
+            // for this aircraft? Every one of them is fail-soft by design, which is right, and which is
+            // exactly why a silent miss looks like nothing: the law falls back to the pre-probe path and
+            // writes a perfectly plausible capture. The v0.58 rotorcraft branch was dead on ALL 48 drone
+            // rotorcraft captures for 40 versions (debugtests/R39-rotor.md §1a) and establishing that took
+            // a row-by-row reconstruction of outY against both candidate formulas plus a grep of a log
+            // file that is overwritten every session — because the probe's own log line sits AFTER the
+            // early return that was firing, so its absence was the only evidence and absence is not
+            // greppable per capture. Three bits make it `select heloOk from rows limit 1`.
+            //   fbwOk  = ResolveFbw()'s RETURN — the probe. NOTE it is deliberately NOT Apply's local
+            //            `fbwOk`, which is this AND !collective: on a rotorcraft this column reads 1
+            //            while every v0.55 fixed-wing normalization stays correctly off. Two different
+            //            quantities, so read this one as "the FBW block was readable", nothing more.
+            //   canOk  = the canard probe bound a RelaxedStabilityController (the [canard] line's
+            //            `field=`). 1 on the Ifrit only; it does NOT mean the remap is live this frame
+            //            (that also needs engine-on and V > 30 m/s — CanardActive).
+            //   heloOk = the helo FBW resolved, Enabled and sane, i.e. the gate on the v0.58 rate
+            //            normalization and authority bound. 0 on a rotorcraft means the capture measures
+            //            the PRE-v0.58 law and must not be quoted as evidence about the shipped one.
+            // Constant for a whole capture in every normal case, and that is fine — the dead-column
+            // invariant withdraws an identically-zero column, which is itself the finding here.
+            "fbwOk,canOk,heloOk";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -493,6 +515,7 @@ namespace NuclearOptionMouseAim
             float tgtPRaw, float aoaGU, float aoaGD, float aoaRec, float qSched, float pEff, bool settleOn,
             float aimRate, float iGate, float leadDeg,
             float bSup, float bWt, float phiLead,
+            bool fbwOk, bool canOk, bool heloOk,
             Aircraft ac)
         {
             if (_w == null) return;
@@ -555,7 +578,8 @@ namespace NuclearOptionMouseAim
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
                     $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}," +
                     $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000},{origDist:0.0}," +
-                    $"{datum.x:0.0},{datum.y:0.0},{datum.z:0.0}");
+                    $"{datum.x:0.0},{datum.y:0.0},{datum.z:0.0}," +
+                    $"{(fbwOk ? 1 : 0)},{(canOk ? 1 : 0)},{(heloOk ? 1 : 0)}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }

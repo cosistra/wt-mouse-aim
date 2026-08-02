@@ -199,7 +199,7 @@ Machine-specific paths are written as placeholders:
     now describes **this recorder's** aircraft, not `GetLocalAircraft`'s (a drone capture used to name
     the player's airframe). `NoteConfigChange` broadcasts to every open recorder — every `Cfg` knob is
     process-global, so a live edit lands on every aircraft flying.
-    v0.69/0.70 added the instructor-loop instrumentation (69 CSV columns as of v0.97.0): alt/airDensity/pos/vel/
+    v0.69/0.70 added the instructor-loop instrumentation (72 CSV columns as of v1.0.0): alt/airDensity/pos/vel/
     segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
     snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
     `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
@@ -795,10 +795,19 @@ Machine-specific paths are written as placeholders:
     **same** skip-or-cancel decision an unknown `jsonKey` takes (list ⇒ skip that lane; single key ⇒
     cancel, the next lane would fail identically). Speed only: there is no service ceiling anywhere in
     the decompile (`AIRFRAMES.md` trap 5), so altitude has no per-airframe bound to check.
-    Consequence worth knowing: `rotor-*` cards declare `startSpeed: 0` meaning *hover*, `SpeedOf`
-    reads 0 as "the card doesn't say" and falls back to `DroneSpawnSpeed` (250), so a rotorcraft lane
-    now refuses on the ceiling instead of spawning at 250 m/s and decelerating — the gate exposing a
-    pre-existing mismatch, whose fix belongs in how the entry condition is expressed.
+    **Fixed in v1.0.0 — `startSpeed`/`startAlt` now carry a negative sentinel.** These are the only two
+    card fields whose physical range *includes* zero (0 m/s is a hover, 0 m MSL is the deck), and
+    JSON's default 0 was indistinguishable from an absent key, so every consumer's
+    `v > 0f ? v : Cfg.X.Value` read a declared hover as "the card doesn't say" — which is why 48
+    rotorcraft captures flew forward at `DroneSpawnSpeed` while card, log and header all said hover.
+    Both fields now initialise to `Card.Unset` (−1); Newtonsoft assigns only keys the JSON carries, so
+    the field initializer *is* the absent value. Every "did the card say?" test is `Card.Declared(v)
+    => v >= 0f` — 15 sites. `EntrySpeedFlyable` **exempts** a declared zero (its Vstall floor would
+    otherwise refuse every hover lane pre-spawn) and both entry tolerances gained a 3 m/s floor,
+    because a fraction-of-target tolerance collapses to ±0 at a hover. One marked exception,
+    `declared-zero-ok:` at `OwnInputs` — a fixed throttle at zero airspeed is a climb, not a trim.
+    Enforced by `debugtests/test-card-declared.py`, which *scans* for surviving comparisons against
+    zero rather than listing known sites, so the next one anyone adds fails the test.
     **The gate is NOT superseded by v0.93's `startSpeedCorner`** — it now also catches a card declaring
     a bad multiple (`2.0x` corner is over the Vmax ceiling on most of the roster), which is why it
     checks the resolved per-lane speed rather than the card's raw number.
@@ -1045,6 +1054,20 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   Leave `AnomalyLogging` **on**; it's cheap and it's the primary bug-report artifact.
 - **Verbose trace.** `DebugLogging` dumps per-tick detail — very noisy; turn it on only when
   chasing a specific issue, off otherwise.
+- **Card preflight — run this BEFORE flying, it is the cheapest check in the repo.**
+  `python debugtests/check-card.py cards/*.json` (stdlib-only; `--selftest` for the asserts) loads a
+  card plus the airframe table and refuses cards that cannot fly their own experiment. It exists
+  because three cards in two days did not fly the test they were named for, each failing on
+  arithmetic computable without launching the game: `alpha-sweep` demanded load through azimuth,
+  which reaches the wing only via bank, clamped at 72° = **3.24 g** against the 4.8–24 g its lanes
+  needed; `stol-*` declared 90 m/s and flew 340–381; `rotor-*` never hovered because `startSpeed: 0`
+  fell through to the live `DroneSpawnSpeed`. It checks segment tags against `scorecard.py`'s table
+  (an unknown tag is invisible to scoring), envelope + **density-corrected** stall at the card's own
+  altitude, the FBW authority knee, the throttle floor, alpha reachability, and total wall-clock.
+  Every constant is parsed from `Cfg.cs` / `ScenarioPlayer.cs` / `TestDrone.cs` / `AIRFRAMES.md` at
+  runtime and it hard-errors if a regex stops matching — a hardcoded copy here would be exactly the
+  drift the tool exists to catch. **The fallthrough table in its header is the authoritative list of
+  every card field that resolves silently**; read it before adding a card field.
 - **Offline recording tool.** `python debugtests/analyze-wobble.py <rec.csv>...` (stdlib-only) has
   two modes. **Default** scores any maneuver-recorder CSV for the death-wobble signature:
   oscillation episodes with frequency/amplitude/trend, roll-rail %, targetBank clamp %, and the

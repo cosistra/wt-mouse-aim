@@ -219,6 +219,17 @@ namespace NuclearOptionMouseAim
         private static int      _batchIdx;      // index of the entry currently flying
         private static float    _batchNextAt;   // Time.time the next entry may launch; 0 = gap not started
 
+        // THE OPERATOR'S OWN ScenarioCardSet, saved before the queue overwrites it (v1.0.0).
+        // ArmBatchEntry's write is deliberate and stays exactly as its comment describes — but it is a
+        // LOAN, not a handover, and nothing was giving it back. After the last fleet the setting still
+        // read the final entry, so the F1 panel, the run board and the next un-queued launch all quietly
+        // flew whatever the queue happened to end on, forever, with the operator's own selection gone and
+        // nothing in the log saying it had been touched. Restored on BOTH ways out — the queue running
+        // out, and the despawn key cancelling it — and in the same empty-sky window ArmBatchEntry relies
+        // on, so the restoring write cannot stamp a '# cfg' line into an open capture either.
+        // null = nothing saved, so EndBatch is a no-op and a queue-less launch never touches the setting.
+        private static string   _cardSetSaved;
+
         // Semicolon-separated, because an ENTRY is itself a comma list of card names.
         private static string[] SplitBatch(string spec)
         {
@@ -246,12 +257,37 @@ namespace NuclearOptionMouseAim
             Cfg.ScenarioCardSet.Value = _batch[_batchIdx];
         }
 
+        // Hand the setting back. Called at the two ends of a queue's life and nowhere else — both are the
+        // sky-empty window ArmBatchEntry's comment names, which is what keeps the '# cfg' stamping
+        // argument true in this direction too. Idempotent: clearing `_cardSetSaved` is what makes a second
+        // call (queue finished, then the despawn key) do nothing.
+        private static void EndBatch()
+        {
+            _batch = new string[0];
+            _batchIdx = 0;
+            _batchNextAt = 0f;
+            if (_cardSetSaved == null) return;
+            // Compared, not written blind: an operator who edited ScenarioCardSet mid-queue would
+            // otherwise get a silent second overwrite, and the log line would claim a restore that
+            // undid his edit instead of the queue's.
+            if (Cfg.ScenarioCardSet.Value != _cardSetSaved)
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[drone] batch queue over — Scenario/ScenarioCardSet restored to '{_cardSetSaved}' "
+                    + $"(the queue had left it on '{Cfg.ScenarioCardSet.Value}').");
+            Cfg.ScenarioCardSet.Value = _cardSetSaved;
+            _cardSetSaved = null;
+        }
+
         // Fleet empty, queue not finished: fly the next entry. Called from FixedTick only when
         // _pending == 0 AND _live.Count == 0, so a batch can never start while the previous one is
         // still staggering in or still despawning.
         private static void AdvanceBatch()
         {
-            if (_batchIdx + 1 >= _batch.Length) return;
+            // QUEUE EXHAUSTED. This is the one moment that is both "the last fleet is done" and "the sky
+            // is empty" (FixedTick's interlock guarantees the second), so it is where the borrowed
+            // ScenarioCardSet goes back. It used to be a bare `return`, which left the queue armed —
+            // re-entered every fixed step for the rest of the session — and the setting overwritten.
+            if (_batchIdx + 1 >= _batch.Length) { EndBatch(); return; }
             // The sky just went empty; let the last capture close and flush before the next fleet
             // spawns on top of it. Reuses the stagger knob instead of adding a second timing knob,
             // floored at 3 s because DroneStaggerSec can legitimately be 0 for a one-drone batch.
@@ -280,6 +316,9 @@ namespace NuclearOptionMouseAim
 
             _batch    = SplitBatch(Cfg.ScenarioBatchQueue.Value);
             _batchIdx = 0;
+            // BEFORE the first ArmBatchEntry, and only if nothing is saved yet: pressing the launch key
+            // again while a queue is already part-flown must not "save" the value that queue wrote.
+            if (_batch.Length > 0 && _cardSetSaved == null) _cardSetSaved = Cfg.ScenarioCardSet.Value;
             // PRINTED IN FULL BEFORE THE FIRST FLEET FLIES, for the same reason the A/B schedule is
             // (SetUpArmSchedule): the whole point of an unattended queue is that nobody is watching,
             // so a typo'd entry has to be visible in the first ten seconds instead of six hours later.
@@ -380,7 +419,7 @@ namespace NuclearOptionMouseAim
             // of whatever altitude the card asked for, so a card that declares startAlt and a knob
             // left set from a previous session combine into an entry condition neither of them names
             // — the class of mismatch that never refuses and writes a capture that scores fine.
-            if (_laneDecks > 1 && pre.StartAlt > 0f)
+            if (_laneDecks > 1 && ScenarioPlayer.Card.Declared(pre.StartAlt))
                 WTMouseAimPlugin.Log.LogWarning(
                     $"[drone] Drone/DroneAltDeckM = {_laneDeckM:0} m is being applied ON TOP OF the card's own "
                     + $"startAlt {pre.StartAlt:0} m — no lane will fly at the altitude the card declares. Set it to 0 for a single deck.");
@@ -406,7 +445,7 @@ namespace NuclearOptionMouseAim
                     $"[drone] card '{pre.Name}' ({pre.Cards} selected, {pre.Duration:0}s each, x{pre.Repeat} "
                     + $"from {pre.RepeatSrc}{armPart}): "
                     + $"airframe '{AirframeOf(pre)}' [{(string.IsNullOrEmpty(pre.Airframe) ? "DroneAirframe" : "card")}], "
-                    + $"{AltOf(pre):0} m [{(pre.StartAlt > 0f ? "card" : "DroneSpawnAlt")}], "
+                    + $"{AltOf(pre):0} m [{(ScenarioPlayer.Card.Declared(pre.StartAlt) ? "card" : "DroneSpawnAlt")}], "
                     + $"{SpeedText(pre)} [{(SpeedFromCard(pre) ? "card" : "DroneSpawnSpeed")}], "
                     + $"{_pending} drone(s) [{pre.CountSrc}].");
             }
@@ -419,7 +458,12 @@ namespace NuclearOptionMouseAim
         // launch log and the board are both the operator's confirmation of what will fly).
         internal static string AirframeOf(ScenarioPlayer.Preflight p) =>
             string.IsNullOrEmpty(p.Airframe) ? (Cfg.DroneAirframe.Value ?? "") : p.Airframe;
-        internal static float  AltOf(ScenarioPlayer.Preflight p)   => p.StartAlt   > 0f ? p.StartAlt   : Cfg.DroneSpawnAlt.Value;
+        // `Card.Declared`, not `> 0`, on BOTH of the numeric ones (v1.0.0). A card that says 0 means it —
+        // 0 m/s is a hover and 0 m MSL is the deck — and reading either as "the card doesn't say" is what
+        // spawned 48 rotorcraft "hover" captures at DroneSpawnSpeed. See ScenarioPlayer.Card.Unset for the
+        // rule; `AirframeOf` keeps its emptiness test because there is no aircraft called "".
+        internal static float  AltOf(ScenarioPlayer.Preflight p)   =>
+            ScenarioPlayer.Card.Declared(p.StartAlt) ? p.StartAlt : Cfg.DroneSpawnAlt.Value;
 
         // SPEED COMES IN TWO SHAPES SINCE v0.93, and only one of them has a batch-wide answer.
         //   SpeedOf     — no lane in hand. The ABSOLUTE form only; a corner-relative card has no
@@ -430,14 +474,15 @@ namespace NuclearOptionMouseAim
         //   SpeedOfLane — the real answer, for the lane about to spawn. Used by the spawn velocity AND
         //                 by the v0.92 envelope gate, which must check the speed the placement will
         //                 later write, not the card's raw number.
-        internal static float  SpeedOf(ScenarioPlayer.Preflight p) => p.StartSpeed > 0f ? p.StartSpeed : Cfg.DroneSpawnSpeed.Value;
+        internal static float  SpeedOf(ScenarioPlayer.Preflight p) =>
+            ScenarioPlayer.Card.Declared(p.StartSpeed) ? p.StartSpeed : Cfg.DroneSpawnSpeed.Value;
 
         internal static float SpeedOfLane(ScenarioPlayer.Preflight p, string jsonKey)
         {
             // The policy itself lives in ScenarioPlayer, next to the placement that has to agree with
             // it — this is the Cfg fallback and nothing else, exactly like AltOf above.
             float v = ScenarioPlayer.ResolveStartSpeed(p.StartSpeed, p.StartSpeedCorner, jsonKey);
-            return v > 0f ? v : Cfg.DroneSpawnSpeed.Value;
+            return ScenarioPlayer.Card.Declared(v) ? v : Cfg.DroneSpawnSpeed.Value;
         }
 
         // The entry speed as the OPERATOR needs to read it, for the launch log and the run board. A
@@ -450,7 +495,7 @@ namespace NuclearOptionMouseAim
         // Did the CARD decide the entry speed, in either of its forms? (The board and the log spell
         // the answer differently, so they share the test and not the wording.)
         internal static bool SpeedFromCard(ScenarioPlayer.Preflight p) =>
-            p.StartSpeedCorner > 0f || p.StartSpeed > 0f;
+            p.StartSpeedCorner > 0f || ScenarioPlayer.Card.Declared(p.StartSpeed);
         // Unlike the three above, the Cfg fallback lives in ScenarioPlayer.ResolveCount — because the
         // "as many as the airframe list names" rule needs the CARD, and a Preflight with no card
         // already carries Count 0. So this is a clamp and a no-card guard, not a second policy.
@@ -556,7 +601,11 @@ namespace NuclearOptionMouseAim
             if (_live.Count > 0) PruneDead();
             // Sky completely empty — nothing alive, nothing still staggering in. That is the ONLY
             // moment a queued fleet is allowed to start, so the two counters are the whole interlock.
-            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();
+            // `> 0`, not `> 1` (v1.0.0): a ONE-entry queue also overwrote ScenarioCardSet, and with the
+            // old bound it never reached AdvanceBatch, so it was the one case that could never hand the
+            // setting back. Everything else is unchanged — AdvanceBatch's own first line still refuses
+            // to launch past the end of the queue, it just calls EndBatch on the way out now.
+            else if (_pending == 0 && _batch.Length > 0) AdvanceBatch();
         }
 
         private static float _hitchArmed;   // Time.time the current hitch was first reported (edge gate)
@@ -897,6 +946,13 @@ namespace NuclearOptionMouseAim
         // an aircraft, not at the first one anybody happened to notice.
         internal static bool EntrySpeedFlyable(string jsonKey, float speed)
         {
+            // A HOVER IS NOT A FIXED-WING SPEED (v1.0.0). `speed <= 0` reaches here only from a card that
+            // DECLARES 0 (the rotor pair) or from an operator who set DroneSpawnSpeed to it, and the
+            // Vstall floor below is a wing's number — applying it would refuse every rotorcraft hover
+            // lane before it spawned. One rule, here, because this is the shared gate: both writes of a
+            // speed to an aircraft (the spawn velocity and PlaceOnCondition) go through it, and a copy of
+            // the exemption at either call site is how they come to disagree.
+            if (speed <= 0f) return true;
             if (!TryEnvelope(jsonKey, out var e)) return true;
 
             float lo = e.VStall * StallMargin, hi = e.VMax * VMaxMargin;
@@ -1176,6 +1232,13 @@ namespace NuclearOptionMouseAim
                 _pending = 0;
             }
             for (int i = _live.Count - 1; i >= 0; i--) Despawn(_live[i]);
+            // AFTER the despawn loop, and that order is the whole reason it is not one line higher.
+            // Restoring writes a ConfigEntry, which fires SettingChanged, which stamps a '# cfg' line
+            // into every capture still OPEN — and until the loop above has run, every live drone still
+            // has one. `Despawn` -> `ForgetState` closes them, so by here the sky and the writer set are
+            // both empty, which is the same window ArmBatchEntry argues from. `_batch` is already
+            // cleared above; EndBatch clearing it again is why it has to be idempotent.
+            EndBatch();
         }
 
         // =========================================================================================

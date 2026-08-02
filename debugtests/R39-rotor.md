@@ -1,4 +1,10 @@
-# R40 — rotorcraft: the first hover captures, and what they say
+# R39 — rotorcraft: the first hover captures, and what they say
+
+> **Renamed 2026-08-02 (was `R40-rotor.md`).** These captures carry run tag **R39**, not R40 — R40 is
+> the later v0.99.1 batch (`place-noop` / `place-deflect` / `alpha-pullup`). A redirect stub stood at
+> the old path for one working session; the 44 inbound references in `.cs`, `.py` and
+> `SESSION-2026-08-02.md` were repointed in **v1.0.0** and the stub is **gone**. Body text was
+> already correct and is unchanged.
 
 **48 captures, R39 run tag, mod v0.98.1, game 0.34.1** — 24 `rotor-hover` + 24 `rotor-bob`, three
 airframes (`AttackHelo1` SAH-46, `UtilityHelo1` UH-90, `QuadVTOL1` VL-49), 36,516 rows. ONE-LAW

@@ -14,29 +14,54 @@ flown against.
 
 ## TL;DR — thirty seconds
 
-**Fly `oblique-6-dwell-t040` and `oblique-6-dwell-t100` first. Tonight's single largest finding is that
+> **HEADLINE OVERTAKEN 2026-08-02 — read this before the table.** This file was written 2026-08-02
+> *before* the R39 batch (v0.98.1) flew. Four of its eight "fly this" instructions have since been
+> executed or invalidated. The corrections are inline at each W-section; the summary is:
+> **W1 — DONE and the answer was worse than the hypothesis.** `-t040` and `-t100` both flew (R39,
+> 64 captures each). `oblique-6-dwell` is now **RETIRED as a between-airframe ranking instrument,
+> all 314 captures** — its four legs are four flight conditions and *no throttle makes them one*
+> (drift 0.96–2.14×, descent throttle-independent at Pearson +0.997). It stays valid as a
+> within-lane, within-airframe A/B. Source: `debugtests/R39-B-card-validity.md`.
+> **W4 — the card named below is retired**; fly `alpha-pullup`, not `alpha-sweep`.
+> **W5 — CLOSED WONTFIX**, the detector was deleted.
+> The standing-hole paragraph at the end of this section is also stale — see its own correction.
+
+~~**Fly `oblique-6-dwell-t040` and `oblique-6-dwell-t100` first. Tonight's single largest finding is that
 the corpus's flagship ranking card does not hold the flight condition it claims**, so the 7.6x
 "airframe spread" everyone has been ranking is not identified from a 2.6x live-speed spread. Both fix
 cards are already written and have never been flown (§W1). Until they are, **no between-airframe claim
-on `oblique-6-dwell` can be believed**, including several that were used as evidence tonight.
+on `oblique-6-dwell` can be believed**, including several that were used as evidence tonight.~~
 
 Then, in order:
 
 | # | weakness | kind | fly / code |
 |---|---|---|---|
-| **W1** | `oblique-6-dwell` lets speed drift 1.09–2.03x within a capture; airframe ≡ live speed | **measurement blocker** | fly `-t040` + `-t100` (2 x 20 min, cards exist) |
+| **W1** | `oblique-6-dwell` lets speed drift 1.09–2.03x within a capture; airframe ≡ live speed — **CONFIRMED AND WORSE (R39): the card is RETIRED for ranking, all 314 captures** | **measurement blocker** | ~~fly `-t040` + `-t100`~~ **done, R39**; needs a *new* ranking card |
 | **W2** | The roll / bank / settle path is scheduled against **nothing the law can measure** — no probed roll parameter, no roll-effectiveness estimator | **ONE-LAW, structural** | code (build the roll twin of `_pitchEff`); Darkreach is the live exemplar |
 | **W3** | Down-step legs converge worse than up-step legs, in both leg orders | plain effect, mechanism open | fly `e1-below-suppress` + `e1-below-control` (cards exist, never flown) |
-| **W4** | `aoaFade`'s "proportional" band is **empty**: it is a 4°-or-6° constant on all ten flown airframes | **ONE-LAW, latent** | fly `alpha-sweep` (card exists, never flown) |
-| **W5** | The SLACK detector has been structurally dead since R28 | instrument gap | offline (rise-window statistic) or restore a sustained-turn card |
+| **W4** | `aoaFade`'s "proportional" band is **empty**: it is a 4°-or-6° constant on all ten flown airframes | **ONE-LAW, latent** | ~~fly `alpha-sweep`~~ **retired after R39 — fly `alpha-pullup`** (`cards/ALPHA-CARD-REDESIGN.md`) |
+| **W5** | ~~The SLACK detector has been structurally dead since R28~~ **CLOSED WONTFIX v0.99.1 — the detector and the metric under it were DELETED.** The gap it named ("nothing detects the law leaving authority on the table") is real and now has **no** detector at all | instrument gap | design a real one; do **not** restore SLACK |
 | **W6** | `terminalOffDeg` + the whole g family are lane-distance artifacts and are still un-caveated | instrument gap | docstrings only, ~20 lines |
 | **W7** | FastBomber1 runs 4–10x hotter in steady-state pitch than the fleet, in every batch, for six mod versions | open, unexplained | re-measure on the t-cards |
 | **W8** | The `_pitchEff` estimator's noise gate is an absolute rad/s constant | ONE-LAW smell, measured inert | one line in `GENERALITY-REVIEW.md` |
 
 And the standing hole that dwarfs all of them: **two of the four airframe cases the ONE-LAW rule names
 — the low-limit STOL trainer and the hovering helo — have essentially no drone data on the current law.**
-`AttackHelo1` has 1 capture in 2,181, hand-flown at R11 on mod 0.71.0. `rotor-hover`, `rotor-bob`,
-`stol-steps` and `stol-sweep` have **zero captures each, ever**. See "What we still cannot see".
+~~`AttackHelo1` has 1 capture in 2,181, hand-flown at R11 on mod 0.71.0. `rotor-hover`, `rotor-bob`,
+`stol-steps` and `stol-sweep` have **zero captures each, ever**.~~
+
+> **UPDATED 2026-08-02 — all four cards have now flown (R39, v0.98.1), and the hole is still open,
+> for new reasons.** `rotor-hover` 24 + `rotor-bob` 24 + `stol-steps` 40 + `stol-sweep` 13 = 101
+> captures. Neither case is closed by them:
+> - **Hovering helo:** `_heloOk` was **false on all 48** rotorcraft captures — the v0.58 rotorcraft
+>   branch never executed, so they measure the *pre-v0.58* law, not the shipped one. Blocked on a
+>   probe call-order fix. `debugtests/R39-rotor.md` §1a.
+> - **STOL trainer:** the card declared 90 m/s but throttle was unpinned at 1.00, so eight of ten
+>   lanes were at **340–381 m/s (2.1–2.4× corner)** by the last scored segment — *faster than
+>   anything else in R39*. It is a second high-q dataset, not STOL data. `debugtests/R39-stol.md` §2.
+>
+> So the correct current statement is: **the two cases now have captures and still have no valid
+> measurement.** Both need a re-fly, and both re-flies are gated on code fixes.
 
 ---
 
@@ -247,13 +272,35 @@ difference in gate softness produced by a constant, not by a probe. (Contrast `s
 `:1255`, which an adversarial pass **cleared**: it is the dimensionless endpoint of a `Lerp` terminated
 by `Clamp01` at `aoaUtil = 1.0`, i.e. at *this* airframe's probed ceiling — that one is compliant.)
 
-**Effect size: UNMEASURED.** No card in the corpus drives the fleet near its alpha ceiling. On R35's
-`alpha-steps` — the only alpha card ever flown — `aoaAboveCeilingPct = 0.0` on every airframe on both
-halves, peaks 5.7–16.6° against ceilings 8.5–23°. `commandIntoCeilingPct` is nonzero only on the
+**Effect size: UNMEASURED — but the reason given here was wrong.**
+~~No card in the corpus drives the fleet near its alpha ceiling. On R35's `alpha-steps` — the only
+alpha card ever flown — `aoaAboveCeilingPct = 0.0` on every airframe on both halves, peaks 5.7–16.6°
+against ceilings 8.5–23°.~~
+
+> **CORRECTED 2026-08-02.** R35's `alpha-steps` put **7 of 8 airframes on the AoA limiter and 2 of 8
+> past the ceiling**: Darkreach `aoaAboveCeilingPct` **5.000**, `aoaPeakOverCeiling` **1.029**;
+> trainer **4.375** / **1.024**. The other six read 0.0% above with peaks 0.601–0.930× ceiling;
+> limiter-active means run 73.6 / 70.0 / 54.3 / 41.1 / 27.2 / 10.9 / 6.0 / 0.0%. So a card in the
+> corpus *does* reach the ceiling — the claim "no card drives the fleet near its alpha ceiling" is
+> false as stated. What remains true is the **W4 effect size itself**: nothing isolates `aoaFade`'s
+> fade band, because reaching the ceiling is not the same as measuring the fade's shape. The
+> weakness stays OPEN and the discriminating test below is unchanged in intent — but read
+> `debugtests/R39-E-alpha.md` §3–§4 first: `alpha-sweep` has since been **retired** (its azimuth
+> demand loads the wing only through bank, clamped at 72° ⇒ n = 3.24) and replaced by
+> `alpha-pullup` (`cards/ALPHA-CARD-REDESIGN.md`).
+> Reproduce: `index-captures.py --query` over R35 `alpha-steps`, `tag <> 'arm'`, `GROUP BY airframe`.
+
+`commandIntoCeilingPct` is nonzero only on the
 low-ceiling airframes (trainer 22.3%, Darkreach 9.9%, EW1 9.7%) and zero on the high-ceiling ones,
 which is the schedule keying off the probe — but that is the *ceiling*, not the fade.
 
-**Discriminating test.** `cards/alpha-sweep.json` exists and has **zero captures, ever**. Fly it on the
+**Discriminating test.** ~~`cards/alpha-sweep.json` exists and has **zero captures, ever**. Fly it~~
+— **SUPERSEDED 2026-08-02: `alpha-sweep` was flown (R39, 61 captures, v0.98.1) and is RETIRED.** All
+60 scored segments RAILED on bank clamp / turn-rate cap / blend rail, never on AoA, and
+`aoaAboveCeilingPct` was 0.0 on 60 of 60 — an azimuth demand cannot load the wing past
+n = 1/cos 72° = 3.24. **Fly `alpha-pullup` instead** (`cards/ALPHA-CARD-REDESIGN.md`; it pulls in the
+vertical plane, `az` identically 0.0). The test design below is unchanged and still the right one —
+only the card carrying it has changed. Fly it on the
 extremes of the limiter range — trainer / Darkreach / EW1 (lim 10, fade 4 = 47% of ceiling) against
 Fighter1 / Multirole1 (lim 27, fade 6 = 26%) — and read `aoaGU`/`aoaGD` duty cycle, `aoaLimiterActivePct`
 and `wobbleEpisodesAoa` as a function of AoA/ceiling. *Pass (no defect):* gate duty cycle collapses onto
@@ -267,6 +314,19 @@ re-solved another way.
 ---
 
 ## W5 — the SLACK detector has been structurally dead since R28
+
+> **STATUS CHANGED 2026-08-02 (v0.99.1): SLACK and `authorityUsedFrac`/`authBank`/`authAoa`/`authStick`
+> were DELETED from `debugtests/scorecard.py`, not repaired.** Read this section as the *diagnosis
+> that justified the deletion*, not as a live remedy — the "add `oblique_step` to `SLACK_TYPES`"
+> proposal below is **WONTFIX** and must not be actioned. The reason it was deleted rather than
+> re-gated is stronger than the deadness described here: `authorityUsedFrac` was
+> `mean|bank| / maxBank`, which is not a fraction of *authority* at all — it exceeded 1.0 in
+> practice (0.977–1.084 measured on R39 `alpha_hold`), so a "fraction used" that reads > 1 was
+> never measuring what its name claimed. Every number below is still an accurate description of the
+> old detector; the **gap** it identified — no detector for "the law is leaving authority unused" —
+> is still open and now has nothing covering it. See `debugtests/R40-metric-repair.md` and
+> `debugtests/R39-D-sustained-ab.md`. Verified deleted: `grep -n "authorityUsedFrac" debugtests/scorecard.py`
+> returns only tombstone comments plus the `gone = {...}` assertion at `:2136`.
 
 **Claim.** `rail_warning`'s SLACK branch — the one detector in the whole pipeline that looks for the law
 *under-using* an airframe — is gated to segment types the harness stopped flying ten batches ago. The

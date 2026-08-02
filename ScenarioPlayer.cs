@@ -91,8 +91,36 @@ namespace NuclearOptionMouseAim
             public string cls = "";       // comma list of Pilot.PilotType names ("" = any airframe class)
             public float  step = 0.02f;   // seconds between track samples (the fixed step at record time)
             public string airframe = "";  // jsonKey(s) the drone harness SPAWNS — comma list = one per lane (v0.91)
-            public float  startSpeed;     // m/s at record start — the condition the card intends
-            public float  startAlt;       // m MSL at record start
+
+            // ZERO IS A VALUE, NOT A BLANK (v1.0.0). `startSpeed` and `startAlt` are the only two card
+            // fields whose physical range INCLUDES zero — 0 m/s is a hover, 0 m MSL is the deck — so the
+            // JSON default 0 that an ABSENT field leaves behind was indistinguishable from a card that
+            // means it, and "the card doesn't say" won. It cost 48 rotorcraft captures: `rotor-hover`
+            // declared `startSpeed: 0`, `TestDrone.SpeedOf` read that as unset and fell back to
+            // `DroneSpawnSpeed`, and every capture named a hover while flying 6-110 m/s forward and
+            // climbing 80-1500 m (debugtests/R39-rotor.md §5 H1). Nothing refused; the artifact just
+            // answered a different question.
+            //
+            // THE FIX IS THE SENTINEL, NOT THE CARD. Newtonsoft constructs through the default ctor and
+            // assigns only the keys the JSON actually carries, so a FIELD INITIALIZER *is* the "absent"
+            // value: a missing `startSpeed` stays `Unset`, an explicit `0` stays 0, and the two are
+            // finally different numbers. Every "did the card say?" test is `Declared(v)`, never `v > 0`.
+            //
+            // THE RULE FOR THE NEXT FIELD, because this is a class of bug and not an instance: a card
+            // field whose zero is MEANINGFUL takes `= Unset` and `Declared`; one whose zero is
+            // meaningless (`startSpeedCorner` — a 0x corner speed is not a condition; `repeat`, `count`
+            // — zero replicates/drones is not a batch; `step`) keeps the plain default and the `> 0`
+            // test, and that asymmetry is deliberate rather than an oversight.
+            //
+            // Negative rather than NaN: NaN round-trips through JSON as a non-standard literal, and this
+            // model is written back to disk by the card recorder. Both are static, so neither is
+            // serialized, and both live INSIDE the CARD-MODEL markers so the region still compiles
+            // standalone for debugtests/test-card-model.py.
+            public const float Unset = -1f;
+            public static bool Declared(float v) => v >= 0f;
+
+            public float  startSpeed = Unset;   // m/s at record start — the condition the card intends; 0 = hover
+            public float  startAlt   = Unset;   // m MSL at record start; 0 = sea level
 
             // ENTRY SPEED AS A MULTIPLE OF THE LANE AIRFRAME'S OWN CORNER SPEED (v0.93). 0 = unset,
             // i.e. `startSpeed` stands and the card behaves exactly as it did before this field.
@@ -148,6 +176,7 @@ namespace NuclearOptionMouseAim
         private const float  BuiltInStep = 0.02f;   // track spacing for generated built-in tracks
         private const int    MaxSamples  = 60000;   // ~20 min at 50 Hz — a forgotten recording can't eat RAM
         private const float  FloorAltM   = 500f;    // card aborts below this (MSL); ~4 s of margin in a 30 deg dive at 250 m/s
+        private const float  DmgRowWaitS = 0.5f;    // cap on the damage abort's one-row wait (see _dmgSeenAt)
         private const float  RecoverElDeg = 10f;    // demand handed back on a floor abort: wings-level, slight climb
 
         private static readonly List<Card> _cards = new List<Card>();
@@ -178,6 +207,23 @@ namespace NuclearOptionMouseAim
         private int        _auditFrame = -1;
         private float      _auditSpeed;     // what the placement commanded, to audit against
         private bool       _placed;         // this card has had its placement applied
+
+        // --- damage abort: hold it open for ONE recorded row (v1.0.0) ---
+        // `dmgFrac` (column 65) is written by the RECORDER, from ChaseController's Apply — which runs in
+        // the POSTfix of the very same PilotPlayerState invocation whose PREfix runs this Tick (and, for
+        // a drone, immediately after TestDrone.OnPilotStep calls us). So aborting on the tick the
+        // detached ratio first goes non-zero closes the CSV BEFORE the row carrying that ratio is ever
+        // written: the one column that says "this airframe was damaged" reads 0.000 — intact — on
+        // precisely the captures that were not. Measured across the corpus: 641,555 rows, ZERO non-zero,
+        // against 8 known damage aborts, which then trips R40's dead-column invariant and withdraws the
+        // column outright (debugtests/R40-metric-repair.md, defect 1).
+        //
+        // So the abort waits for one row to LAND. Not "one fixed step" — the recorder throttles to
+        // RecordRateHz, so a step is not a row; the sample COUNT moving is the only proof a row exists.
+        // The airframe flies at most DmgRowWaitS bent, which it was already going to do for the tick the
+        // damage appeared on, and the cap is also what ends it when there is no open capture to wait for.
+        private int        _dmgSeenAt = -1;  // _rec.Samples when damage was first read; -1 = none seen
+        private float      _dmgSeenT;        // Time.time of that read, for the wait cap
 
         // --- entry ANCHOR (v0.84). See PlaceOnCondition: one spot on the map + one heading, captured
         // on the first placement of a run and re-imposed by every replicate after it. Held in the
@@ -730,8 +776,10 @@ namespace NuclearOptionMouseAim
             public int    Cards;        // cards selected before replicates; 0 = nothing would fly
             public string Name;         // the first one, which is the one that decides everything below
             public string Airframe;     // "" = the card doesn't say; the Cfg value stands
-            public float  StartAlt;     // <= 0 = doesn't say
-            public float  StartSpeed;   // <= 0 = doesn't say
+            // Both carry the CARD's sentinel, not a zero: `Card.Unset` = doesn't say, and 0 is a real
+            // condition (hover / sea level). Test with `Card.Declared`, never `> 0` — see Card.Unset.
+            public float  StartAlt;     // Card.Unset = doesn't say
+            public float  StartSpeed;   // Card.Unset = doesn't say
             // v0.93. Carried alongside StartSpeed rather than resolved into it, because with a
             // corner-relative card there IS no single answer for the batch — the number is per lane,
             // and this struct is answered with no aircraft in hand. TestDrone.SpeedOfLane turns the
@@ -752,7 +800,11 @@ namespace NuclearOptionMouseAim
 
         internal static Preflight Preview(bool quiet = false)
         {
-            var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "", CountSrc = "" };
+            // StartSpeed/StartAlt are seeded to the sentinel, not left at a struct's default 0: with no
+            // card selected (and on the catch path) 0 would now read as a DECLARED hover at sea level
+            // and place the fleet there. The one place a struct default and a card default disagree.
+            var p = new Preflight { Name = "", Airframe = "", RepeatSrc = "", ArmKnob = "", ArmSrc = "", CountSrc = "",
+                                    StartSpeed = Card.Unset, StartAlt = Card.Unset };
             try
             {
                 var sel = SelectRaw(quiet);
@@ -1251,7 +1303,7 @@ namespace NuclearOptionMouseAim
             Card c = null;
             // "Declares an entry condition" now means EITHER form — a corner-relative card carries no
             // startSpeed at all, and testing the raw field would make F3 skip straight past it.
-            foreach (var x in SelectCards(ac)) if (EntrySpeed(x) > 0f) { c = x; break; }
+            foreach (var x in SelectCards(ac)) if (Card.Declared(EntrySpeed(x))) { c = x; break; }
             if (c == null)
             {
                 WTMouseAimPlugin.Log.LogWarning(
@@ -1332,7 +1384,7 @@ namespace NuclearOptionMouseAim
             _aborted = 0;
             IndexCard();             // run-board caches; must follow every write to _card/_qi/_queue
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
-            _rec.EntryNote = "";     // an UNGATED card must not inherit the last one's note
+            _rec.EntryNote = "";     // an UNGATED card (one that DECLARES nothing) must not inherit the last one's note
 
             SetUpArmSchedule(sel.Count, sel[0]);
         }
@@ -1453,9 +1505,18 @@ namespace NuclearOptionMouseAim
                 var ci = ac.GetInputs();
                 if (ci == null) return false;
                 ci.brake = 0f;                          // wheel brake; the AIRBRAKE rides on throttle (below)
-                // Ungated card (hover): the pilot keeps the collective. Through EntrySpeed so a
-                // corner-relative card counts as gated — and cached on a reference compare, because
-                // this runs every fixed step.
+                // declared-zero-ok: a hover has no cruise throttle, so 0 belongs with Unset HERE.
+                // This is the one place the v1.0.0 sentinel deliberately does NOT switch to
+                // Card.Declared, and the distinction is worth the line. Everywhere else the question
+                // is "did the card SAY?", where a declared 0 is a real condition. Here the question is
+                // "is there a cruise for a fixed throttle to be the trim of?" — and at zero commanded
+                // airspeed there is not: for a rotorcraft the throttle IS the collective, so pinning
+                // one at a hover commands a climb or a descent, which is the opposite of an entry
+                // condition. An UNDECLARED card (Unset, negative) falls on the same side, so this line
+                // is byte-identical in behaviour to pre-v1.0.0 for every card that existed then.
+                // A hover card that DOES want its collective owned says so with its own `config` pin.
+                // Through EntrySpeed so a corner-relative card counts as gated — and cached on a
+                // reference compare, because this runs every fixed step.
                 if (EntrySpeed(_card) <= 0f) return false;
                 ci.throttle = EntryThrottle();
                 return true;
@@ -1689,7 +1750,10 @@ namespace NuclearOptionMouseAim
                 return;
             }
             float v = ac.rb != null ? ac.rb.velocity.magnitude : 0f;
-            if (_auditSpeed > 0f && Mathf.Abs(v - _auditSpeed) > 0.2f * _auditSpeed)
+            // Same floored tolerance as EntryConditionError, and for the same reason: a hover placement
+            // commands 0, a pure fraction of it is 0, and every hover would then be reported as "the
+            // placement injected velocity. Expect damage" — the loudest false warning in the harness.
+            if (Card.Declared(_auditSpeed) && Mathf.Abs(v - _auditSpeed) > Mathf.Max(0.2f * _auditSpeed, SpeedTolMinMS))
                 WTMouseAimPlugin.Log.LogWarning(
                     $"[card] entry audit: speed is {v:0} m/s after commanding {_auditSpeed:0} — the "
                     + "placement injected velocity. Expect damage; do not score this run.");
@@ -1775,6 +1839,7 @@ namespace NuclearOptionMouseAim
                     + "'# stop' line, so a short count for this lane is those aborts and not a dropped "
                     + "recording — which is the distinction the analysis side could not make before.");
             _aborted = 0;
+            _dmgSeenAt = -1;         // re-arm the damage hold; it is per-card state like _placed
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
             IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
         }
@@ -1842,12 +1907,22 @@ namespace NuclearOptionMouseAim
             // than in TestDrone because this one placement covers the drones AND the player.
             // Read is fail-soft and, unlike the recorder's, defaults to NOT damaged: "could not read
             // it" must never abort a good run, and the -1 in the column is what says the probe failed.
+            //
+            // v1.0.0 — IT DOES NOT ABORT ON THE SPOT ANY MORE. See _dmgSeenAt: this Tick runs a postfix
+            // ahead of the row that would carry the ratio, so an immediate abort guaranteed the column
+            // said "intact". Fall THROUGH while waiting (no early return) so the held tick is an
+            // ordinary flown row and not a frozen one.
             if (_frameSet)
             {
                 float dmg = 0f;
                 try { if (ac.partDamageTracker != null) dmg = ac.partDamageTracker.GetDetachedRatio(); }
                 catch { /* unreadable — see above */ }
-                if (dmg > 0f) { Abort($"airframe damage (detached ratio {dmg:0.000})"); return; }
+                if (dmg > 0f)
+                {
+                    if (_dmgSeenAt < 0) { _dmgSeenAt = _rec.Samples; _dmgSeenT = Time.time; }
+                    if (_rec.Samples > _dmgSeenAt || Time.time - _dmgSeenT > DmgRowWaitS)
+                    { Abort($"airframe damage (detached ratio {dmg:0.000})"); return; }
+                }
             }
 
             if (!_frameSet)
@@ -1872,7 +1947,7 @@ namespace NuclearOptionMouseAim
                 // Place first, start second — and place ONCE PER CARD, so every card in a suite gets its
                 // own entry condition rather than inheriting the state the previous one left behind.
                 // Returning after the placement gives it a tick to settle before the card is timed.
-                if (Cfg.ScenarioForceEntry.Value && EntrySpeed(_card) > 0f && !_placed)
+                if (Cfg.ScenarioForceEntry.Value && Card.Declared(EntrySpeed(_card)) && !_placed)
                 {
                     _placed = true;
                     var placed = PlaceOnCondition(ac, _card);
@@ -1996,8 +2071,10 @@ namespace NuclearOptionMouseAim
             // FAIL-SOFT, the same doctrine as the FBW / canard / helo probes: "could not read it" is
             // never "the corner speed is zero". A zero here would place every lane at 0 m/s, and a
             // probe that destroys a batch because a field was missing is worse than no probe. So fall
-            // back to the card's absolute startSpeed — and if that is 0 too the card is simply
-            // ungated, which is existing behaviour (the rotor cards live there).
+            // back to the card's absolute startSpeed — which may itself be `Card.Unset`, and then the
+            // card is simply ungated. (Pre-v1.0.0 that fallback read "and if that is 0 too the card is
+            // ungated, which is where the rotor cards live"; it is not, any more — a card that says 0
+            // says HOVER and gets placed at 0 m/s. Only an ABSENT field is ungated now.)
             WTMouseAimPlugin.Log.LogWarning(
                 $"[card] startSpeedCorner {startSpeedCorner:0.00}x could not be resolved for airframe "
                 + $"'{jsonKey}' (no corner speed readable from Encyclopedia) — falling back to the card's "
@@ -2006,7 +2083,7 @@ namespace NuclearOptionMouseAim
         }
 
         internal static float EffectiveStartSpeed(Card c, string jsonKey) =>
-            c == null ? 0f : ResolveStartSpeed(c.startSpeed, c.startSpeedCorner, jsonKey);
+            c == null ? Card.Unset : ResolveStartSpeed(c.startSpeed, c.startSpeedCorner, jsonKey);
 
         // THE INSTANCE FORM. Same resolver, but the answer is constant for (this aircraft, this card)
         // — the Encyclopedia lookup cannot change mid-flight — while one of its callers is OwnInputs,
@@ -2018,7 +2095,7 @@ namespace NuclearOptionMouseAim
 
         private float EntrySpeed(Card c)
         {
-            if (c == null) return 0f;
+            if (c == null) return Card.Unset;
             if (!ReferenceEquals(c, _entrySpeedFor))
             {
                 _entrySpeedFor = c;
@@ -2041,8 +2118,13 @@ namespace NuclearOptionMouseAim
         // outside them. Until v2 these two fields were written by the recorder and read by nothing —
         // which meant "I hand-flew to roughly 250" was an uncontrolled input feeding every score.
         // Cards that declare nothing (neither startSpeed nor startSpeedCorner, so EntrySpeed resolves
-        // to 0) are ungated, so ad-hoc recordings still just work.
-        private const float SpeedTolFrac = 0.15f, AltTolM = 800f;
+        // to Card.Unset) are ungated, so ad-hoc recordings still just work.
+        //
+        // SpeedTolMinMS is what makes the tolerance survive a DECLARED ZERO (v1.0.0). A pure fraction
+        // collapses to +/- 0 m/s at a hover entry, so a rotorcraft drifting the 1-2 m/s a hover always
+        // drifts would fail the gate on every check and log ENTRY CONDITION NOT HELD for a hover that
+        // is holding. 3 m/s is under the fraction from 20 m/s up, so no fixed-wing card moves.
+        private const float SpeedTolFrac = 0.15f, SpeedTolMinMS = 3f, AltTolM = 800f;
 
         // Put the aircraft ON the card's declared entry condition rather than asking the pilot to fly
         // there. Hand-flying to "roughly 250 m/s at roughly 4000 m" is not repeatable to the 1-3% the
@@ -2139,7 +2221,10 @@ namespace NuclearOptionMouseAim
                 // the recommended shape, so it gets exercised. Ahead of every write, so an infeasible
                 // card costs nothing and leaves the aircraft exactly as it was. Fail-soft in the same
                 // direction as the spawn site: an unreadable envelope returns true and never refuses.
-                if (vTgt > 0f && !TestDrone.EntrySpeedFlyable(JsonKeyOf(ac), vTgt))
+                // No `vTgt > 0` pre-test any more: a declared 0 is a HOVER, and the zero rule now lives
+                // inside EntrySpeedFlyable itself so the spawn-side gate and this one cannot disagree
+                // about it (they are the two writes of a speed to an aircraft — see that function).
+                if (!TestDrone.EntrySpeedFlyable(JsonKeyOf(ac), vTgt))
                 {
                     Notify($"CARD SKIPPED: '{c.name}' entry speed is outside this airframe's envelope");
                     return Placement.Infeasible;
@@ -2148,6 +2233,11 @@ namespace NuclearOptionMouseAim
                 var g = ac.GlobalPosition();                    // the game's own datum-relative struct
                 Vector3 gp0 = new Vector3(g.x, g.y, g.z);
                 float alt0 = gp0.y, v0 = rb.velocity.magnitude;
+                // THE ONE READ of the card's entry ALTITUDE, for the same reason `vTgt` is one read of
+                // the speed: it feeds the position write, the header note, the log line and the notice,
+                // and `c.startAlt` spelled out four times is four chances to print a target that is not
+                // the one written. `Card.Declared`, not `> 0` — 0 m MSL is the deck, not "unset".
+                float altTgt = Card.Declared(c.startAlt) ? c.startAlt : alt0;
 
                 // THE ANCHOR. Captured from the pilot on the FIRST placement of a run (so this is still
                 // "where you set up"), then re-imposed by every replicate after it. Held in the
@@ -2179,7 +2269,7 @@ namespace NuclearOptionMouseAim
                 // the global and the physics frame as long as they differ only by a translation, which
                 // is why this can be computed in GlobalPosition and applied to rb.position without
                 // having to know whether (or when) the floating origin rebased.
-                Vector3 tgt  = new Vector3(_anchorPos.x, c.startAlt > 0f ? c.startAlt : alt0, _anchorPos.z);
+                Vector3 tgt  = new Vector3(_anchorPos.x, altTgt, _anchorPos.z);
                 Vector3 dPos = tgt - gp0;
                 // Velocity along the level nose. v0.88 wrote it one measured trim-AoA BELOW the nose, on
                 // the theory that AoA = 0 is zero lift and that the resulting 1 g catch was the entry
@@ -2220,7 +2310,7 @@ namespace NuclearOptionMouseAim
                 // in the header and the sidecar records this airframe's `cornerSpeed`). No new column
                 // and no new key for a number two existing artifacts already pin down between them.
                 _rec.EntryNote =
-                    $"v={v0:0.0}->{vTgt:0.0} alt={alt0:0.0}->{(c.startAlt > 0f ? c.startAlt : alt0):0.0} "
+                    $"v={v0:0.0}->{vTgt:0.0} alt={alt0:0.0}->{altTgt:0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
                     + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
                 // The log line DOES name the multiple: it is the operator-facing confirmation that the
@@ -2228,10 +2318,10 @@ namespace NuclearOptionMouseAim
                 // corner multiple, an absolute startSpeed or a fallback.
                 string cornerMsg = c.startSpeedCorner > 0f ? $" ({c.startSpeedCorner:0.00}x corner)" : "";
                 WTMouseAimPlugin.Log.LogInfo(
-                    $"[card] entry condition set: {v0:0} -> {vTgt:0} m/s{cornerMsg}, {alt0:0} -> {c.startAlt:0} m"
+                    $"[card] entry condition set: {v0:0} -> {vTgt:0} m/s{cornerMsg}, {alt0:0} -> {altTgt:0} m"
                     + $"{fuelMsg}, wings level, snapped back {snapBack:0} m"
                     + " to the anchor heading, controller reset.");
-                Notify($"ON CONDITION  {vTgt:0} m/s  {c.startAlt:0} m"
+                Notify($"ON CONDITION  {vTgt:0} m/s  {altTgt:0} m"
                     + (fuel0 >= 0f ? $"  fuel {fuelTgt:P0}" : ""));
                 return Placement.Placed;
             }
@@ -2252,15 +2342,15 @@ namespace NuclearOptionMouseAim
         private string EntryConditionError(Card c, Aircraft ac)
         {
             float want = EntrySpeed(c);
-            if (want <= 0f) return null;
+            if (!Card.Declared(want)) return null;
             try
             {
                 float v = ac.rb != null ? ac.rb.velocity.magnitude : 0f;
                 float alt = ac.GlobalPosition().y;
-                float dv = want * SpeedTolFrac;
+                float dv = Mathf.Max(want * SpeedTolFrac, SpeedTolMinMS);
                 if (Mathf.Abs(v - want) > dv)
                     return $"airspeed {v:0} m/s, card wants {want:0} +/- {dv:0}";
-                if (c.startAlt > 0f && Mathf.Abs(alt - c.startAlt) > AltTolM)
+                if (Card.Declared(c.startAlt) && Mathf.Abs(alt - c.startAlt) > AltTolM)
                     return $"altitude {alt:0} m, card wants {c.startAlt:0} +/- {AltTolM:0}";
             }
             catch { return null; }                          // unreadable state gates nothing
@@ -2280,7 +2370,7 @@ namespace NuclearOptionMouseAim
         // speed can be trimmed at); this is the part that stops it being silent.
         private void AuditHold(Aircraft ac)
         {
-            string bad = EntryConditionError(_card, ac);    // null for an ungated card, so rotor-* is quiet
+            string bad = EntryConditionError(_card, ac);    // null for an ungated card (one that DECLARES nothing)
             if (bad == null) return;
             WTMouseAimPlugin.Log.LogWarning(
                 $"[card] ENTRY CONDITION NOT HELD: '{_card.name}' was placed on condition and the 'arm' "
@@ -2339,10 +2429,12 @@ namespace NuclearOptionMouseAim
             // No separate settle gap: the next card opens with its own `arm` segment, which IS the
             // settle (steady demand on the heading the previous card left the aircraft on).
             _card = _queue[_qi]; _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+            _dmgSeenAt = -1;         // per-card, same as _placed — a held damage read must not cross the boundary
             IndexCard();
-            // A card that declares no entry condition (startSpeed 0 — the hover card) never reaches
-            // PlaceOnCondition, so without this its capture would inherit the PREVIOUS card's reset
-            // provenance and claim a placement that never happened.
+            // A card that declares no entry condition (startSpeed ABSENT — not 0, which since v1.0.0 is
+            // a declared hover and IS placed) never reaches PlaceOnCondition, so without this its
+            // capture would inherit the PREVIOUS card's reset provenance and claim a placement that
+            // never happened.
             _rec.EntryNote = "";
         }
 
@@ -2464,8 +2556,10 @@ namespace NuclearOptionMouseAim
                                 startSpeed = 250f, startAlt = 4000f,
                                 segments = FixedWingSegs(0f).ToArray() };
 
-            // Rotorcraft fly the SAME card and append their own segments (Appendix A). No entry gate:
-            // a hover card has no meaningful entry airspeed, and startSpeed 0 means ungated.
+            // Rotorcraft fly the SAME card and append their own segments (Appendix A). No entry gate,
+            // and that is now said by OMITTING both fields rather than by writing 0: this card has a
+            // fixed-wing prefix, so it has no single entry condition to declare. (The disk cards
+            // `rotor-hover`/`rotor-bob` are the ones that DO declare `startSpeed: 0` and mean it.)
             var rs = FixedWingSegs(0f);
             var sink = rs[rs.Count - 1];                    // turn360 — the energy sink stays LAST
             rs.RemoveAt(rs.Count - 1);
