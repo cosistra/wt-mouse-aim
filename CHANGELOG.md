@@ -3,6 +3,29 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 0.96.2
+
+**One column, so the measurement noise stops being archaeology.** No control-law change; captures
+stay comparable with 0.96.0/0.96.1.
+
+### `origDist` — column 66, metres from the Unity world origin
+
+R33 found that replicate scatter in `terminalOffDeg` is dominated by `gJitterG`, the frame-to-frame
+noise in `Aircraft.gForce` (r = 0.886) — and that the game re-centres the world origin on the
+**operator's camera** (`OriginShift`, `:19361`), so an operator moving mid-batch re-bands every lane
+at once. The corpus now shows the sharper version of that: **R29 and R33 have the per-lane jitter
+ordering inverted** across the same ten lanes at the same distances (R29 lanes 1–6 quiet / 7–10
+noisy; R33 the reverse). So the driver is the datum, not the geometry — and the lane layout does not
+need changing.
+
+What *did* need changing is that the datum was unrecordable. `posX/Y/Z` are DATUM-relative by
+design, precisely so a floating-origin rebase leaves no step in them, which also makes the rebase
+invisible. It survived R33 only as spawn lines in `LogOutput.log`, a file overwritten every session.
+`origDist` is the same position measured in the frame the physics solver runs in: per-row, archived
+with the capture, and **a step in it is an origin shift** with no log to consult. Fail-soft to 0 —
+the opposite of `dmgFrac`'s −1 sentinel, and right here, because a lane spawns 8–68 km out so 0 m
+cannot be mistaken for a reading.
+
 ## 0.96.1
 
 **The placement now checks that the whole aircraft came with it.** One file, one method, **no

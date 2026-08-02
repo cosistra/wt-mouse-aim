@@ -176,7 +176,7 @@ Machine-specific paths are written as placeholders:
     now describes **this recorder's** aircraft, not `GetLocalAircraft`'s (a drone capture used to name
     the player's airframe). `NoteConfigChange` broadcasts to every open recorder — every `Cfg` knob is
     process-global, so a live edit lands on every aircraft flying.
-    v0.69/0.70 added the instructor-loop instrumentation (65 CSV columns as of v0.96): alt/airDensity/pos/vel/
+    v0.69/0.70 added the instructor-loop instrumentation (66 CSV columns as of v0.96.2): alt/airDensity/pos/vel/
     segTag/tSeg/tWall) and the per-run `.airframe.json` sidecar (the readable per-airframe capability
     snapshot — masses, thrust, envelope, FBW params, Cl/Cd curves — every read fail-soft). v0.77 added
     `thr` (COMMANDED throttle) — a card owns the throttle, and until then a capture could not tell a
@@ -242,6 +242,22 @@ Machine-specific paths are written as placeholders:
     replicate START bent? — the column cannot say, since it only reports *now*), fail-soft to
     **absent**, not 0. A capture whose `dmgFrac` ever exceeds 0 is flagged **DAMAGED** by
     `scorecard.py`.
+    **v0.96.2 added column 66, `origDist`** — metres from the **Unity world origin**, i.e. the one
+    thing `posX/Y/Z` structurally cannot report. Those are DATUM-relative *on purpose*, so a
+    floating-origin rebase puts no step in them; this is the same position in the frame the physics
+    solver runs in, and it is the only column that moves when the datum does. It earns a column
+    because float32 grain at distance *d* is ~`d·1.2e-7` m — a lane 62 km out resolves position 8×
+    more coarsely than one at 8 km — and `Aircraft.gForce` is `|v−vPrev|/(dt·9.81)` off the cockpit
+    part's rigidbody, multiplying that grain by 60. R33 measured the consequence (`gJitterG` vs
+    `terminalOffDeg` scatter, r = 0.886) and traced it to `OriginShift(cameraPosition)` (`:19361`):
+    **the world origin follows the OPERATOR'S CAMERA**, so one operator moving mid-batch re-bands
+    every lane at once. **Distance is NOT the driver** — R29 and R33 have the per-lane jitter
+    ordering *inverted* across the same ten lanes at the same distances (R29 lanes 1–6 quiet /
+    7–10 noisy, R33 the reverse), which rules geometry out and leaves the datum. Until now that was
+    recoverable only by grepping spawn lines out of `LogOutput.log`, a file overwritten every
+    session; as a column it is per-row, survives archival, and **a step in it IS an origin shift**.
+    Fail-soft to **0**, and that is right here where it is wrong for `dmgFrac`: a lane spawns 8–68 km
+    out, so 0 m is self-evidently "not measured" rather than a plausible reading.
   - `ScenarioPlayer.cs` — `ScenarioPlayer` (v0.71, milestone M1). **An instance class, ONE PER
     AIRCRAFT (v0.86)** — `For(aircraft)` / `Forget` / `Sweep` / `Player`, same registry as
     `ChaseController`. All *playback* state is per-instance (queue, segment index, segment clock,

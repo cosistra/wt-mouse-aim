@@ -203,7 +203,23 @@ namespace NuclearOptionMouseAim
             // the detach path calls RemoveFromUnit(), the only caller of DeregisterAeroPart
             // (AeroPart:74558-74564), so it never decreases and a constant 35 is not evidence that
             // nothing fell off.
-            "dmgFrac";
+            "dmgFrac," +
+            // v0.96.2. Metres from the UNITY WORLD ORIGIN — deliberately the one quantity `posX/Y/Z`
+            // cannot express. Those are DATUM-relative by design (see the M0 block), which makes them
+            // immune to a floating-origin rebase; this is the same position measured in the frame the
+            // physics solver actually runs in, and it is the ONLY thing here that moves when the datum
+            // does. Why it earns a column: float32 grain at distance d is ~d*1.2e-7 m, so a lane 62 km
+            // out resolves position 8x more coarsely than one at 8 km, and `Aircraft.gForce` is
+            // |v-vPrev|/(dt*9.81) off the cockpit part's rigidbody, which multiplies that grain by 60.
+            // R33 measured the consequence: replicate scatter in terminalOffDeg tracks gJitterG at
+            // r = 0.886, and the game re-centres the origin on the OPERATOR'S CAMERA (OriginShift,
+            // :19361), so one operator moving mid-batch re-bands every lane at once. That is not a
+            // hypothesis about geometry — R29 and R33 have the per-lane jitter ordering INVERTED
+            // across the same ten lanes at the same distances, which rules distance out as the driver
+            // and leaves the datum. It was recoverable then only by grepping spawn lines out of
+            // LogOutput.log, a file overwritten every session; as a column it is per-row, survives
+            // archival, and a STEP in it IS an origin shift with no log to consult.
+            "origDist";
 
         // Segment tag stamped into every row (empty by default). The M1 ScenarioPlayer sets this per test
         // card segment ("az30", "reversal", "arm", …) so the offline scorer can slice one capture into
@@ -487,6 +503,12 @@ namespace NuclearOptionMouseAim
             float dmg = -1f;
             try { if (ac != null && ac.partDamageTracker != null) dmg = ac.partDamageTracker.GetDetachedRatio(); }
             catch { /* leave the -1 sentinel */ }
+            // The Unity-frame twin of `pos`. Zero on failure is right here and wrong for `dmg` above:
+            // 0 m from the origin is not a plausible reading (a lane spawns 8-68 km out), so it is
+            // self-evidently "not measured" rather than a value that could be mistaken for data.
+            float origDist = 0f;
+            try { if (ac != null) origDist = ac.transform.position.magnitude; }
+            catch { /* leave 0 */ }
             try
             {
                 _w.WriteLine(
@@ -500,7 +522,7 @@ namespace NuclearOptionMouseAim
                     $"{alt:0.0},{rho:0.0000},{pos.x:0.0},{pos.y:0.0},{pos.z:0.0},{vel.x:0.00},{vel.y:0.00},{vel.z:0.00},{_segTag}," +
                     $"{(now - _segStart):0.000},{Time.realtimeSinceStartup:0.000},{thr:0.000},{aimRate:0.000}," +
                     $"{iGate:0.000},{leadDeg:0.00},{bSup:0.000},{bWt:0.000},{phiLead:0.00}," +
-                    $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000}");
+                    $"{TestDrone.FrameDt * 1000f:0.0},{dmg:0.000},{origDist:0.0}");
                 _samples++;
                 if (++_sinceFlush >= FlushRows) { _sinceFlush = 0; _w.Flush(); }
             }
