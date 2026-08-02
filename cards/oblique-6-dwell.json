@@ -1,0 +1,45 @@
+{
+  "name": "oblique-6-dwell",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "count": 16,
+  "note": "LONG-DWELL TWIN of 'oblique-6-c'. Byte-identical to it in geometry, entry condition, altitude and replicate count; the ONLY difference is leg duration, 8 s -> 30 s. That single-variable relationship to the most-flown card in the corpus (R29 and R33 both flew oblique-6-c across the same ten lanes) is the whole design — anything else changed here would cost the comparison. WHY 30 s: terminalOffDeg is the last sample of a leg, and at 8 s it cannot distinguish 'converged slowly, still improving' from 'reached 0.2 deg, retreated, settled at 0.6 deg'. Those are opposite verdicts on the law and they score identically. A 30 s leg gives the loop room to finish, which is what makes the terminal value mean anything and what gives backlog #33's retreat integral something to integrate over. PASS: off decays monotonically to a floor and stays there. FAIL: off reaches a minimum and then GROWS — a retreat, invisible at 8 s. COUNT 16 OVER 10 KEYS: lanes wrap, so Fighter1/Multirole1/SmallFighter1/trainer/VTOLTrainer1/CAS1 each fly TWO lanes (k and k+10, i.e. 8 km and 68 km from the operator) in the same batch, same session, same datum. That is the within-airframe across-lane control the corpus has never had: same score => the spread is the airframe, different => it is the lane. R29 vs R33 inverted the per-lane jitter ordering across identical distances, so lane distance is already ruled out as the driver and this is the confirmation, not the discovery. Sixteen concurrent complex-physics aircraft is untested — watch frameMs / the [drone] frame hitch lines in the first minute, and drop count to 10 if it stalls."
+  ,
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 8,
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 4.24
+    },
+    {
+      "tag": "obDR6",
+      "dur": 30,
+      "az": 4.24,
+      "el": 0
+    },
+    {
+      "tag": "obDL6",
+      "dur": 30,
+      "az": 0,
+      "el": -4.24
+    },
+    {
+      "tag": "obUL6",
+      "dur": 30,
+      "az": -4.24,
+      "el": 0
+    },
+    {
+      "tag": "obUR6",
+      "dur": 30,
+      "az": 0,
+      "el": 4.24
+    }
+  ]
+}
