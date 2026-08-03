@@ -597,6 +597,13 @@ namespace NuclearOptionMouseAim
         // =========================================================================================
         public static void FixedTick()
         {
+            // BEFORE the interlock below, and that is deliberate: a lane relaunched here is in `_live`
+            // by the time the `else` arm is evaluated, so the batch queue cannot step to the next fleet
+            // while a lane of THIS one still owes replicates. Drained here rather than spawned at the
+            // despawn because both callers of LaneLost are mid-walk over `_live` (PruneDead walks it
+            // backwards; Despawn removes from it), and adding an entry underneath an index walk is how
+            // one gets skipped.
+            if (_relaunch.Count > 0) RelaunchOwedLanes();
             if (_pending > 0) LaunchDue();
             if (_live.Count > 0) PruneDead();
             // Sky completely empty — nothing alive, nothing still staggering in. That is the ONLY
@@ -647,8 +654,22 @@ namespace NuclearOptionMouseAim
             if (Time.time < _nextAt) return;
             _nextAt = Time.time + Mathf.Max(0f, Cfg.DroneStaggerSec.Value);
             _pending--;
+            LaunchLane(_slot++, 0, 0);
+        }
 
-            string key = AirframeForLane(_slot);
+        // ONE LANE: LAID OUT, GATED AND SPAWNED. Split out of LaunchDue in v1.0.2 so the respawn path
+        // reuses the WHOLE thing — ring geometry, deck assignment, per-lane airframe, per-lane entry
+        // speed, the envelope gate and the skip-or-cancel refusal policy — rather than growing a second
+        // spawn site beside it. A parallel implementation here is the one thing that would make a
+        // respawned lane's capture non-comparable with its own earlier ones, since every one of those
+        // steps is part of the entry condition.
+        //
+        // `slot` is a PARAMETER and not `_slot` for exactly that reason: a respawn re-flies the lane it
+        // lost (same azimuth, same deck, same airframe), not the next one in line. `_slot` stays the
+        // stagger's own cursor and is advanced by the caller above.
+        private static void LaunchLane(int slot, int resumeAt, int respawns)
+        {
+            string key = AirframeForLane(slot);
 
             // THIS LANE'S OUTWARD RADIAL. `u` is the unit ray at azimuth 2*pi*k/N in the ring basis;
             // it is both where the drone is placed and where it is pointed, which is the property the
@@ -664,8 +685,8 @@ namespace NuclearOptionMouseAim
             // in the case that measures: `AdvanceBatch` only ever launches into an empty sky, so a
             // batch's own fleet always has turn == 0 and sits on one exact ring. A hand-pressed
             // relaunch over a live fleet is not a measurement, and it is still not a mid-air.
-            int turn = _slot / _laneN;
-            int k    = _slot % _laneN;
+            int turn = slot / _laneN;
+            int k    = slot % _laneN;
             // DECK BY LATIN-SQUARE DIAGONAL over (roster pass, airframe) — see DeckOf. Plain
             // alternation (`k % 2`) looks right and is wrong: the airframe of lane k is `k % A`
             // (AirframeForLane wraps), so for an EVEN-length airframe list the parity of k is
@@ -696,7 +717,6 @@ namespace NuclearOptionMouseAim
             // ToLocalPosition converts it without this file needing to know whether the floating
             // origin shifts y at all (ScenarioPlayer's placement dodges the same question).
             pos.y = new GlobalPosition(0f, SpawnAlt() + deckOff, 0f).ToLocalPosition().y;
-            _slot++;
 
             // THE LANE'S OWN ENTRY SPEED (v0.93). Resolved once, here, and used by the gate and the
             // spawn velocity both — with a corner-relative card these differ per lane, and asking
@@ -719,6 +739,10 @@ namespace NuclearOptionMouseAim
             var d = EntrySpeedFlyable(key, laneSpeed)
                   ? Spawn(key, pos, laneRot, laneRot * Vector3.forward * laneSpeed)
                   : null;
+            // THE LANE IDENTITY, stamped on the way out. Same fixed step as the spawn and ahead of any
+            // pilot postfix, so `OnPilotStep` cannot read a half-identified drone: `Pilot_OnAeroInputsApplied`
+            // fires from JobManager's own pass later in the step, never re-entrantly from SpawnAircraft.
+            if (d != null) { d.Slot = slot; d.ResumeAt = resumeAt; d.Respawns = respawns; }
             if (d == null)
             {
                 // With ONE airframe the next lane fails identically (no server, bad jsonKey, no
@@ -729,11 +753,17 @@ namespace NuclearOptionMouseAim
                 if (AirframeList().Length > 1)
                 {
                     WTMouseAimPlugin.Log.LogWarning(
-                        $"[drone] lane {_slot - 1} ('{key}') was refused — skipping it; {_pending} lane(s) still to launch.");
+                        $"[drone] lane {slot} ('{key}') was refused — skipping it; {_pending} lane(s) still to launch.");
                     return;
                 }
                 _pending = 0;
-                WTMouseAimPlugin.Log.LogWarning("[drone] launch aborted — the remaining drones in this request were cancelled.");
+                // A RESPAWN carries no pending launches with it, so the fleet-wide wording would be a
+                // lie there — and the operator needs the other sentence anyway: this lane is out, and
+                // its remaining replicates are the shortfall a short capture count will show.
+                WTMouseAimPlugin.Log.LogWarning(respawns > 0
+                    ? $"[drone] lane {slot} ('{key}') was refused on respawn {respawns} — the lane is out; "
+                      + "its remaining replicates will not fly."
+                    : "[drone] launch aborted — the remaining drones in this request were cancelled.");
             }
         }
 
@@ -985,6 +1015,7 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
                     _live.RemoveAt(i);
                     _byAircraftId.Remove(d.AircraftId);
+                    LaneLost(d, "destroyed or disabled by the game");   // BEFORE ForgetState — it drops the queue
                     ForgetState(d.AircraftId);
                     continue;
                 }
@@ -1032,6 +1063,91 @@ namespace NuclearOptionMouseAim
                 if (Time.time - d.IdleSince < IdleDespawnSec) continue;
                 Despawn(d, "card finished");
             }
+        }
+
+        // =========================================================================================
+        // RESPAWNING A LANE THAT LOST ITS AIRCRAFT (v1.0.2)
+        //
+        // v0.99.1 made an abort end the REPLICATE, but only where the airframe survives (the altitude
+        // floor). Where it does not — a part fell off, the pilot was killed, the game removed the
+        // aircraft — the lane still ends, because there was nothing left to fly the rest of the queue.
+        // R41 lost 6 captures exactly that way (5 Darkreach + 1 EW1, ledger #51).
+        //
+        // The lost DATA is the smaller half: replicates are armed ABBA and indexed by the lane's own
+        // position in its own queue, so a lane that dies at replicate 3 of 9 leaves its OWN sequence
+        // truncated and unbalanced, and nothing warns — `SetUpArmSchedule` prints the schedule the lane
+        // intended to fly. See ScenarioPlayer's LANE-CONTINUITY note for the full argument.
+        //
+        // TWO CALLERS, ONE RULE, and both call it BEFORE `ForgetState`: that is what tears the card
+        // state down, and the card state is the only record of what the lane still owed.
+        // ==========================================================================================
+        // LANES OWED A REPLACEMENT. The DEAD drone is the ticket — its Slot/ResumeAt/Respawns are
+        // exactly the lane identity a replacement needs, so there is no second type for three ints and
+        // no way for a ticket to name the wrong lane. Its `Aircraft` is already gone and is never read.
+        private static readonly List<Drone> _relaunch = new List<Drone>();
+
+        // The despawn key is an ABORT, not a mishap. Without this, DespawnAll's teardown loop would
+        // route every live lane through LaneLost and queue a full fleet's worth of respawns for the
+        // panic key to be followed by — the same surprise the pending-launch cancel exists to prevent.
+        private static bool _cancelling;
+
+        private static void LaneLost(Drone d, string reason)
+        {
+            if (d == null || _cancelling || !Cfg.DroneEnabled.Value) return;
+            // YOU CANNOT RESPAWN A HUMAN. Unreachable by construction — an aircraft only enters
+            // `_byAircraftId` through `Spawn`, which destroys anything reporting a Player — but the
+            // whole crewed/uncrewed separation rests on that one assert, and this is the one place that
+            // would otherwise put NEW metal under a card run. Restated rather than assumed.
+            if (d.Aircraft != null && d.Aircraft.Player != null)
+            {
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[drone] #{d.Id} reports a Player — REFUSING to respawn its lane. A crewed card run "
+                    + "is the operator's own aircraft and the harness never replaces it.");
+                return;
+            }
+
+            int owed   = ScenarioPlayer.OwedBy(d.AircraftId);            // -1 = the lane finished its queue
+            int resume = ScenarioPlayer.RespawnAt(owed, d.Respawns);     // -1 = that, or the cap said no
+            if (resume < 0)
+            {
+                // THE CAP, SAID OUT LOUD. A lane that cannot stay airborne must not burn the batch:
+                // R41's UtilityHelo1 sank on 16 of 16 replicates, and an uncapped rule would have
+                // relaunched it sixteen times for nothing. This is the line an unattended batch has to
+                // be able to find the next morning, so it is a warning and it names the shortfall.
+                if (owed >= 0)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[drone] LANE {d.Slot} IS OUT — #{d.Id} ('{AirframeForLane(d.Slot)}') was lost "
+                        + $"({reason}) still owing queue index {owed} onwards, and "
+                        + $"this lane has already used its {ScenarioPlayer.MaxLaneRespawns} respawn(s). "
+                        + "Not respawning it again — the remaining replicates will NOT fly and this lane's "
+                        + "A/B is short. An airframe that dies this often is a card problem, not bad luck.");
+                return;
+            }
+
+            d.ResumeAt = resume;
+            d.Respawns++;
+            _relaunch.Add(d);
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[drone] lane {d.Slot} lost #{d.Id} ({reason}) — RESPAWNING it (respawn {d.Respawns} of "
+                + $"{ScenarioPlayer.MaxLaneRespawns}) to resume at queue index {resume}. The replicate that "
+                + "died is still an abort and its capture still says so; the rest of the lane's queue flies "
+                + "on fresh metal, all of it SCORED except the resumed replicate itself — that one captures "
+                + "the new aircraft's anchor, so it is a warm-up on neither arm (ledger X27). The suite-start "
+                + "line names the schedule it will actually fly.");
+        }
+
+        // Drained once per fixed step, ahead of everything else — see FixedTick. LaunchLane, not a
+        // second spawn path: the lane comes back on its own azimuth, its own deck, its own airframe and
+        // its own entry speed, which is the whole reason its capture is comparable with the ones the
+        // lost aircraft already wrote.
+        private static void RelaunchOwedLanes()
+        {
+            for (int i = 0; i < _relaunch.Count; i++)
+            {
+                var d = _relaunch[i];
+                LaunchLane(d.Slot, d.ResumeAt, d.Respawns);
+            }
+            _relaunch.Clear();
         }
 
         // EVERY per-aircraft subsystem the mod keeps, dropped in one place. Called from BOTH removal
@@ -1200,6 +1316,10 @@ namespace NuclearOptionMouseAim
             if (d == null) return;
             _live.Remove(d);
             _byAircraftId.Remove(d.AircraftId);
+            // BEFORE ForgetState, which aborts the card and drops the queue — and the queue is the only
+            // record of what this lane still owed. A lane that finished its queue owes nothing and this
+            // is a no-op, which is why the ordinary "card finished" despawn is unaffected.
+            LaneLost(d, reason);
             ForgetState(d.AircraftId);
             var ac = d.Aircraft;
             if (ac == null) return;
@@ -1231,7 +1351,14 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[drone] cancelling {_pending} pending launch(es).");
                 _pending = 0;
             }
-            for (int i = _live.Count - 1; i >= 0; i--) Despawn(_live[i]);
+            // THE PANIC KEY IS AN ABORT, NOT A MISHAP (v1.0.2). Without this every lane torn down below
+            // would route through LaneLost still owing replicates, and the key that clears the sky would
+            // be followed one fixed step later by a fleet respawning itself — the same surprise the
+            // pending-launch cancel above exists to prevent. Cleared in a finally so a throwing Despawn
+            // cannot leave the harness permanently unable to respawn anything.
+            _cancelling = true;
+            try { for (int i = _live.Count - 1; i >= 0; i--) Despawn(_live[i]); }
+            finally { _cancelling = false; _relaunch.Clear(); }
             // AFTER the despawn loop, and that order is the whole reason it is not one line higher.
             // Restoring writes a ConfigEntry, which fires SettingChanged, which stamps a '# cfg' line
             // into every capture still OPEN — and until the loop above has run, every live drone still
@@ -1308,10 +1435,13 @@ namespace NuclearOptionMouseAim
                 // ponytail: fire-and-forget, one attempt. A drone whose suite finishes despawns itself
                 // `IdleDespawnSec` later — see PruneDead, which owns that clock because it is the one
                 // thing that runs every fixed step regardless of which `Fly` delegate is installed.
+                // v1.0.2: `ResumeAt`/`Respawns` are 0 for a fresh lane, so this is the same call it
+                // always was; on a REPLACEMENT they carry the lane's queue position forward, which is
+                // what makes the respawned aircraft finish the lane's sequence rather than restart it.
                 if (!d.CardStarted)
                 {
                     d.CardStarted = true;
-                    sp.StartSuite(ac);
+                    sp.StartSuite(ac, d.ResumeAt, d.Respawns);
                 }
 
                 // TEST-CARD DEMAND (v0.86) — THIS drone's card, ticked HERE so it gets the same
@@ -1331,7 +1461,13 @@ namespace NuclearOptionMouseAim
                 // card at whatever ControlInputs.throttle happened to hold — and 0 is the game's
                 // airbrake trigger (Airbrake.Update), which is how R18 read a bad throttle as a
                 // control-law energy failure. No-op when this drone is not flying a card.
-                sp.OwnInputs(ac);
+                // ...and when the card DECLINES it — a declared-hover card, where a pinned throttle
+                // would be a commanded climb rather than an entry condition — the harness holds the
+                // altitude itself on rotorcraft lanes. Without this the axis simply kept the
+                // level-hold's last write, which is one fixed collective for every airframe and is
+                // why two of three rotorcraft never hovered in R41. No-op for fixed-wing and for every
+                // card that owns its throttle; see HoldCollective.
+                if (!sp.OwnInputs(ac)) HoldCollective(d, sp);
 
                 // FBW IS NOT AUTOMATIC. `Aircraft.FilterInputs()` — which runs the
                 // RelaxedStabilityController and then ControlsFilter/FlyByWire — is called ONLY from
@@ -1365,11 +1501,110 @@ namespace NuclearOptionMouseAim
         // aircraft nobody is flying falls into the sea. Never tune it, and never compare a level-hold
         // capture against a card capture: they are not the same controller.
         // =========================================================================================
-        private const float HoldThrottle = 0.6f;   // fixed position, not a speed hold — one loop, not two
-        private const float VsPerAltErr  = 0.05f;  // m/s of commanded climb per metre of altitude error
-        private const float VsMax        = 25f;    // m/s cap on that command
+        // `internal` so Drone can seed its collective integrator from it — the harness's one neutral
+        // throttle, named once.
+        internal const float HoldThrottle = 0.6f;  // fixed position, not a speed hold — one loop, not two
         private const float PitchPerVs   = 0.03f;  // stick per m/s of climb-rate error
         private const float RollGain     = 2.0f;   // stick per unit of t.right.y
+        // VsPerAltErr / VsMax — the OUTER half of the cascade — live in the COLLECTIVE-HOLD region
+        // below, because both loops share them and that region is what test-collective-hold.py compiles.
+
+        // -----------------------------------------------------------------------------------------
+        // THE COLLECTIVE — the harness owns the throttle on a rotorcraft HOVER card.
+        //
+        // WHY IT HAS TO EXIST. `ScenarioPlayer.OwnInputs` deliberately DECLINES the throttle when the
+        // card declares a zero entry speed (its `declared-zero-ok:` note), and that is right: on a
+        // rotorcraft the throttle IS the collective, so pinning one number at a hover commands a climb
+        // or a descent rather than an entry condition. But declining left the axis at whatever the
+        // level-hold last wrote — `HoldThrottle`, 0.60 — and one fixed collective is not a hover for
+        // more than one airframe. R41 measured the three-way split at exactly that value: `QuadVTOL1`
+        // and `AttackHelo1` CLIMBED at +2.2…+5.7 m/s while `UtilityHelo1` SANK at −25, lost 1.9 km in
+        // 78 s and aborted 16 of 16 replicates on the 500 m floor, leaving the whole `rotor-hover`
+        // verdict resting on the one airframe that happened to hover (debugtests/R41-rotor.md §5a,
+        // §6.2). A card cannot fix it — the throttle pin is read after that early return.
+        //
+        // WHY IT IS A PI AND NOT A P. The collective that holds a given rotorcraft level is a different
+        // number for every airframe, and the ONE-LAW rule forbids writing those numbers down. So the
+        // loop MEASURES it instead: `Drone.Collective` is an integrator whose steady state IS this
+        // airframe's hover collective, learned from live vertical speed and re-learned as fuel burns
+        // off. Nothing here keys off a jsonKey, a mass or a rotor count. A P-only loop structurally
+        // cannot do this — it holds altitude only where its fixed trim happens to BE the hover value,
+        // and everywhere else it droops by (hoverTrim − trim)/(CollP · VsPerAltErr), i.e. ~250 m for a
+        // 0.25 trim error: most of the way back to the floor that started this.
+        //
+        // WHAT GATES IT, and why the gate is the CARD rather than `_heliBlend` (see HoldCollective).
+        // -----------------------------------------------------------------------------------------
+        // The gains. SHARED constants, not per-airframe ones — the standing rule bans per-PLANE
+        // constants, not shared ones (ScenarioPlayer.EntryThrottle argues the same for its 0.7), and
+        // the airframe-specific quantity here is the integrator's steady state, which is measured.
+        //
+        // Sized off the cascade rather than tuned on a plane. CollP sets the INNER climb-rate loop's
+        // time constant, 1/(K·CollP) for the airframe's throttle→vertical-accel gain K — a few seconds
+        // across any plausible K. VsPerAltErr sets the OUTER altitude loop's, 20 s, so the two are
+        // separated by the usual 4:1. CollI is slower again than the inner loop, which is what stops
+        // the trim walk chasing it into a phugoid: the P term arrests the sink, the I term only has to
+        // remove the residual droop.
+        //
+        // ponytail: three consts, no Cfg binds. They are harness-internal and their siblings above are
+        // consts too. If a flight shows the trim converging too slowly, CollI is the one to raise —
+        // the `thr` and `alt` columns of any rotor capture are already the evidence for it.
+        // --- COLLECTIVE-HOLD BEGIN ---
+        private const float VsPerAltErr = 0.05f;   // m/s of commanded climb per metre of altitude error
+        private const float VsMax       = 25f;     // m/s cap on that command
+        private const float CollP       = 0.02f;   // throttle per m/s of climb-rate error (the damping)
+        private const float CollI       = 0.002f;  // throttle per m/s per second (the trim it learns)
+        private const float MinColl     = 0.05f;   // never write exact 0 — that is the game's airbrake trigger
+
+        // One PI step on the throttle axis. Plain numbers and Mathf only, because
+        // debugtests/test-collective-hold.py compiles this region VERBATIM and runs a case table over
+        // it — the sign of a collective loop is not a thing to establish by flying it.
+        //
+        // `trim` is the learned hover collective, carried across ticks by the caller. Clamping it (and
+        // not just the return) is the anti-windup: an underpowered airframe pinned at 1.0 stops
+        // integrating instead of banking authority it will have to unwind on the way back down.
+        internal static float CollectiveStep(ref float trim, float altErr, float velY, float dt)
+        {
+            // altErr > 0 = BELOW target = climb. velY is the achieved climb rate, so vsErr > 0 means
+            // "not climbing as fast as asked" and more collective is the answer on both terms.
+            float vsWant = Mathf.Clamp(altErr * VsPerAltErr, -VsMax, VsMax);
+            float vsErr  = vsWant - velY;
+            trim = Mathf.Clamp(trim + CollI * vsErr * dt, MinColl, 1f);
+            return Mathf.Clamp(trim + CollP * vsErr, MinColl, 1f);
+        }
+        // --- COLLECTIVE-HOLD END ---
+
+        // Called from OnPilotStep when — and only when — the card DECLINED the throttle. Three gates,
+        // all necessary:
+        //   1. a card is running. With no card the level-hold above already owns the axis.
+        //   2. the card did not take the throttle itself. That is the caller's `!OwnInputs(ac)`, and it
+        //      is what confines this to DECLARED-HOVER cards: any card with a forward entry speed —
+        //      `rotor-transition` included — keeps its pinned throttle and is byte-identical.
+        //   3. the airframe is collective-classed (`ChaseController._collective`, the same latch the
+        //      hover blend keys off). Fixed-wing lanes never reach the write.
+        // Gating on the LIVE `_heliBlend` instead was considered and rejected: it falls as forward
+        // speed builds, and a forward-speed runaway is exactly the failure R41 §2 measured — the hold
+        // would cut out precisely when the aircraft is diverging. A card's declared hover does not move.
+        //
+        // Crewed flight is unreachable from here by construction: the only caller is the drone seam.
+        internal static void HoldCollective(Drone d, ScenarioPlayer sp)
+        {
+            if (sp == null || !sp.Playing) return;
+            var ac = d.Aircraft;
+            var rb = ac != null ? ac.rb : null;
+            var ci = ac != null ? ac.GetInputs() : null;
+            if (rb == null || ci == null) return;
+            if (!ChaseController.For(ac)._collective) return;
+
+            // The altitude the card's placement WROTE, else this drone's spawn altitude — the same
+            // reference its level-hold flies. Fail-soft in the same direction as everything else here:
+            // a card that never placed holds where the drone was put, rather than not holding at all.
+            float tgt = sp.CardAltM;
+            if (float.IsNaN(tgt)) tgt = d.HoldAlt;
+
+            ci.throttle = CollectiveStep(ref d.Collective, tgt - ac.GlobalPosition().y,
+                                         rb.velocity.y, Time.fixedDeltaTime);
+            ci.brake    = 0f;
+        }
 
         internal static bool LevelHold(Drone d)
         {
@@ -1462,11 +1697,35 @@ namespace NuclearOptionMouseAim
         // launch stagger means N drones finish at N different instants — which is the point.
         public float IdleSince = -1f;
 
+        // THE LEARNED HOVER COLLECTIVE (see TestDrone.CollectiveStep). Per drone because it is a
+        // property of the airframe in that lane — the whole point is that N lanes flying N different
+        // rotorcraft each converge on their OWN number, which a shared static could not represent.
+        // Seeded at the harness's neutral throttle, so the first tick of a hover card commands exactly
+        // what the pre-v1.0.2 harness commanded for the whole card, and the loop walks off from there.
+        // Not reset between replicates on purpose: the airframe does not change, so the trim learned on
+        // replicate 1 is a free head start for replicate 2 — and a placement is a position write, not a
+        // new aircraft.
+        //
+        // A RESPAWN *does* reset it, because a respawn IS a new Drone (v1.0.2). The lane re-learns the
+        // same trim in a few seconds, and the transient lands on the resumed replicate — which is
+        // already armed as a warm-up for an unrelated reason (ArmOfRun, ledger X27), so it is scored by
+        // neither arm. Carrying the trim across the respawn was rejected: it would be per-lane state
+        // outliving the aircraft it was measured on, for a saving the warm-up already covers.
+        public float Collective = TestDrone.HoldThrottle;
+
         // `Time.fixedTime` of the last step this drone was actually flown. The de-duplicator for a
         // MULTI-CREW airframe, whose every seat fires the pilot postfix independently — see the long
         // note at the guard in TestDrone.OnPilotStep. Per drone because the seats of one aircraft are
         // what collide, and -1 rather than 0 so the very first fixed step of a session is not eaten.
         public float LastStep = -1f;
+
+        // --- LANE IDENTITY (v1.0.2). What a replacement aircraft needs to BE this lane again; see
+        // TestDrone.LaneLost. Written by LaunchLane immediately after the spawn (same fixed step,
+        // before any pilot postfix can read them) rather than taken as ctor arguments, because Spawn
+        // is the crewed/uncrewed gate and its shape is asserted by check-architecture.py.
+        public int Slot;        // the ring slot this lane was laid out on — same azimuth, same airframe
+        public int ResumeAt;    // queue index the suite starts at: 0 for a fresh lane, the lost aircraft's next replicate otherwise
+        public int Respawns;    // how many times THIS LANE has been replaced; the cap counts the lane, not the aircraft
 
         // WHAT FLIES THIS DRONE. Return true if inputs were written (the caller then runs the game's
         // FBW over them), false to leave this tick alone. It lives HERE, per drone, rather than as one

@@ -201,12 +201,29 @@ namespace NuclearOptionMouseAim
         // `# stop … reason=abort:` line), and before v0.99.1 there was no such half, because the
         // first abort ended the lane and the missing replicates left no artifact at all.
         private int        _aborted;
+        // WHAT THIS LANE STILL OWES AFTER ITS SUITE ENDED SHORT (v1.0.2) — the queue index a
+        // replacement aircraft would resume at, or -1 for "nothing". Written by Finish and read back
+        // by OwedBy seconds later, which is the whole reason it is a field rather than a derivation:
+        // a FATAL abort nulls `_queue` on its way out, and `_queue` is the only record of how many
+        // replicates the lane was supposed to fly. The damage abort ends the suite the instant the
+        // part comes off; the drone then level-holds for IdleDespawnSec before anything despawns it
+        // and asks the question, and by then the queue is long gone.
+        private int        _owed = -1;
+        // WHICH RESPAWN GENERATION IS FLYING THIS SUITE (0 = the lane's original aircraft). Per RUN,
+        // set once by StartSuite, and its only consumer is the `# entry` header — see PlaceOnCondition.
+        private int        _respawn;
+        // THE REPLICATE THIS SUITE RESUMED ON (0 = a fresh lane, which is also the anchor-capturing
+        // replicate of one). Set once by StartSuite beside `_respawn`, read by ArmOfRun: it is the
+        // replicate whose placement captures THIS run's anchor, so it is armed as neither. See the
+        // ARM-SCHEDULE region and ledger X27.
+        private int        _resumeRep;
 
         // --- entry placement audit (see AuditEntry) ---
         private Aircraft   _auditAc;
         private int        _auditFrame = -1;
         private float      _auditSpeed;     // what the placement commanded, to audit against
         private bool       _placed;         // this card has had its placement applied
+        private float      _cardAltM = float.NaN;   // altitude the last placement WROTE — see CardAltM
 
         // --- damage abort: hold it open for ONE recorded row (v1.0.0) ---
         // `dmgFrac` (column 65) is written by the RECORDER, from ChaseController's Apply — which runs in
@@ -309,6 +326,17 @@ namespace NuclearOptionMouseAim
         // does, and a drone must not go on chasing a dead card's final direction; with no card it
         // falls back to the harness's level-hold instead.
         public Vector3 AimDemand { get; private set; }
+
+        // THE ALTITUDE THIS CARD IS BEING FLOWN AT — what PlaceOnCondition actually WROTE, which is not
+        // the same as what the card declares: `startAlt` is optional, and an absent one leaves the
+        // placement holding wherever the aircraft already was (`altTgt = alt0`). Publishing the written
+        // value rather than `_card.startAlt` is what keeps the two from disagreeing.
+        //
+        // NaN until a placement lands — ScenarioForceEntry off, or a card that declares no entry — and
+        // that is a real state, not a failure: the caller falls back to its own reference. Consumed by
+        // TestDrone.HoldCollective, the harness's rotorcraft altitude hold, which needs the target the
+        // replicate was actually put on rather than the one it was spawned on.
+        public float CardAltM => _cardAltM;
 
         private void SetDemand(Vector3 dir)
         {
@@ -1010,7 +1038,101 @@ namespace NuclearOptionMouseAim
         // IS A MULTIPLE OF 4 — i.e. cards want repeat 5, 9, 13, not 4, 8, 12. SetUpArmSchedule warns.
         internal static int ArmOf(int replicateIndex) =>
             replicateIndex == 0 ? -1 : (replicateIndex >> 1) & 1;
+
+        // v1.0.2 — ...AND SO IS THE REPLICATE A RESPAWNED LANE RESUMES ON, for exactly the same
+        // reason (ledger X27). `StartSuite` sets `_anchorSet = false` on every suite, so the FIRST
+        // placement of a resumed suite captures the anchor just as replicate 0's does: it is the one
+        // that flies from the spawn state while its siblings arrive teleported, and its `# entry`
+        // reads `snapBackM=0`. Replicate index alone cannot see that — the resumed replicate is index
+        // 3 of 9, not 0 — so the anchor-capturing replicate is a PROPERTY OF THE RUN, and this is the
+        // one function that knows both halves.
+        //
+        // THE INVARIANT, stated once: NO SCORED REPLICATE MAY BE ANCHOR-CAPTURING. `ArmOf` alone
+        // enforced it for a fresh lane; this enforces it for every lane.
+        //
+        // `resumeReplicate == 0` is a fresh lane and makes this ArmOf verbatim, which is why nothing
+        // that never respawns changes by a single arm. The lane pays one scored replicate per
+        // respawn; SetUpArmSchedule tallies with THIS function, so the shortfall shows up in the
+        // printed schedule and, if it unbalances the lane, in that method's existing UNBALANCED
+        // warning. It is never silent.
+        internal static int ArmOfRun(int replicateIndex, int resumeReplicate) =>
+            replicateIndex == resumeReplicate ? -1 : ArmOf(replicateIndex);
         // --- ARM-SCHEDULE END ---
+
+        // =========================================================================================
+        // LANE CONTINUITY (v1.0.2) — A DEAD LANE IS A SILENTLY UNBALANCED A/B, NOT JUST LOST DATA.
+        //
+        // v0.99.1 made an abort end the REPLICATE rather than the lane, but only for the one reason
+        // where the airframe survives (the altitude floor). Every reason where it does NOT — a part
+        // fell off, the pilot was killed, the game took the aircraft — still ends the lane, because
+        // there is nothing left to fly the rest of the queue with. R41 lost 6 captures that way (5
+        // Darkreach + 1 EW1, ledger #51).
+        //
+        // THE DATA LOSS IS THE SMALLER HALF. Replicates are armed ABBA and indexed by the lane's own
+        // position in its own queue (`ApplyArm`: `ArmOf(_qi / _block)`), and that sequence is balanced
+        // only when the lane flies ALL of it. A lane of 8 replicates that dies during replicate 3 has
+        // completed A,B,B and stops there: 1 A against 2 B, and a mean position that leans — exactly
+        // the R21 confound ABBA exists to remove. Nothing warns, because `SetUpArmSchedule` prints the
+        // schedule the lane INTENDED to fly and `compare-runs.py` pools whatever arrived. Respawning
+        // restores the invariant the schedule already assumes: every lane flies its whole sequence.
+        //
+        // WHERE THIS IS ASKED, AND WHY IT IS ASKED HERE. `TestDrone` owns lanes and is the only thing
+        // that can spawn one, but only the card player knows what a lane still owes — so the harness
+        // PULLS the answer at the instant a drone leaves its registry (`TestDrone.LaneLost`, ahead of
+        // `ForgetState`), rather than the player pushing a notification into the harness. Pulling is
+        // what makes the two despawn orders irrelevant: this reads the live cursor when the suite is
+        // still nominally running (the game took the aircraft and nothing has aborted it yet) and the
+        // stashed `_owed` when a fatal abort already tore the queue down.
+        //
+        // AT THE REPLICATE BOUNDARY, NEVER MID-REPLICATE. The replicate that died is still an abort
+        // and its capture is still truncated and marked on its own `# stop` line — that is unchanged.
+        // The resume index is the one AFTER it, so no replicate is ever flown twice and none is skipped.
+        //
+        // WHAT THE RESUME COSTS, AND WHY IT IS WORTH IT (v1.0.2, ledger X27). A replacement is FRESH
+        // METAL, so `StartSuite` re-anchors and the resumed replicate is anchor-CAPTURING: `snapBackM`
+        // ~0, flying from the spawn state while its siblings arrive teleported — the exact stratum
+        // #55b removed from the arms one release earlier. So it is armed as NEITHER (`ArmOfRun`), and
+        // the lane recovers all but ONE of its remaining replicates rather than all of them. The arm
+        // sequence it flies is therefore an undamaged lane's minus that one, which the suite-start
+        // tally prints and, when it leans, warns about. Restarting the lane at 0 was the alternative
+        // and is worse twice over: it re-flies replicates that already wrote captures, and its own
+        // replicate 0 is anchor-capturing anyway.
+        //
+        // The two functions live between markers because debugtests/test-lane-respawn.py extracts them
+        // with ARM-SCHEDULE and asserts the composed property — that a lane which dies and respawns
+        // flies every queue index an undamaged one would, and that no replicate it SCORES is
+        // anchor-capturing.
+        // --- LANE-CONTINUITY BEGIN ---
+        // How many times ONE lane may be re-flown on fresh metal in a run. A lane that cannot stay
+        // airborne must not burn the batch relaunching itself: R41's UtilityHelo1 sank on 16 of 16
+        // replicates, and an uncapped rule would have spawned it sixteen times and still produced
+        // nothing. Two is one retry plus one — enough for the R41 damage pattern (one loss per lane,
+        // spread over six lanes) and short of "this airframe cannot fly this card", which is a card
+        // problem and wants an operator, not another aircraft.
+        // ponytail: a const, not a Cfg knob — same judgment as IdleDespawnSec/StartGraceSec in
+        // TestDrone. Nothing about a run wants a different number, and the despawn key already means
+        // "stop".
+        internal const int MaxLaneRespawns = 2;
+
+        // The queue index a lane still owes when its suite ended at `qi` of `queueLen`, or -1 when it
+        // owes nothing — it finished (NextCard leaves `_qi == queueLen`), or it never had a queue.
+        internal static int OwedFrom(int qi, int queueLen) => qi + 1 < queueLen ? qi + 1 : -1;
+
+        // ...and the cap, kept separate so the caller can tell "this lane owed nothing" from "this
+        // lane owed something and the cap refused it" — the second is the line an unattended batch
+        // has to be able to find in the log the next morning.
+        internal static int RespawnAt(int owed, int used) =>
+            owed >= 0 && used < MaxLaneRespawns ? owed : -1;
+        // --- LANE-CONTINUITY END ---
+
+        // The harness's read of the two states above, keyed the way every despawn path already keys
+        // its bookkeeping: the CACHED instance id, because the aircraft may already be destroyed.
+        // Never throws and never registers anything — an id with no player owes nothing.
+        internal static int OwedBy(int aircraftId)
+        {
+            if (!_byAc.TryGetValue(aircraftId, out var s)) return -1;
+            return s._queue != null ? OwedFrom(s._qi, s._queue.Count) : s._owed;
+        }
 
         // =========================================================================================
         // NAMING A CONFIG ENTRY FROM TEXT. One grammar — "Key" or "Section/Key", bare keys defaulting
@@ -1282,12 +1404,17 @@ namespace NuclearOptionMouseAim
         private void ApplyArm()
         {
             if (_armEntry == null) { _armIdx = -1; return; }
-            _armIdx = ArmOf(_qi / _block);
-            // _armIdx < 0 is replicate 0, the anchor-defining warm-up (ArmOf, #55b): it is on NEITHER
-            // arm, so leave the knob at its live value and assign nothing. The capture still prints
-            // `arm=-1`, which is what keeps it out of a pooled A/B — compare-runs.py groups by arm and
-            // only ever diffs 0 against 1, so -1 is a third group nothing compares. Silence here would
-            // be worse than a wrong value: it would look like an unswept card.
+            // v1.0.2 — ArmOfRun, not ArmOf: the anchor-capturing replicate is `_resumeRep`, which is 0
+            // for a fresh lane and the resume index for a respawned one. Indexing on the replicate
+            // alone put a RESPAWNED lane's first placement — anchor-capturing, snapBackM=0, flying
+            // from the spawn state — straight onto a scored arm, which is #55b again on a new path
+            // (ledger X27). `ArmOf(_qi / _block)` stays the whole of it when nothing respawned.
+            _armIdx = ArmOfRun(_qi / _block, _resumeRep);
+            // _armIdx < 0 is the anchor-defining warm-up (ArmOf/ArmOfRun, #55b + X27): it is on
+            // NEITHER arm, so leave the knob at its live value and assign nothing. The capture still
+            // prints `arm=-1`, which is what keeps it out of a pooled A/B — compare-runs.py groups by
+            // arm and only ever diffs 0 against 1, so -1 is a third group nothing compares. Silence
+            // here would be worse than a wrong value: it would look like an unswept card.
             if (_armIdx >= 0)
                 ChaseController.SetArm(_acId, _armEntry.Definition.Key, _armIdx == 1);
         }
@@ -1346,7 +1473,12 @@ namespace NuclearOptionMouseAim
 
         // Start (or stop) a suite on ONE aircraft. Public-by-instance so phase 2 can run a card on a
         // drone through exactly this path.
-        internal void StartSuite(Aircraft ac)
+        //
+        // `startAt`/`respawn` (v1.0.2) are the RESUME, and they default to a fresh lane so the player's
+        // run key and every existing caller are byte-identical. See the LANE-CONTINUITY note: a
+        // replacement aircraft picks its lane's queue up where the lost one left off instead of
+        // restarting it, which is what keeps the lane's ABBA sequence complete and balanced.
+        internal void StartSuite(Aircraft ac, int startAt = 0, int respawn = 0)
         {
             if (_card != null) { Abort("run key pressed again"); return; }
             if (_recording)   { StopRecord("run key pressed"); }
@@ -1387,16 +1519,46 @@ namespace NuclearOptionMouseAim
             // at something else look identical in the run count, and the operator has to be able to see
             // which one he is actually flying before three minutes a run go by.
             int rep = ResolveRepeat(sel[0], out string repSrc);
-            WTMouseAimPlugin.Log.LogInfo(
-                $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
-                + $"replicates from {repSrc}.");
+            // THE RESUME, CLAMPED RATHER THAN TRUSTED. The selection is re-resolved on the NEW
+            // aircraft, so a card set edited (or a batch entry advanced) between the loss and the
+            // relaunch would index past the queue. Falling back to a full run is the safe direction —
+            // it over-flies rather than crashing — but it is never silent, because a lane that
+            // restarts has re-flown replicates that already have captures.
+            if (startAt < 0 || startAt >= sel.Count)
+            {
+                if (startAt != 0)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] RESUME REFUSED: replicate index {startAt} is outside this lane's "
+                        + $"{sel.Count}-entry queue — the card selection must have changed under the "
+                        + "respawn. Flying the whole queue from 0; this lane's A/B is NOT balanced "
+                        + "against its earlier captures, so treat them as two batches.");
+                startAt = 0;
+            }
             // The block the queue was built from — cards per replicate, i.e. the post-class-filter card
             // count, recovered from the expansion rather than re-counted so the two cannot disagree.
             // ApplyArm indexes the A/B by `_qi / _block`; see there for what queue-indexing cost.
+            // Resolved before the log line since v1.0.2, which needs it to name the resume REPLICATE
+            // (the unit the operator and the arm schedule both count in) rather than a queue index.
             _block = Mathf.Max(1, sel.Count / Mathf.Max(1, rep));
-            _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
+            string resumeMsg = startAt > 0
+                             ? $", RESUMING at replicate {startAt / _block + 1} (queue index {startAt}) "
+                               + $"after respawn {respawn} — the earlier replicates flew on this lane's "
+                               + "previous airframe, and THIS one is a WARM-UP scored by neither arm "
+                               + "(it captures the new aircraft's anchor, so it flies from the spawn "
+                               + "state like replicate 1 does; ledger X27). This lane's scored count is "
+                               + "one short — the arm tally below is the one it will actually fly"
+                             : "";
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
+                + $"replicates from {repSrc}{resumeMsg}.");
+            _queue = sel; _qi = startAt; _card = sel[startAt]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
             _aborted = 0;
+            _owed = -1;              // a fresh run owes nothing until it ends short — see Finish
+            _respawn = respawn;      // stamped into every '# entry' this suite writes
+            // The replicate this run anchors ON — 0 for a fresh lane. Must follow _block, and must
+            // precede SetUpArmSchedule below, which tallies the printed schedule through it.
+            _resumeRep = startAt / _block;
             IndexCard();             // run-board caches; must follow every write to _card/_qi/_queue
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
             _rec.EntryNote = "";     // an UNGATED card (one that DECLARES nothing) must not inherit the last one's note
@@ -1439,17 +1601,27 @@ namespace NuclearOptionMouseAim
             // prints as '.' and the balance question is asked of replicates 1..N only: the invariant
             // now needs (repeat − 1) to be a multiple of 4, not repeat. Counting the warm-up as an A
             // is exactly the defect being removed, so this loop must start at 1 and skip ArmOf < 0.
+            //
+            // v1.0.2 — TALLIED THROUGH `ArmOfRun`, so a RESPAWNED lane's schedule is the one it will
+            // actually fly (ledger X27). Its resume replicate is anchor-capturing on the new metal and
+            // is therefore a second '.', which costs the lane one scored replicate and usually
+            // unbalances it — and that is precisely what the UNBALANCED warning below then says, out
+            // loud, before the resumed queue flies. A shortened scored sequence must never be silent.
+            // Known limit: `_resumeRep` names THIS resume only, so on a second respawn the tally
+            // cannot re-mark the first one's warm-up. It over-reports balance by at most one replicate
+            // per earlier respawn; the authoritative record is each capture's own `arm=` line, which
+            // compare-runs.py groups by, so no analysis reads this tally.
             int reps = Mathf.Max(1, runs / Mathf.Max(1, _block));
             var sb = new System.Text.StringBuilder(runs);
             for (int i = 0; i < runs; i++)
             {
-                int a = ArmOf(i / _block);
+                int a = ArmOfRun(i / _block, _resumeRep);
                 sb.Append(a < 0 ? '.' : a == 1 ? 'B' : 'A');
             }
             int nA = 0, nB = 0, sumA = 0, sumB = 0;
             for (int r = 0; r < reps; r++)
             {
-                int a = ArmOf(r);
+                int a = ArmOfRun(r, _resumeRep);
                 if (a < 0) continue;                       // the warm-up is on neither arm
                 if (a == 1) { nB++; sumB += r; } else { nA++; sumA += r; }
             }
@@ -1457,7 +1629,8 @@ namespace NuclearOptionMouseAim
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — "
                 + $"{reps} replicate(s) x {_block} card(s), {nA} A / {nB} B per card "
-                + $"('.' = replicate 0, the anchor-defining WARM-UP: on neither arm, scored by neither). "
+                + $"('.' = an anchor-defining WARM-UP: on neither arm, scored by neither — replicate 0, "
+                + $"and on a respawn also the replicate this lane RESUMED on, {_resumeRep}). "
                 + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
                 + $"THIS AIRCRAFT only (v0.94): the arm is per-aircraft state read through the controller, "
                 + $"so other aircraft sweep their own schedules and the F1 value of '{key}' is never written.");
@@ -1867,6 +2040,13 @@ namespace NuclearOptionMouseAim
                     + "'# stop' line, so a short count for this lane is those aborts and not a dropped "
                     + "recording — which is the distinction the analysis side could not make before.");
             _aborted = 0;
+            // WHAT THIS LANE STILL OWED, CAPTURED WHILE `_queue` IS STILL HERE TO COUNT AGAINST — the
+            // one line that survives the teardown below. A clean end leaves `_qi == _queue.Count`
+            // (NextCard walked it off the end), so this is -1 and no lane is ever respawned for
+            // finishing. See the LANE-CONTINUITY note; `TestDrone.LaneLost` reads it back through
+            // OwedBy when the drone is actually removed, which for a damage abort is IdleDespawnSec
+            // after this runs.
+            _owed = OwedFrom(_qi, _queue != null ? _queue.Count : 0);
             _dmgSeenAt = -1;         // re-arm the damage hold; it is per-card state like _placed
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
             IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
@@ -2313,6 +2493,10 @@ namespace NuclearOptionMouseAim
                 MoveAssembly(ac, rb, rot1 * Quaternion.Inverse(rb.rotation), rb.position, dPos,
                              rot1, fwd * vTgt);
 
+                // Published only now, after the write landed: an Infeasible or Failed placement must
+                // not leave a hover hold chasing an altitude nothing ever flew the aircraft to.
+                _cardAltM = altTgt;
+
                 // NO STALE DEMAND. Apply runs from this same call's POSTfix, so without this the tick
                 // that teleports the aircraft is also a tick chasing the previous card's last marker
                 // from a brand-new attitude — worth half a stick of pitch, and the measured source of
@@ -2337,10 +2521,27 @@ namespace NuclearOptionMouseAim
                 // the reset actually wrote, and the multiple is recoverable anyway (the card is named
                 // in the header and the sidecar records this airframe's `cornerSpeed`). No new column
                 // and no new key for a number two existing artifacts already pin down between them.
+                // THE RESPAWN FLAG LIVES HERE AND NOWHERE ELSE (v1.0.2). `# entry` is the per-replicate
+                // record of what the reset had to undo, and "this replicate was flown by a REPLACEMENT
+                // airframe" is exactly that kind of provenance — not a law setting (`# config`) and not
+                // an airframe capability (the `.airframe.json` sidecar, which is identical: a respawn is
+                // a fresh spawn of the same jsonKey, so every number in it would repeat and none of them
+                // would say so). Emitted only when it is non-zero, so an undamaged lane's captures stay
+                // byte-identical and `index-captures.py`'s generic `key=value` scan simply gains an
+                // `entry_respawn` column on the ones that need it.
+                // The other half of the tell is already free: this is the lane's FIRST placement on new
+                // metal, so `_anchorSet` is false and `snapBackM` reads ~0 exactly as a warm-up
+                // replicate does — a respawned lane's resumed replicate is anchor-CAPTURING, not
+                // snapping back. v1.0.2 does not merely document that difference, it ARMS FOR IT:
+                // `ArmOfRun` puts that replicate on neither arm, so `arm=-1` and no pooled A/B can
+                // contain it (ledger X27). `respawn=N` here stays the provenance record, and
+                // compare-runs.py's snapBackM==0 filter stays the analysis-side backstop for the paths
+                // no arm can reach — an ungated card, a hand-flown capture, a pre-v1.0.2 corpus.
                 _rec.EntryNote =
                     $"v={v0:0.0}->{vTgt:0.0} alt={alt0:0.0}->{altTgt:0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
-                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
+                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1"
+                    + (_respawn > 0 ? $" respawn={_respawn}" : "");
                 // The log line DOES name the multiple: it is the operator-facing confirmation that the
                 // card drove the number, and "180 m/s" alone reads identically whether it came from a
                 // corner multiple, an absolute startSpeed or a fallback.

@@ -19,13 +19,13 @@ So every large doc here now starts with an **index** that maps topic → section
 
 | doc | size | how to slice it |
 |---|---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | ~180 KB | index at top → one `L1.x` subsystem section |
-| [`LAW-LEDGER.md`](LAW-LEDGER.md) | ~85 KB | **summary table at top** → fetch findings by ID (`X27`, `H7`, …) |
-| [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md) | ~58 KB | §-index at top; **§7 is the numbered backlog** and has its own item index |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | ~190 KB | index at top → one `L1.x` subsystem section |
+| [`LAW-LEDGER.md`](LAW-LEDGER.md) | ~101 KB | **summary table at top** → fetch findings by ID (`X27`, `H7`, …) |
+| [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md) | ~60 KB | §-index at top; **§7 is the numbered backlog** and has its own item index |
 | [`GENERALITY-REVIEW.md`](GENERALITY-REVIEW.md) | ~44 KB | finding index at top → one finding |
 | [`debugtests/CAPTURES-DB.md`](debugtests/CAPTURES-DB.md) | ~46 KB | index at top → schema, or the metric matrix, or the batch index |
-| [`debugtests/TOOLS.md`](debugtests/TOOLS.md) | ~39 KB | tool table at top → the one tool you are running |
-| [`CHANGELOG.md`](CHANGELOG.md) | ~270 KB | **never read whole** — grep for a version or a symbol |
+| [`debugtests/TOOLS.md`](debugtests/TOOLS.md) | ~41 KB | tool table at top → the one tool you are running |
+| [`CHANGELOG.md`](CHANGELOG.md) | ~274 KB | **never read whole** — grep for a version or a symbol |
 
 `grep` already does most of this; there is deliberately no query helper to learn.
 

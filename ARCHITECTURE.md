@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 1.0.1 -->
+<!-- ARCH-VERSION: 1.0.2 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -12,7 +12,7 @@ each id to the file and type that implements it, and that table is what keeps th
 
 ## Index — read a slice, not the file
 
-This file is ~170 KB. **Never read it whole**; that is ~42k tokens for one answer. Find your subsystem
+This file is ~190 KB. **Never read it whole**; that is ~47k tokens for one answer. Find your subsystem
 below, then read only that line region (`Read` with `offset`/`limit`, or grep for the heading).
 
 | you want | section | what is in it |
@@ -74,7 +74,7 @@ flowchart TB
         campatch["<b>campatch</b><br/>Camera patches ×3<br/>view follows the marker"]
         telem["<b>telem</b><br/>ManeuverRecorder · AnomalyLog<br/>instrumentation sinks"]
         scenario["<b>scenario</b><br/>ScenarioPlayer<br/>test cards: play · record · select<br/>re-establishes the entry condition per replicate<br/>(anchor: pos + heading + speed + alt + fuel,<br/>demand written, controller dropped)<br/>A/B arms interleaved ABBA<br/>v0.90: a card carries its OWN run config<br/>(repeat · armToggle · pinned Cfg overrides)<br/>and Preview() answers 'what would fly?'<br/>with no aircraft in hand<br/>v0.91: + the FLEET (count · airframe LIST),<br/>so a batch needs nothing set in F1<br/>v0.93: entry speed may be startSpeedCorner,<br/>a multiple of THAT LANE's corner speed<br/>v0.94: the A/B schedule is PER AIRCRAFT —<br/>it writes chase, not cfg, so N lanes each<br/>run their own ABBA at the same time<br/>v0.96: a SECOND safety abort beside the altitude<br/>floor — any part detachment ends the replicate<br/>(off unless a card is running)<br/>v0.99.1: an abort ends the REPLICATE, not the lane<br/>(Finish nulls _queue and _queue IS the replicate<br/>expansion — 13 of 40 captures on the STOL batch);<br/>card config pins are REFCOUNTED across the fleet"]
-        drone["<b>drone</b><br/>TestDrone · Drone<br/>uncrewed aircraft: spawn · fly · despawn<br/>N at once, staggered launch<br/>v0.87: each starts its own card and flies it<br/>through the REAL law (chase), not the level-hold<br/>v0.90: the CARD picks the airframe/alt/speed,<br/>and a drone with no card running despawns itself<br/>v0.90.1: one step per AIRCRAFT, not per pilot —<br/>a two-seater ran everything twice per fixed step<br/>v0.91: the card picks HOW MANY and WHICH —<br/>airframe is a per-lane LIST, count defaults to it<br/>v0.92: a lane whose airframe CANNOT fly the card's<br/>entry speed is refused BEFORE it spawns<br/>v0.96: that check uses the FBW's cornerSpeed,<br/>not the AI's — they differ by up to 2.2x<br/>v0.99: lanes fly a RING, each heading OUTWARD along<br/>its own radius, so origDist (a measured noise axis,<br/>r = 0.948 with gJitterG) is matched across lanes at<br/>EVERY instant, not just at spawn.<br/>+ optional two altitude decks — packing, and<br/>altitude as a factor crossed with airframe<br/>(off unless DroneEnabled)"]
+        drone["<b>drone</b><br/>TestDrone · Drone<br/>uncrewed aircraft: spawn · fly · despawn<br/>N at once, staggered launch<br/>v0.87: each starts its own card and flies it<br/>through the REAL law (chase), not the level-hold<br/>v0.90: the CARD picks the airframe/alt/speed,<br/>and a drone with no card running despawns itself<br/>v0.90.1: one step per AIRCRAFT, not per pilot —<br/>a two-seater ran everything twice per fixed step<br/>v0.91: the card picks HOW MANY and WHICH —<br/>airframe is a per-lane LIST, count defaults to it<br/>v0.92: a lane whose airframe CANNOT fly the card's<br/>entry speed is refused BEFORE it spawns<br/>v0.96: that check uses the FBW's cornerSpeed,<br/>not the AI's — they differ by up to 2.2x<br/>v0.99: lanes fly a RING, each heading OUTWARD along<br/>its own radius, so origDist (a measured noise axis,<br/>r = 0.948 with gJitterG) is matched across lanes at<br/>EVERY instant, not just at spawn.<br/>+ optional two altitude decks — packing, and<br/>altitude as a factor crossed with airframe<br/><b>the COLLECTIVE: on a rotorcraft lane whose card<br/>declares a hover, the harness holds the altitude<br/>on the throttle axis</b> — a PI whose integrator<br/>LEARNS that airframe's hover collective, because<br/>one fixed throttle is not a hover for more than<br/>one airframe (R41: 0.60 climbed two rotorcraft and<br/>sank the third at −25 m/s into 16 of 16 aborts)<br/>(off unless DroneEnabled)"]
         drone_seam["<b>drone_seam</b><br/>TestDronePatch<br/>write a DRONE's ControlInputs<br/>(no-op for every other aircraft)"]
         sandbox["<b>sandbox</b><br/>PlayerSpawn<br/>v0.95: put the OPERATOR airborne on one key,<br/>to hand-fly the law with no mission built.<br/>In an aircraft ⇒ PLACE it (alt/speed/level,<br/>position + heading KEPT — no anchor, no card).<br/>Not in one ⇒ SPAWN one WITH player + HQ<br/>and let the game seat you.<br/>Reuses scenario's safe-teleport pair;<br/>never touches the drone registry"]
     end
@@ -121,7 +121,7 @@ flowchart TB
     scenario -->|"SegmentTag · CardTag · EntryNote<br/>OverrideNote · Start/Stop"| telem
     scenario -->|"Forget(ac)<br/>(entry force only:<br/>drop carried-over<br/>integrators + filters)"| chase
     scenario -->|"the card's own pinned overrides,<br/>applied BEFORE the recorder opens<br/>and restored AFTER it closes (v0.90).<br/>NOT the A/B arm any more (v0.94)"| cfg
-    scenario -->|"SetArm(ac, knob, value) — the A/B arm,<br/>ABBA per replicate, PER AIRCRAFT (v0.94).<br/>The law reads the lever via Arm(Cfg.X),<br/>so N aircraft sweep N arms at once and<br/>the global knob is never written.<br/>v0.99.1: indexed ArmOf(_qi / _block), i.e. by<br/>REPLICATE. The queue is blocked (c1,c2,c1,c2),<br/>so indexing by queue position gave every card<br/>A,B,A,B internally while the queue-wide balance<br/>check reported balanced — and compare-runs.py<br/>groups by (airframe, CARD, arm)"| chase
+    scenario -->|"SetArm(ac, knob, value) — the A/B arm,<br/>ABBA per replicate, PER AIRCRAFT (v0.94).<br/>The law reads the lever via Arm(Cfg.X),<br/>so N aircraft sweep N arms at once and<br/>the global knob is never written.<br/>v0.99.1: indexed ArmOf(_qi / _block), i.e. by<br/>REPLICATE. The queue is blocked (c1,c2,c1,c2),<br/>so indexing by queue position gave every card<br/>A,B,A,B internally while the queue-wide balance<br/>check reported balanced — and compare-runs.py<br/>groups by (airframe, CARD, arm).<br/>v1.0.1/v1.0.2: ArmOfRun(_qi / _block, _resumeRep)<br/>— the ANCHOR-CAPTURING replicate is armed as<br/>NEITHER (arm=-1): replicate 0, and the one a<br/>respawned lane resumes on. No scored replicate<br/>may fly from the spawn state (ledger X27)"| chase
     aim_rig -->|"aim direction<br/>(world unit vector)"| chase
     aim_rig -->|"aim direction"| campatch
     aim_rig -->|"marker + boresight"| plugin
@@ -139,7 +139,7 @@ flowchart TB
     drone -->|"SpawnAircraft(player=null, HQ=null)<br/>DisableUnit + Destroy(go, 2s)"| spawner
     pilot_fx -.->|"patched (postfix)"| drone_seam
     drone_seam -->|"resolve by aircraft instance id;<br/>skip anything not a live drone"| drone
-    drone -->|"Preview() at the launch key (what would fly:<br/>airframe · alt · speed · repeat · arm) ·<br/>StartSuite on its first pilot step ·<br/>Tick · OwnInputs (throttle) ·<br/>Playing? = the idle-despawn clock"| scenario
+    drone -->|"Preview() at the launch key (what would fly:<br/>airframe · alt · speed · repeat · arm) ·<br/>StartSuite on its first pilot step ·<br/>Tick · OwnInputs (throttle) ·<br/>CardAltM (the altitude the placement WROTE —<br/>the collective hold's target) ·<br/>Playing? = the idle-despawn clock"| scenario
     drone -->|"<b>FlyUncrewed(ac, AimDemand)</b> v0.87<br/>= BeginFrame + Apply, one seam not two.<br/>The demand is a PARAMETER: the marker is<br/>the human's, one per process"| chase
     drone -->|"pitch/roll/yaw/throttle,<br/>then FilterInputs() by hand —<br/>no pilot state ever calls it"| aircraft
 
@@ -203,7 +203,7 @@ flowchart TB
         f5["🟥 Aircraft.FilterInputs<br/>RelaxedStabilityController → FBW → surfaces"]
         f6["🟥 JobManager.FixedUpdateEarly<br/>ScheduleJobs() FIRST, then PilotAeroInputs()"]
         f7["🟥 Pilot.Pilot_OnAeroInputsApplied — every pilot"]
-        f8["🟦 drone_seam POSTFIX — live drone only<br/>0. v0.90.1 — ALREADY RUN THIS FIXED STEP? return.<br/>this fires once per PILOT and pilots is an ARRAY,<br/>so a two-seater ran 1..5 twice per physics step<br/>1. first step? scenario.StartSuite (its own card)<br/>2. scenario.Tick → this drone's AimDemand<br/>3. Drone.Fly → <b>chase.FlyUncrewed(ac, demand)</b><br/>&nbsp;&nbsp;&nbsp;(= BeginFrame + Apply; level-hold if no card)<br/>4. scenario.OwnInputs → throttle/brake<br/>5. Aircraft.FilterInputs OURSELVES — an uncrewed<br/>aircraft has no pilot state, and FilterInputs is<br/>only ever called FROM one, so the FBW would<br/>otherwise never run on it.<br/>Same ORDER as the player's f2..f5, one seam<br/>instead of two"]
+        f8["🟦 drone_seam POSTFIX — live drone only<br/>0. v0.90.1 — ALREADY RUN THIS FIXED STEP? return.<br/>this fires once per PILOT and pilots is an ARRAY,<br/>so a two-seater ran 1..5 twice per physics step<br/>1. first step? scenario.StartSuite (its own card)<br/>2. scenario.Tick → this drone's AimDemand<br/>3. Drone.Fly → <b>chase.FlyUncrewed(ac, demand)</b><br/>&nbsp;&nbsp;&nbsp;(= BeginFrame + Apply; level-hold if no card)<br/>4. scenario.OwnInputs → throttle/brake, and when it<br/>DECLINES (a card declaring a hover, where a pinned<br/>throttle would be a commanded climb) →<br/>drone.HoldCollective on a rotorcraft lane<br/>5. Aircraft.FilterInputs OURSELVES — an uncrewed<br/>aircraft has no pilot state, and FilterInputs is<br/>only ever called FROM one, so the FBW would<br/>otherwise never run on it.<br/>Same ORDER as the player's f2..f5, one seam<br/>instead of two"]
         f9["🟥 Rigidbody integration"]
         f1 --> f2 --> f3 --> f4 --> f5 --> f6 --> f7 --> f8 --> f9
         f0 --> f1
@@ -1063,7 +1063,10 @@ guards one call site** (the last two).
   replicates somewhere else.
 - **ABBA was unbalanced inside each card.** See the `scenario`/`chase` arm note — `ApplyArm` indexed
   the sweep by queue position while the queue is blocked, so every card flew A,B,A,B internally while
-  the queue-wide balance check reported balanced. Now indexed by replicate, `ArmOf(_qi / _block)`.
+  the queue-wide balance check reported balanced. Now indexed by replicate,
+  `ArmOfRun(_qi / _block, _resumeRep)` — and since v1.0.1/v1.0.2 the anchor-capturing replicate
+  (index 0, and a respawned lane's resume) is armed as **neither**, so no scored replicate flies from
+  the spawn state. Ledger `X27`.
 - **A later card's entry speed was never envelope-checked.** `EntrySpeedFlyable` guarded the SPAWN
   velocity — `sel[0]`'s speed, once — and `PlaceOnCondition`, which writes a speed once per card per
   replicate, guarded nothing. It is now `internal` and sits ahead of the write. `PlaceOnCondition`
@@ -1087,7 +1090,78 @@ Two new source invariants back the first two, because neither fails to compile: 
 `PinShared`/`UnpinShared` may write a pinned entry's `BoxedValue` (plus the acquire-once and
 release-once guards, plus `Forget(int)` aborting before it drops the registry entry), and **every
 field `Finish` resets must also be reset by `NextCard`**, minus an explicit per-run allowlist — which
-is ledger #12's shape, a per-replicate reset that did not happen.
+is ledger #12's shape, a per-replicate reset that did not happen. (v1.0.2's `_owed` is in that
+allowlist on purpose: it is the field that must *survive* `Finish` nulling `_queue`, because it is
+the only remaining record of what a lost lane still owed.)
+
+**v1.0.2 — a lane that loses its AIRCRAFT is respawned for the rest of its replicates.** v0.99.1
+covered the one abort where the airframe survives (the altitude floor); where it does not — a part
+fell off, the pilot was killed, the game removed the unit — the lane still ended, because there was
+nothing left to fly the queue with. R41 lost 6 captures that way (5 `Darkreach` + 1 `EW1`, ledger #51).
+**The lost data is the smaller half.** Replicates are armed ABBA and indexed by the lane's own queue
+position, so a lane dying at replicate 3 of 9 leaves *its own* sequence truncated and leaning — the
+R21 confound, reintroduced by one airframe losing a wing — and nothing warns, because
+`SetUpArmSchedule` prints the schedule the lane *intended* to fly and `compare-runs.py` pools whatever
+arrived. Respawning restores the invariant the schedule already assumes: **every lane flies its whole
+sequence.**
+
+Three pieces, and the seams are chosen so neither file learns the other's job:
+
+- **The question lives in the card player.** `ScenarioPlayer.OwedFrom(qi, queueLen)` is the resume
+  index — always the replicate *after* the one that died, so the dead replicate stays an abort with its
+  own truncated capture and nothing is ever flown twice or skipped. `OwedBy(aircraftId)` answers from
+  the **live cursor** when the suite is still nominally running (the game took the aircraft and nothing
+  has aborted it yet) and from a stashed `_owed` when a fatal abort already nulled `_queue` — which the
+  damage abort does `IdleDespawnSec` before anything despawns the drone.
+- **The answer is PULLED by the harness, at the instant a drone leaves the registry.**
+  `TestDrone.LaneLost` is called from **both** removal paths and, in both, **before `ForgetState`** —
+  that is what destroys the answer, and a source invariant asserts the order. Pulling rather than
+  pushing is what makes the two teardown orders irrelevant. It refuses outright for anything reporting
+  a `Player`: unreachable by construction (`Spawn` destroys those) but restated at the one place that
+  would otherwise put new metal under a crewed run.
+- **The respawn reuses the lane path, whole.** `LaunchLane(slot, resumeAt, respawns)` is `LaunchDue`'s
+  body split out and given the slot as a parameter, so a replacement comes back on **its own azimuth,
+  deck, airframe and per-lane entry speed**, through the same envelope gate — a second spawn site is
+  the one thing that would make the resumed capture non-comparable with the ones the lost aircraft
+  already wrote. Queued and drained from `FixedTick` **ahead of** the sky-empty interlock: both callers
+  are mid-walk over `_live`, and a lane relaunched there is live before `AdvanceBatch`'s `else` is
+  evaluated, so the batch cannot step to the next fleet while this one still owes replicates.
+
+**Bounded, and loudly.** `MaxLaneRespawns = 2` — a const, same judgment as `IdleDespawnSec`. R41's
+`UtilityHelo1` sank on 16 of 16 replicates and an uncapped rule would have relaunched it sixteen times
+for nothing; at the cap the lane is declared **OUT** in a warning that names the shortfall, because an
+airframe dying that often is a card problem and wants an operator, not another aircraft. `DespawnAll`
+sets `_cancelling` around its teardown loop: the panic key is an abort, not a pause, and without it
+clearing the sky would be followed one fixed step later by the fleet respawning itself.
+
+**How a respawn is visible in the artifacts.** The `# entry` header — the per-replicate record of what
+the reset had to undo — gains `respawn=N`, emitted only when non-zero, so undamaged lanes' captures stay
+byte-identical and `index-captures.py`'s generic `key=value` scan simply grows an `entry_respawn`
+column on the ones that need it. Deliberately **not** `# config` (a law setting, which this is not) and
+**not** the `.airframe.json` sidecar (identical by construction — a respawn is a fresh spawn of the same
+`jsonKey`, so every number would repeat and none would say so).
+
+**THE RESUMED REPLICATE IS A WARM-UP, AND THIS IS WHERE THE FEATURE COLLIDED WITH v1.0.1** (ledger
+`X27`). A replacement is *fresh metal*, so `StartSuite` sets `_anchorSet = false` and the resumed
+replicate's placement **captures** the run anchor: `snapBackM ≈ 0`, flying from the spawn state while
+every sibling arrives teleported — the exact stratum backlog #55b removed from the arms one release
+earlier, reappearing at replicate 3 of 9 instead of replicate 0, where `ArmOf`'s index test could not
+see it. Merging the two features naively would have scored it. So the schedule now asks the composed
+question: **`ArmOfRun(replicate, resume)`** returns −1 when the replicate is *this run's* anchor
+capture, and `resume == 0` is `ArmOf` verbatim, so nothing that never respawns changes by one arm. The
+invariant, stated once and asserted rather than argued: **no scored replicate may be
+anchor-capturing.** `ApplyArm` indexes through it, `SetUpArmSchedule` **tallies** through it — so the
+schedule printed before the queue flies is the one the lane will actually fly, its `.` marks *both*
+warm-ups, and its existing UNBALANCED warning fires on the shortfall. A respawn therefore recovers the
+lane's remaining replicates *minus one scored replicate*, loudly, rather than recovering all of them
+plus a confound. `compare-runs.py._anchor_replicate_filter` (which keys on `snapBackM`, not on the
+index) stays what it always was — the analysis-side **backstop** for the paths no arm reaches: an
+ungated card, a hand-flown capture, the pre-v1.0.1 corpus.
+
+`debugtests/test-lane-respawn.py` compiles the `LANE-CONTINUITY` and `ARM-SCHEDULE` regions together
+and asserts the composed property — a lane that dies at *any* replicate flies every queue index an
+undamaged one would, no scored row of it is the first placement of its suite, the cost is exactly one
+replicate per respawn, and the cap stops a lane that dies every time after exactly two relaunches.
 
 ```mermaid
 flowchart TB
@@ -1121,17 +1195,20 @@ flowchart TB
     idle -->|no| look["dict probe on the pilot's aircraft id.<br/>MISS ⇒ return. This is what keeps the player's<br/>aircraft out: it can only enter the dict via Spawn,<br/>which spawns with player=null and asserts it"]
     look --> dead{"v0.90 — p.dead / p.ejected / ac.disabled ?<br/>the game NEVER self-disables an Aircraft on damage<br/>(Unit.disabled is written only by ServerDisableUnit /<br/>ReturnToInventory / OnDestroy, and WaitRemoveAircraft<br/>fires FROM that hook), so PruneDead cannot see a<br/>shot-down drone — this is the one place holding the<br/>Pilot the damage landed on. AHEAD of every write<br/>below: the original early-returns on both flags"}
     dead -->|yes| gone["Despawn(d, reason)"]
+    gone --> lost
+    prune --> lost["<b>v1.0.2 — LaneLost(d, reason)</b>, on BOTH removal<br/>paths and in both BEFORE ForgetState — that is what<br/>aborts the card and nulls _queue, and _queue is the<br/>only record of what this lane still owed.<br/>Asks the CARD PLAYER, which is the only thing that<br/>knows: ScenarioPlayer.OwedBy(id) reads the LIVE<br/>cursor when the suite is still nominally running<br/>(the game took the aircraft, nothing aborted yet)<br/>and the stashed _owed when a FATAL abort already<br/>tore the queue down — the damage abort does that<br/>IdleDespawnSec before anything despawns the drone.<br/>Resume = the replicate AFTER the one that died, so<br/>that replicate stays an abort with its own<br/>truncated capture and nothing is flown twice.<br/>REFUSES anything reporting a Player (you cannot<br/>respawn a human) and anything at MaxLaneRespawns=2<br/>— the cap is a LOUD warning naming the shortfall,<br/>because a lane dying that often is a card problem"]
+    lost --> relaunch["queued on the dead drone (Slot/ResumeAt/Respawns<br/>ARE the lane identity), drained by FixedTick AHEAD<br/>of the sky-empty interlock: both callers are mid-walk<br/>over _live, and a lane relaunched here is live before<br/>AdvanceBatch's else is evaluated — so the batch<br/>cannot step to the next fleet while this one still<br/>owes replicates.<br/><b>LaunchLane(slot, resumeAt, respawns)</b> — the SAME<br/>lane path a first launch takes, so the replacement<br/>returns on its own azimuth, deck, airframe and<br/>per-lane entry speed, through the same envelope<br/>gate. A second spawn site is the one thing that<br/>would make the resumed capture non-comparable with<br/>the ones the lost aircraft already wrote.<br/>DespawnAll sets _cancelling around its loop: the<br/>panic key is an ABORT, not a pause"]
     dead -->|no| once{"v0.90.1 — LastStep == Time.fixedTime ?<br/>this postfix fires once per PILOT and<br/>Aircraft.pilots is an ARRAY, so a TWO-SEATER ran<br/>everything below TWICE per fixed step: 2x card<br/>clock, and chase double-stepped inside one physics<br/>step (finite differences read ZERO on call 2).<br/>A stamp, not pilots[0] == p: a dead pilot is<br/>dropped from JobManager's list, so seat 0 would<br/>stop ticking a drone whose front-seater was killed.<br/>BELOW the despawn, so ANY seat's death still counts"}
     once -->|already ran| out2["return"]
-    once -->|first this step| start["<b>first pilot step? ScenarioPlayer.StartSuite</b><br/>(v0.87) THIS drone's card, at ITS spawn instant —<br/>one key starting N cards would align every<br/>replicate's segment boundaries, which is what the<br/>stagger exists to prevent. Not at Spawn: the card's<br/>first act rigid-moves every part rigidbody.<br/>Refuses with its own [card] line when no card is<br/>enabled for this airframe class"]
+    once -->|first this step| start["<b>first pilot step? ScenarioPlayer.StartSuite</b><br/>(v0.87) THIS drone's card, at ITS spawn instant —<br/>one key starting N cards would align every<br/>replicate's segment boundaries, which is what the<br/>stagger exists to prevent. Not at Spawn: the card's<br/>first act rigid-moves every part rigidbody.<br/>Refuses with its own [card] line when no card is<br/>enabled for this airframe class.<br/>v1.0.2: StartSuite(ac, d.ResumeAt, d.Respawns) —<br/>0/0 for a fresh lane, so this is the same call it<br/>always was; on a REPLACEMENT they carry the lane's<br/>queue position forward so it FINISHES the sequence<br/>rather than restarting it (a restart re-flies<br/>replicates that already wrote captures and leaves<br/>the lane's ABBA leaning). Clamped + warned if the<br/>card selection changed under the respawn.<br/>The RESUMED replicate is a WARM-UP: fresh metal<br/>re-anchors, so its placement captures the anchor<br/>(snapBackM~0) and ArmOfRun arms it as neither —<br/>one scored replicate spent, said out loud in the<br/>suite-start line and the arm tally (ledger X27)"]
     start --> card["<b>ScenarioPlayer.For(ac).Tick(ac)</b><br/>THIS drone's card, written HERE so it gets the<br/>same zero-tick property the player's card gets<br/>from the seam prefix: the demand for this step<br/>lands immediately before Fly reads it"]
     card --> fly["<b>Drone.Fly(d) = TestDrone.ChaseCard</b> (v0.87)<br/>card running ⇒ <b>chase.FlyUncrewed(ac, AimDemand)</b><br/>— the REAL law, BeginFrame + Apply, per aircraft.<br/>no card ⇒ the trivial level-hold (nothing to chase).<br/>declined ⇒ ABORT the card with the reason in the<br/>CSV's '# stop' line, never finish it on the<br/>level-hold and write a capture that reads clean.<br/>Per DRONE, not one static: N drones, N controllers"]
-    fly --> thr["<b>ScenarioPlayer.OwnInputs(ac)</b><br/>throttle/brake, mirroring the player's seam<br/>postfix. Without it a card flies at whatever<br/>throttle happened to be set — and 0 is the game's<br/>airbrake trigger (the R18 false energy failure)"]
+    fly --> thr["<b>ScenarioPlayer.OwnInputs(ac)</b><br/>throttle/brake, mirroring the player's seam<br/>postfix. Without it a card flies at whatever<br/>throttle happened to be set — and 0 is the game's<br/>airbrake trigger (the R18 false energy failure).<br/>v1.0.2: when it DECLINES (a card declaring a<br/>hover — a pinned throttle would be a commanded<br/>climb) a rotorcraft lane falls through to<br/><b>TestDrone.HoldCollective</b>, a PI whose<br/>integrator LEARNS that airframe's hover<br/>collective. One fixed 0.60 was not a hover for<br/>more than one airframe (R41)"]
     thr --> filt["<b>ac.FilterInputs()</b> — by hand.<br/>RelaxedStabilityController + FBW are only ever<br/>called FROM a pilot state, and this aircraft has<br/>none, so raw inputs would reach the surfaces —<br/>a DIFFERENT plant from the one the law is tuned<br/>against (the FBW reads pitch/yaw as a RATE)"]
 
     classDef mod fill:#1e3a8a,stroke:#60a5fa,color:#eff6ff
     classDef plat fill:#78350f,stroke:#fbbf24,color:#fffbeb
-    class key,cap,plan,pend,ft,due,sp,prune,gate,g1,g2,g3,call,assert,reg,post,idle,out1,look,dead,gone,once,out2,start,card,fly,thr,filt mod
+    class key,cap,plan,pend,ft,due,sp,prune,lost,relaunch,gate,g1,g2,g3,call,assert,reg,post,idle,out1,look,dead,gone,once,out2,start,card,fly,thr,filt mod
     class tick plat
 ```
 
@@ -1165,6 +1242,41 @@ no achievability cap, no AoA envelope. Since v0.87 it flies only a drone with **
 (nothing to chase, and an aircraft nobody flies falls into the sea) — and since v0.90 that is at most
 the `IdleDespawnSec` window before the drone despawns itself. Do not tune it, and never compare a
 level-hold capture against a card capture: they are not the same controller.
+
+**THE COLLECTIVE — the harness owns the throttle on a rotorcraft hover card.** `OwnInputs` deliberately
+*declines* the throttle when a card declares a zero entry speed (its `declared-zero-ok:` note), and that
+is right: on a rotorcraft the throttle **is** the collective, so pinning one number at a hover commands
+a climb or a descent rather than an entry condition. But declining left the axis holding whatever the
+level-hold last wrote — `HoldThrottle`, 0.60 — and **one fixed collective is not a hover for more than
+one airframe.** R41 measured the three-way split at exactly that value: `QuadVTOL1` and `AttackHelo1`
+climbed at +2.2…+5.7 m/s while `UtilityHelo1` sank at **−25 m/s**, lost 1.9 km in 78 s and aborted
+**16 of 16** replicates on the 500 m floor — so the entire `rotor-hover` verdict rested on the one
+airframe that happened to hover (`debugtests/R41-rotor.md` §5a). A card cannot fix it; the throttle pin
+is read *after* that early return.
+
+So `OnPilotStep` now reads `OwnInputs`' return: **when the card declines the throttle, `HoldCollective`
+takes it** — altitude error → commanded climb rate (the same `VsPerAltErr`/`VsMax` outer loop the
+level-hold uses) → a PI on the throttle axis. **The integrator is the whole design.** The collective
+that holds a given rotorcraft level is a different number for every airframe and the generality rule
+forbids writing those numbers down, so the loop *measures* it: `Drone.Collective` is per drone and its
+steady state **is** that lane's hover collective, learned from live vertical speed and re-learned as
+fuel burns off. A P-only loop structurally cannot — it holds altitude only where its fixed trim happens
+to *be* the hover value and droops everywhere else (**−244 m** for the `UtilityHelo1` shape, measured by
+deleting the integrator in `test-collective-hold.py`).
+
+Three gates, all necessary, and one of them is a deliberate rejection: a card is running; the card did
+**not** take the throttle itself (which confines this to *declared-hover* cards — `rotor-transition` and
+every forward-entry card keep their pinned throttle and are byte-identical); and the airframe is
+collective-classed (`ChaseController._collective`). Gating on the **live `_heliBlend`** instead was
+considered and rejected — it falls as forward speed builds, and a forward-speed runaway is exactly the
+failure R41 §2 measured, so the hold would cut out precisely when the aircraft is diverging. A card's
+declared hover does not move. The target altitude is `ScenarioPlayer.CardAltM`, the altitude the
+placement **actually wrote** (not `startAlt`, which is optional), falling back to the drone's spawn
+altitude when no placement has landed. **Fixed-wing lanes and crewed flight are bit-for-bit unaffected:**
+the only caller is the drone seam, and the write sits past `!_collective`. It needs no new CSV column —
+`thr` (v0.77) already records the commanded throttle. The loop's arithmetic lives between the
+`COLLECTIVE-HOLD` markers in `TestDrone.cs` and is checked by
+`python debugtests/test-collective-hold.py` — keep it inside them.
 
 ---
 
@@ -1337,9 +1449,14 @@ the aircraft on every placement, so a bent-but-attached wing once again hands it
 next replicate. Both are **recorded** in the new `# entry` CSV header line (`snapBackM`,
 pre-placement `v`/`alt`, fuel, `ctrlReset`) so an analysis can covary them out. Also owns the **A/B
 arm schedule**: `Cfg.ScenarioArmToggle` (or the first card's own `armToggle`) names a bool knob,
-alternated **ABBA** by queue index (`((i+1)>>1)&1`) so a monotonic session drift lands on both arms
-equally instead of loading onto the second block; each capture self-identifies via `arm=`/`armKnob=`
-on its `# config` line.
+alternated **ABBA** by REPLICATE index (v0.99.1) so a monotonic session drift lands on both arms
+equally instead of loading onto the second block; since v1.0.1/v1.0.2 the ANCHOR-CAPTURING replicate
+— the one whose placement captures the run anchor, so it flies from the spawn state with
+`snapBackM = 0` — is armed as NEITHER (`ArmOfRun(replicate, resume)`, returning −1): replicate 0 of
+every lane, plus the replicate a RESPAWNED lane resumes on, since fresh metal re-anchors. **No
+scored replicate may be anchor-capturing** (backlog #55b, ledger `X27`); the scored count is
+therefore `repeat − 1` and ABBA balances at repeat = 4k+1. Each capture self-identifies via
+`arm=`/`armKnob=` on its `# config` line.
 
 #### v0.94 — that schedule is PER AIRCRAFT and a fleet sweeps concurrently
 
@@ -1450,7 +1567,13 @@ kill a good run, while the −1 in the column is what says the probe failed. Do 
 more extract-and-compile marker regions were added the same release — `SPEC-GRAMMAR` (`SplitSpec`,
 checked by `debugtests/test-spec-grammar.py`, which runs the same 16 cases against `scorecard.py`'s
 `split_spec` copy) and `FLEET-RESOLVE` (`ResolveCount`+`CountKeys`, checked by
-`debugtests/test-fleet-resolve.py`)
+`debugtests/test-fleet-resolve.py`). **v1.0.2 added a fourth: `LANE-CONTINUITY`** —
+`MaxLaneRespawns` + `OwedFrom` + `RespawnAt`, the arithmetic behind respawning a lane whose aircraft
+died, checked by `debugtests/test-lane-respawn.py`, which compiles it **together with**
+`ARM-SCHEDULE` because the property is compositional. `OwedBy(aircraftId)` beside it is the
+harness's read of it, and `StartSuite(ac, startAt, respawn)` — both defaulting to a fresh lane —
+sets `_resumeRep`, so a resumed lane's first replicate is anchor-capturing and armed as neither
+(`ArmOfRun`, ledger `X27`)
 
 #### Additional file-level notes
 

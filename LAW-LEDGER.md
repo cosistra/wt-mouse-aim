@@ -27,9 +27,11 @@ given where it is not obvious. **Re-derive with `--stats` rather than trusting a
 >    keyed the **queue** index, and a multi-card selection blocks the queue — so **every multi-card
 >    A/B batch on disk carries it and must be RE-FLOWN, not re-scored.** R31 is the worst case, not
 >    the only one. Single-card batches are unaffected (`_block == 1`).
-> 3. **Replicate 1 of every ABBA lane is a different flight condition, and it is always arm 0** (X27).
->    Landed on the analysis side (`compare-runs.py`) and in the law (v1.0.1); **pre-v1.0.1 A/B data
->    must exclude it** — the SQL filter is `entry_snapBackM <> 0`.
+> 3. **No SCORED replicate may be ANCHOR-CAPTURING** (X27). Replicate 1 of every ABBA lane is a
+>    different flight condition and was always arm 0; v1.0.2 found a second such replicate on the
+>    lane-respawn path and restated the rule index-free (`ArmOfRun`). Landed on the analysis side
+>    (`compare-runs.py`, a backstop) and in the law (v1.0.1, v1.0.2); **pre-v1.0.1 A/B data must
+>    exclude it** — the SQL filter is `entry_snapBackM <> 0`.
 >
 > **Do not restore a per-batch findings document.** Findings land here; see
 > [`debugtests/CAPTURES-DB.md`](debugtests/CAPTURES-DB.md) → *The batch index* for what each run tag
@@ -68,7 +70,7 @@ re-analysis** — there is no unconfounded contrast in the data to recover. Cons
 
 ## Finding index — fetch by ID, don't read the file
 
-**This file is ~85 KB (~21k tokens). Do not read it end to end.** Every finding has a stable ID.
+**This file is ~101 KB (~25k tokens). Do not read it end to end.** Every finding has a stable ID.
 Read this table (cheap), then jump to the one or two rows you need — `Read` with `offset`, or
 grep the ID. IDs are permanent; **line numbers drift, so grep by ID if the offset misses.**
 Cite as `LAW-LEDGER.md X27`, never by line.
@@ -81,128 +83,128 @@ authoritative, not the letter).
 <!-- LEDGER-INDEX:BEGIN — regenerate if you add a finding; the ID and bucket are what matter -->
 | ID | bucket | claim | line |
 |---|---|---|---|
-| `I1` | ESTABLISHED | The rig does not drift enough to invent an effect | 214 |
-| `I2` | ESTABLISHED | Captures are labelled correctly and ABBA arms alternate | 215 |
-| `I3` | ESTABLISHED | A drone flies the same law as the player, bit-for-bit, and does not touch the player's aircraft | 216 |
-| `I8` | ESTABLISHED | Replicate scatter is dominated by the world-origin float grain, and it is a distance law | 217 |
-| `I9` | ESTABLISHED | `fixedWindowOffDeg` is the metric `terminalOffDeg` was pretending to be | 218 |
-| `I10` | ESTABLISHED | The large-displacement placement kill is fixed, and R37 is the only batch that proves it | 219 |
-| `I11` | ESTABLISHED | The v0.99.0 ring lane geometry works, and it is confirmed by intervention rather than correlation | 220 |
-| `I4` | ESTABLISHED | Three instrument defects were real and are fixed | 221 |
-| `I5` | ESTABLISHED | The concurrent per-aircraft A/B (v0.94) works in flight | 222 |
-| `I6` | ESTABLISHED | Frame-time cost of extra lanes is superlinear | 223 |
-| `I7` | ESTABLISHED | The oblique family is UNSATURATED and is the only regime whose metrics can respond to a gain change | 224 |
-| `D1` | ESTABLISHED | At matched step magnitude and mirrored geometry, moving the nose DOWN leaves more terminal error than moving it up | 230 |
-| `D2` | ESTABLISHED | It is DIRECTION, not position in the card | 231 |
-| `D3` | ESTABLISHED | It is not energy, dynamic pressure or airspeed | 232 |
-| `D4` | ESTABLISHED | It is not terminal elevation | 233 |
-| `D5` | ESTABLISHED | It is magnitude-gated, essentially absent below the `FineAngle = 6` knee | 234 |
-| `D6` | ESTABLISHED | It is speed-insensitive | 235 |
-| `D7` | ESTABLISHED | `Fighter1` INVERTS it — up is worse — in both batches | 236 |
-| `D8` | ESTABLISHED | `bSup` / `BelowAlignSuppress` is NOT the transmission path | 237 |
-| `D9` | ESTABLISHED | The penalty is created downstream of the roll handover, in the fine regime | 238 |
-| `D10` | ESTABLISHED | The residual is almost pure azimuth | 239 |
-| `D13` | ESTABLISHED | The corpus's first above-floor steady-state pointing measurement, and the ~3.5° standing lag it predicted | 240 |
-| `D11` | ESTABLISHED | Reverting to the v0.67 suppressor moves it 5 %/29 %/2 % and leaves ×2.8–3.9 standing | 241 |
-| `D12` | ESTABLISHED | The v0.67 form rails the roll stick and the v0.85 form does not | 242 |
-| `G1` | ESTABLISHED | The law is NOT tuned to the Ifrit | 248 |
-| `G2` | ESTABLISHED | The airframe ranking is stable across two independent changes of entry condition | 249 |
-| `G3` | ESTABLISHED | Entry speed does not explain the spread | 250 |
-| `G4` | ESTABLISHED | The residual spread is real but bounded, and it is not at the incumbent | 251 |
-| `G5` | ESTABLISHED | The R28 spread was ~40 % entry condition and ~60 % law–airframe interaction | 252 |
-| `G6` | ESTABLISHED | Two-seat crew, FBW `assist=0` and distance-above-corner are all EXCLUDED as causes of the spread | 253 |
-| `G7` | ESTABLISHED | `CAS1` and `COIN` — the two airframes the flat-250 grid could never fly — are ordinary members of the band | 254 |
-| `G8` | ESTABLISHED | The between-airframe spread survives at matched speed | 255 |
-| `G9` | ESTABLISHED | No fixed-wing regression across eight releases, v0.96.0 → v1.0.0 | 256 |
-| `P1` | ESTABLISHED | The game has NO G governor | 262 |
-| `P2` | ESTABLISHED | Over-G damages the PILOT, never the airframe | 263 |
-| `P3` | ESTABLISHED | The game's alpha limiter is gated `if (num2 < 1f)` (`:65033`) and is therefore INACTIVE above corner q — which is w… | 264 |
-| `P4` | ESTABLISHED | `aeroPartCount` cannot see damage | 265 |
-| `K1` | ESTABLISHED | The precursor reproduces | 271 |
-| `K2` | ESTABLISHED | The departure is an AoA/authority failure, not a G failure | 272 |
-| `K3` | ESTABLISHED | The law's entire response to a non-responding plant is a graded stand-down, and it runs out | 273 |
-| `K4` | ESTABLISHED | The placement-tick transient (#23) is BIMODAL, and the upper mode is not benign | 274 |
-| `K5` | ESTABLISHED | The airframe-side half is a specific combination, and `flightAssist = 0` is not it | 275 |
-| `K6` | ESTABLISHED | At a genuine 0.95× FBW corner (95 m/s) the Darkreach flies the card | 276 |
-| `K7` | ESTABLISHED | The Darkreach azimuth mode is real, V-dependent and Darkreach-only — and it is NOT the settle loop's | 277 |
-| `H1` | ESTABLISHED | The v0.58 rotorcraft branch executes as of v1.0.0 — and had never executed before it, for ~40 versions | 300 |
-| `H2` | ESTABLISHED | With the branch live, the law is excellent on the one airframe that genuinely hovered — and R42 shows NO REGRESSION… | 301 |
-| `H3` | ESTABLISHED | ~~**The tiltwing blend sign is NOT inverted.**~~ **CORRECTED BY R42 — the narrow observation survives, the verdict… | 302 |
-| `H4` | ESTABLISHED | Forward speed, not the yaw step, selects the outcome on a rotorcraft | 303 |
-| `H5` | ESTABLISHED | Two of three rotorcraft never hovered, and it is a harness limitation, not a law result. REPRODUCED IN R42 UNCHANGE… | 304 |
-| `H6` | ESTABLISHED | `AttackHelo1`'s R41 divergence was a STALE-CONFIG artifact, not a law defect. At the shipped 60/20 it converges | 305 |
-| `H7` | ESTABLISHED | There is nevertheless a DETERMINISTIC standing residual in the BLEND BAND, and it is the corpus's first above-floor… | 306 |
-| `A1` | ESTABLISHED | `MarkerRateFeedForward` is worth 48–75% of the standing azimuth error, measured OFF the bank rail — and it buys tha… | 312 |
-| `A2` | ESTABLISHED | The three `e1*` below-nose A/Bs are ALL NULL, and two of them are structurally incapable of being anything else | 313 |
-| `N1` | ESTABLISHED | The AoA guard's switch-on point, expressed in each airframe's own ceiling, spans 0.529 → 0.739 — a 40% spread produ… | 319 |
-| `N2` | ESTABLISHED | THE LAW NEVER BACKS OFF. Not once | 320 |
-| `N3` | ESTABLISHED | The guard nevertheless holds: nothing crossed the ceiling on 144 of 144 segments | 321 |
-| `S1` | ESTABLISHED | The `MaxBankAngle` clamp is a bystander, not the cause of the sustained-turn lag | 327 |
-| `S2` | ESTABLISHED | `lateralHold` rails at 7.5° and drops the entire bank pipeline to exactly zero weight in a sustained turn | 328 |
-| `S3` | ESTABLISHED | `_iPitch` is dead outside the 6° fine cone | 329 |
-| `S4` | ESTABLISHED | Gate chatter is NOT the cause of the fine-aim complaint | 330 |
-| `S5` | ESTABLISHED | `elDn` is a sustained roll limit cycle in the below-nose hemisphere, and the mirror step in the upper hemisphere co… | 331 |
-| `S6` | ESTABLISHED | The fine-cone regression scales with step size, not with gate activity | 332 |
-| `L1` | PLAUSIBLE | `aircraftGLimit` is the property that tracks the per-airframe spread | 340 |
-| `L2` | PLAUSIBLE | `pEff` is the mechanism of the down-step penalty | 341 |
-| `L3` | PLAUSIBLE | #45 `schedFloor = 0.3f` is a genuine ONE-LAW violation that costs an airframe | 342 |
-| `L4` | PLAUSIBLE | #21 (`lateralHold` rail) is what initiates the Darkreach precursor | 343 |
-| `L5` | PLAUSIBLE | #23's placement transient is what makes the Darkreach cascade self-sustaining | 344 |
-| `L6` | PLAUSIBLE | The per-replicate reset teleport can damage an airframe | 345 |
-| `L7` | PLAUSIBLE | `predFloor = 0.30` is a real, distinct gate defect | 346 |
-| `L8` | PLAUSIBLE | The position effect in a card is energy accumulation | 347 |
-| `L9` | PLAUSIBLE | `FastBomber1`'s variable-geometry wing explains its 5–10× replicate sd | 348 |
-| `L10` | PLAUSIBLE | The law's problem at the heavy end is pitch authority running out | 349 |
-| `L11` | PLAUSIBLE | `trainer · oblique-12-c` is a card/airframe pair on which an AoA-gate A/B could return non-null | 350 |
-| `L12` | PLAUSIBLE | `_yawWeak` measures "the error did not close", not "the rudder is weak" | 351 |
-| `L13` | PLAUSIBLE | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | 352 |
-| `L15` | PLAUSIBLE | The H7 blend-band residual is K3's shape in rotorcraft form: BOTH turn channels are de-rated at once, and neither h… | 353 |
-| `L14` | PLAUSIBLE | `_pitchEff` × `_alphaSchedFilt` are two de-raters of ONE physical event, multiplied to 0.09 | 354 |
-| `X1` | REFUTED | *"No mod-side G-limiter — the game's stability control governs."* | 365 |
-| `X2` | REFUTED | *"The law is bending airframes."* Stated to the maintainer | 366 |
-| `X3` | REFUTED | v0.88's **aoaTrim theory** — that writing the placement velocity at AoA = 0 caused the entry thump | 367 |
-| `X4` | REFUTED | Gate A: *"`iPitch`/`iYaw` read 0.0000 on every first row, so `ctrlReset` does what it claims."* | 368 |
-| `X5` | REFUTED | #20: *"the `PEffRevThresh` floor branch is unreachable, so `_pitchEff` never goes below 0.15."* | 369 |
-| `X6` | REFUTED | *"The oblique family is where #20 and #21 get A/B-ed"* (LAW-CHARACTERIZATION §4 Batch 4) | 370 |
-| `X7` | REFUTED | *"`aoaLimiterActivePct` is 0 in every capture ever taken."* | 371 |
-| `X8` | REFUTED | R21/LAW-CHARACTERIZATION: *"the bank clamp is what holds the 9.4° sustained-turn lag."* | 372 |
-| `X9` | REFUTED | INSTRUCTOR-LOOP §5: *"independent hysteresis-free gates chatter and that is the cross-fighting the maintainer feels."* | 373 |
-| `X10` | REFUTED | R28 §3.2: *"`bSup` reads 0.000–0.06, so belowness is excluded as the mechanism."* | 374 |
-| `X11` | REFUTED | R28 §4.3, and the Gate B record: *"#23 does not reproduce and is confirmed harmless."* | 375 |
-| `X12` | REFUTED | *"`arm=0` on `BelowAlignSuppress` disables the suppression."* A whole batch was commissioned on it | 376 |
-| `X13` | REFUTED | R28's headline *"1.2–17.9× the terminal error"* as a property of the law | 377 |
-| `X14` | REFUTED | R28's *"treat any non-zero count of 33.3 ms rows as the stop signal for going wider."* | 378 |
-| `X15` | REFUTED | *"`FastBomber1` is a failure airframe."* | 379 |
-| `X16` | REFUTED | LAW-CHARACTERIZATION §1: *"19 cards, ONE has ever been flown, on ONE airframe, and it is saturated."* | 380 |
-| `X17` | REFUTED | *"The Darkreach is the only airframe with `flightAssist = 0`."* | 381 |
-| `X18` | REFUTED | *"R29's 26.9 g means the airframe was overstressed."* | 382 |
-| `X19` | REFUTED | *"`oblique-6-dwell` scores a property of the airframe."* All 314 captures of it were read that way | 383 |
-| `X20` | REFUTED | R37 §4: *"the `oblique-6-dwell` drift is ordered by thrust-to-weight."* | 384 |
-| `X21` | REFUTED | *"`wobbleEpisodes*` counts oscillation modes."* Six signals, the whole corpus, and four documents rested on it | 385 |
-| `X22` | REFUTED | *"`RelativeTurnLead` is a live lever worth sweeping."* A card and a knob existed for it | 386 |
-| `X23` | REFUTED | *"`alpha-sweep` measures the alpha regime"*, and *"low q is the route into it."* | 387 |
-| `X24` | REFUTED | *"`dmgFrac` reports per-row damage"*, and *"a detach ratio of 0.114 is four detach events."* | 388 |
-| `X25` | REFUTED | *"R39's `stol-*` batch is STOL data."* 53 captures, ONE-LAW standing case 3 | 389 |
-| `X26` | REFUTED | *"The Darkreach damage failure fires at placement 4–5"* (ledger #51), as a rule the R40 cards would rank | 390 |
-| `X27` | REFUTED | *"Replicate 1 is a normal replicate."* Every ABBA batch ever flown assumed it | 391 |
-| `X29` | REFUTED | *"`AttackHelo1` diverges — the rotorcraft law fails on a plain helicopter."* R41's headline rotorcraft result: a mo… | 392 |
-| `X30` | REFUTED | *"The tiltwing blend sign is NOT inverted"* (H3), and the standing instruction that **the `ponytail:` flip at `Chas… | 393 |
-| `X31` | REFUTED | §7 Tier 3 / `GENERALITY-REVIEW.md` finding 6: *"`AttackHelo1` can never leave the hover regime at any speed it is c… | 394 |
-| `X28` | REFUTED | *"A field capture from a user is readable."* | 395 |
-| `O1` | OPEN | What arrests the down leg in the fine regime? | 403 |
-| `O2` | OPEN | Is the residual spread a law problem or an airframe-capability difference? | 404 |
-| `O3` | OPEN | Does #21 (`lateralHold` rail) cost anything? | 405 |
-| `O4` | OPEN | Does the mod's AoA path work? | 406 |
-| `O5` | OPEN | What sets the R32 onset at replicate ~32? | 407 |
-| `O6` | OPEN | Does removing `belowSuppress` entirely remove the down-step penalty? | 408 |
-| `O7` | OPEN | Does the precursor CAUSE the Darkreach departure, or share a cause? | 409 |
-| `O8` | OPEN | Is `EW1` doing the same thing more slowly? | 410 |
-| `O9` | OPEN | ~~**Rotorcraft, STOL, and the whole attribution set are UNFLOWN.**~~ **MOSTLY CLOSED (R39/R40/R41) — and the residu… | 411 |
-| `O10` | OPEN | Does the law ever move the nose AWAY from the demand? | 412 |
-| `O11` | OPEN | Does the roll axis limit-cycle above ~350 m/s on every airframe? | 413 |
-| `O12` | OPEN | ~~**Does `tiltFrac` actually rise toward 1 in the hover?**~~ **ANSWERED BY R42, AND THE ANSWER IS NO — see X30.** T… | 414 |
-| `O13` | OPEN | What is `tiltFrac` at and below `HeliHoverSpeed`, and is the defect the SIGN or the LIMITS? | 415 |
-| `O14` | OPEN | Are the three v1.0.1 fixes actually working? | 416 |
+| `I1` | ESTABLISHED | The rig does not drift enough to invent an effect | 216 |
+| `I2` | ESTABLISHED | Captures are labelled correctly and ABBA arms alternate | 217 |
+| `I3` | ESTABLISHED | A drone flies the same law as the player, bit-for-bit, and does not touch the player's aircraft | 218 |
+| `I8` | ESTABLISHED | Replicate scatter is dominated by the world-origin float grain, and it is a distance law | 219 |
+| `I9` | ESTABLISHED | `fixedWindowOffDeg` is the metric `terminalOffDeg` was pretending to be | 220 |
+| `I10` | ESTABLISHED | The large-displacement placement kill is fixed, and R37 is the only batch that proves it | 221 |
+| `I11` | ESTABLISHED | The v0.99.0 ring lane geometry works, and it is confirmed by intervention rather than correlation | 222 |
+| `I4` | ESTABLISHED | Three instrument defects were real and are fixed | 223 |
+| `I5` | ESTABLISHED | The concurrent per-aircraft A/B (v0.94) works in flight | 224 |
+| `I6` | ESTABLISHED | Frame-time cost of extra lanes is superlinear | 225 |
+| `I7` | ESTABLISHED | The oblique family is UNSATURATED and is the only regime whose metrics can respond to a gain change | 226 |
+| `D1` | ESTABLISHED | At matched step magnitude and mirrored geometry, moving the nose DOWN leaves more terminal error than moving it up | 232 |
+| `D2` | ESTABLISHED | It is DIRECTION, not position in the card | 233 |
+| `D3` | ESTABLISHED | It is not energy, dynamic pressure or airspeed | 234 |
+| `D4` | ESTABLISHED | It is not terminal elevation | 235 |
+| `D5` | ESTABLISHED | It is magnitude-gated, essentially absent below the `FineAngle = 6` knee | 236 |
+| `D6` | ESTABLISHED | It is speed-insensitive | 237 |
+| `D7` | ESTABLISHED | `Fighter1` INVERTS it — up is worse — in both batches | 238 |
+| `D8` | ESTABLISHED | `bSup` / `BelowAlignSuppress` is NOT the transmission path | 239 |
+| `D9` | ESTABLISHED | The penalty is created downstream of the roll handover, in the fine regime | 240 |
+| `D10` | ESTABLISHED | The residual is almost pure azimuth | 241 |
+| `D13` | ESTABLISHED | The corpus's first above-floor steady-state pointing measurement, and the ~3.5° standing lag it predicted | 242 |
+| `D11` | ESTABLISHED | Reverting to the v0.67 suppressor moves it 5 %/29 %/2 % and leaves ×2.8–3.9 standing | 243 |
+| `D12` | ESTABLISHED | The v0.67 form rails the roll stick and the v0.85 form does not | 244 |
+| `G1` | ESTABLISHED | The law is NOT tuned to the Ifrit | 250 |
+| `G2` | ESTABLISHED | The airframe ranking is stable across two independent changes of entry condition | 251 |
+| `G3` | ESTABLISHED | Entry speed does not explain the spread | 252 |
+| `G4` | ESTABLISHED | The residual spread is real but bounded, and it is not at the incumbent | 253 |
+| `G5` | ESTABLISHED | The R28 spread was ~40 % entry condition and ~60 % law–airframe interaction | 254 |
+| `G6` | ESTABLISHED | Two-seat crew, FBW `assist=0` and distance-above-corner are all EXCLUDED as causes of the spread | 255 |
+| `G7` | ESTABLISHED | `CAS1` and `COIN` — the two airframes the flat-250 grid could never fly — are ordinary members of the band | 256 |
+| `G8` | ESTABLISHED | The between-airframe spread survives at matched speed | 257 |
+| `G9` | ESTABLISHED | No fixed-wing regression across eight releases, v0.96.0 → v1.0.0 | 258 |
+| `P1` | ESTABLISHED | The game has NO G governor | 264 |
+| `P2` | ESTABLISHED | Over-G damages the PILOT, never the airframe | 265 |
+| `P3` | ESTABLISHED | The game's alpha limiter is gated `if (num2 < 1f)` (`:65033`) and is therefore INACTIVE above corner q — which is w… | 266 |
+| `P4` | ESTABLISHED | `aeroPartCount` cannot see damage | 267 |
+| `K1` | ESTABLISHED | The precursor reproduces | 273 |
+| `K2` | ESTABLISHED | The departure is an AoA/authority failure, not a G failure | 274 |
+| `K3` | ESTABLISHED | The law's entire response to a non-responding plant is a graded stand-down, and it runs out | 275 |
+| `K4` | ESTABLISHED | The placement-tick transient (#23) is BIMODAL, and the upper mode is not benign | 276 |
+| `K5` | ESTABLISHED | The airframe-side half is a specific combination, and `flightAssist = 0` is not it | 277 |
+| `K6` | ESTABLISHED | At a genuine 0.95× FBW corner (95 m/s) the Darkreach flies the card | 278 |
+| `K7` | ESTABLISHED | The Darkreach azimuth mode is real, V-dependent and Darkreach-only — and it is NOT the settle loop's | 279 |
+| `H1` | ESTABLISHED | The v0.58 rotorcraft branch executes as of v1.0.0 — and had never executed before it, for ~40 versions | 302 |
+| `H2` | ESTABLISHED | With the branch live, the law is excellent on the one airframe that genuinely hovered — and R42 shows NO REGRESSION… | 303 |
+| `H3` | ESTABLISHED | ~~**The tiltwing blend sign is NOT inverted.**~~ **CORRECTED BY R42 — the narrow observation survives, the verdict… | 304 |
+| `H4` | ESTABLISHED | Forward speed, not the yaw step, selects the outcome on a rotorcraft | 305 |
+| `H5` | ESTABLISHED | Two of three rotorcraft never hovered, and it is a harness limitation, not a law result. REPRODUCED IN R42 UNCHANGE… | 306 |
+| `H6` | ESTABLISHED | `AttackHelo1`'s R41 divergence was a STALE-CONFIG artifact, not a law defect. At the shipped 60/20 it converges | 307 |
+| `H7` | ESTABLISHED | There is nevertheless a DETERMINISTIC standing residual in the BLEND BAND, and it is the corpus's first above-floor… | 308 |
+| `A1` | ESTABLISHED | `MarkerRateFeedForward` is worth 48–75% of the standing azimuth error, measured OFF the bank rail — and it buys tha… | 314 |
+| `A2` | ESTABLISHED | The three `e1*` below-nose A/Bs are ALL NULL, and two of them are structurally incapable of being anything else | 315 |
+| `N1` | ESTABLISHED | The AoA guard's switch-on point, expressed in each airframe's own ceiling, spans 0.529 → 0.739 — a 40% spread produ… | 321 |
+| `N2` | ESTABLISHED | THE LAW NEVER BACKS OFF. Not once | 322 |
+| `N3` | ESTABLISHED | The guard nevertheless holds: nothing crossed the ceiling on 144 of 144 segments | 323 |
+| `S1` | ESTABLISHED | The `MaxBankAngle` clamp is a bystander, not the cause of the sustained-turn lag | 329 |
+| `S2` | ESTABLISHED | `lateralHold` rails at 7.5° and drops the entire bank pipeline to exactly zero weight in a sustained turn | 330 |
+| `S3` | ESTABLISHED | `_iPitch` is dead outside the 6° fine cone | 331 |
+| `S4` | ESTABLISHED | Gate chatter is NOT the cause of the fine-aim complaint | 332 |
+| `S5` | ESTABLISHED | `elDn` is a sustained roll limit cycle in the below-nose hemisphere, and the mirror step in the upper hemisphere co… | 333 |
+| `S6` | ESTABLISHED | The fine-cone regression scales with step size, not with gate activity | 334 |
+| `L1` | PLAUSIBLE | `aircraftGLimit` is the property that tracks the per-airframe spread | 342 |
+| `L2` | PLAUSIBLE | `pEff` is the mechanism of the down-step penalty | 343 |
+| `L3` | PLAUSIBLE | #45 `schedFloor = 0.3f` is a genuine ONE-LAW violation that costs an airframe | 344 |
+| `L4` | PLAUSIBLE | #21 (`lateralHold` rail) is what initiates the Darkreach precursor | 345 |
+| `L5` | PLAUSIBLE | #23's placement transient is what makes the Darkreach cascade self-sustaining | 346 |
+| `L6` | PLAUSIBLE | The per-replicate reset teleport can damage an airframe | 347 |
+| `L7` | PLAUSIBLE | `predFloor = 0.30` is a real, distinct gate defect | 348 |
+| `L8` | PLAUSIBLE | The position effect in a card is energy accumulation | 349 |
+| `L9` | PLAUSIBLE | `FastBomber1`'s variable-geometry wing explains its 5–10× replicate sd | 350 |
+| `L10` | PLAUSIBLE | The law's problem at the heavy end is pitch authority running out | 351 |
+| `L11` | PLAUSIBLE | `trainer · oblique-12-c` is a card/airframe pair on which an AoA-gate A/B could return non-null | 352 |
+| `L12` | PLAUSIBLE | `_yawWeak` measures "the error did not close", not "the rudder is weak" | 353 |
+| `L13` | PLAUSIBLE | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | 354 |
+| `L15` | PLAUSIBLE | The H7 blend-band residual is K3's shape in rotorcraft form: BOTH turn channels are de-rated at once, and neither h… | 355 |
+| `L14` | PLAUSIBLE | `_pitchEff` × `_alphaSchedFilt` are two de-raters of ONE physical event, multiplied to 0.09 | 356 |
+| `X1` | REFUTED | *"No mod-side G-limiter — the game's stability control governs."* | 367 |
+| `X2` | REFUTED | *"The law is bending airframes."* Stated to the maintainer | 368 |
+| `X3` | REFUTED | v0.88's **aoaTrim theory** — that writing the placement velocity at AoA = 0 caused the entry thump | 369 |
+| `X4` | REFUTED | Gate A: *"`iPitch`/`iYaw` read 0.0000 on every first row, so `ctrlReset` does what it claims."* | 370 |
+| `X5` | REFUTED | #20: *"the `PEffRevThresh` floor branch is unreachable, so `_pitchEff` never goes below 0.15."* | 371 |
+| `X6` | REFUTED | *"The oblique family is where #20 and #21 get A/B-ed"* (LAW-CHARACTERIZATION §4 Batch 4) | 372 |
+| `X7` | REFUTED | *"`aoaLimiterActivePct` is 0 in every capture ever taken."* | 373 |
+| `X8` | REFUTED | R21/LAW-CHARACTERIZATION: *"the bank clamp is what holds the 9.4° sustained-turn lag."* | 374 |
+| `X9` | REFUTED | INSTRUCTOR-LOOP §5: *"independent hysteresis-free gates chatter and that is the cross-fighting the maintainer feels."* | 375 |
+| `X10` | REFUTED | R28 §3.2: *"`bSup` reads 0.000–0.06, so belowness is excluded as the mechanism."* | 376 |
+| `X11` | REFUTED | R28 §4.3, and the Gate B record: *"#23 does not reproduce and is confirmed harmless."* | 377 |
+| `X12` | REFUTED | *"`arm=0` on `BelowAlignSuppress` disables the suppression."* A whole batch was commissioned on it | 378 |
+| `X13` | REFUTED | R28's headline *"1.2–17.9× the terminal error"* as a property of the law | 379 |
+| `X14` | REFUTED | R28's *"treat any non-zero count of 33.3 ms rows as the stop signal for going wider."* | 380 |
+| `X15` | REFUTED | *"`FastBomber1` is a failure airframe."* | 381 |
+| `X16` | REFUTED | LAW-CHARACTERIZATION §1: *"19 cards, ONE has ever been flown, on ONE airframe, and it is saturated."* | 382 |
+| `X17` | REFUTED | *"The Darkreach is the only airframe with `flightAssist = 0`."* | 383 |
+| `X18` | REFUTED | *"R29's 26.9 g means the airframe was overstressed."* | 384 |
+| `X19` | REFUTED | *"`oblique-6-dwell` scores a property of the airframe."* All 314 captures of it were read that way | 385 |
+| `X20` | REFUTED | R37 §4: *"the `oblique-6-dwell` drift is ordered by thrust-to-weight."* | 386 |
+| `X21` | REFUTED | *"`wobbleEpisodes*` counts oscillation modes."* Six signals, the whole corpus, and four documents rested on it | 387 |
+| `X22` | REFUTED | *"`RelativeTurnLead` is a live lever worth sweeping."* A card and a knob existed for it | 388 |
+| `X23` | REFUTED | *"`alpha-sweep` measures the alpha regime"*, and *"low q is the route into it."* | 389 |
+| `X24` | REFUTED | *"`dmgFrac` reports per-row damage"*, and *"a detach ratio of 0.114 is four detach events."* | 390 |
+| `X25` | REFUTED | *"R39's `stol-*` batch is STOL data."* 53 captures, ONE-LAW standing case 3 | 391 |
+| `X26` | REFUTED | *"The Darkreach damage failure fires at placement 4–5"* (ledger #51), as a rule the R40 cards would rank | 392 |
+| `X27` | REFUTED | *"Replicate 1 is a normal replicate."* Every ABBA batch ever flown assumed it | 393 |
+| `X29` | REFUTED | *"`AttackHelo1` diverges — the rotorcraft law fails on a plain helicopter."* R41's headline rotorcraft result: a mo… | 394 |
+| `X30` | REFUTED | *"The tiltwing blend sign is NOT inverted"* (H3), and the standing instruction that **the `ponytail:` flip at `Chas… | 395 |
+| `X31` | REFUTED | §7 Tier 3 / `GENERALITY-REVIEW.md` finding 6: *"`AttackHelo1` can never leave the hover regime at any speed it is c… | 396 |
+| `X28` | REFUTED | *"A field capture from a user is readable."* | 397 |
+| `O1` | OPEN | What arrests the down leg in the fine regime? | 405 |
+| `O2` | OPEN | Is the residual spread a law problem or an airframe-capability difference? | 406 |
+| `O3` | OPEN | Does #21 (`lateralHold` rail) cost anything? | 407 |
+| `O4` | OPEN | Does the mod's AoA path work? | 408 |
+| `O5` | OPEN | What sets the R32 onset at replicate ~32? | 409 |
+| `O6` | OPEN | Does removing `belowSuppress` entirely remove the down-step penalty? | 410 |
+| `O7` | OPEN | Does the precursor CAUSE the Darkreach departure, or share a cause? | 411 |
+| `O8` | OPEN | Is `EW1` doing the same thing more slowly? | 412 |
+| `O9` | OPEN | ~~**Rotorcraft, STOL, and the whole attribution set are UNFLOWN.**~~ **MOSTLY CLOSED (R39/R40/R41) — and the residu… | 413 |
+| `O10` | OPEN | Does the law ever move the nose AWAY from the demand? | 414 |
+| `O11` | OPEN | Does the roll axis limit-cycle above ~350 m/s on every airframe? | 415 |
+| `O12` | OPEN | ~~**Does `tiltFrac` actually rise toward 1 in the hover?**~~ **ANSWERED BY R42, AND THE ANSWER IS NO — see X30.** T… | 416 |
+| `O13` | OPEN | What is `tiltFrac` at and below `HeliHoverSpeed`, and is the defect the SIGN or the LIMITS? | 417 |
+| `O14` | OPEN | Are the three v1.0.1 fixes actually working? | 418 |
 <!-- LEDGER-INDEX:END -->
 
 ## 1. ESTABLISHED
@@ -388,7 +390,7 @@ on, and turned out to be wrong.
 | X24 | *"`dmgFrac` reports per-row damage"*, and *"a detach ratio of 0.114 is four detach events."* | `dmgFrac` is **structurally incapable** of ever being nonzero on a capture the harness aborts — the row is written *after* the abort check. 641,555 rows, **zero** nonzero, against 8 known damage aborts. And `UnitPart.Detach` cascades `onParentDetached` down the subtree, so the ratio is **subtree size**: 0.029 = a leaf, 0.057 = one child, 0.114 = three descendants. | R39-F, R40 metric repair. `WHERE dmgFrac = 0` selects **everything** — see `CAPTURES-DB.md` gotcha 9b. The real damage signal is the abort itself plus the sidecar's `detachedRatioAtStart`. The graveyard's "sweep latency" reading of 0.114 is wrong |
 | X25 | *"R39's `stol-*` batch is STOL data."* 53 captures, ONE-LAW standing case 3. | The card declared 90 m/s but throttle was unpinned at 1.00: the jets were at 144–147 m/s by the end of the 6 s `arm` and **340–381 m/s (2.1–2.4× corner)** by the last scored segment — *faster than anything else in R39*. It is a second **high-q** dataset. | R39-stol. Cards now pin `ScenarioThrottle = 0.25`; R41 holds 85–178 m/s. **Consequence:** R41's 10–70× `elDn40` "improvement" over R39 is a **card fix, not a law change** — the two are different flight conditions, not an A/B |
 | X26 | *"The Darkreach damage failure fires at placement 4–5"* (ledger #51), as a rule the R40 cards would rank. | It did not occur at all: Darkreach completed **32 placements across three cards with zero damage aborts**, including an 8-replicate card at a 6.7 km snapback that is the near-twin of the R39 lane that died at replicate 5. | R40-place. #51 stays **OPEN and instrumented**, not fixed and not reproduced on demand; R40 points at a third variable neither card controls (`origDist`). *Also retracted in the same batch: the "48 captures against 24 expected — exactly 2×" premise was a filename glob counting each capture's sidecar* |
-| X27 | *"Replicate 1 is a normal replicate."* Every ABBA batch ever flown assumed it. | `ArmOf` made index 0 **always arm 0** (32 of 32 captures across four R41 cards), and replicate 1 is the placement that **captures** the run anchor — so it snaps back 0 m by construction and flies from the spawn (`v = 250→250`, `alt = 6000`) while every sibling arrives teleported (`snapBackM ≈ 11,190`, `v ≈ 352→250`, `alt ≈ 2,180`). **Arm 0 was systematically handed a different flight condition.** | R41 §2 — caught it converting a null into an apparent **30% win** (`FastBomber1 · e1-below-suppress`: 1.572 vs 0.261 pooled, **0.223 vs 0.226** with the stratum dropped). Fixed both sides: `compare-runs.py._anchor_replicate_filter` drops an arm-unbalanced `snapBackM = 0` stratum and warns (fed by `scorecard.provenance` parsing `snapBackM` off the `# entry` line, which nothing read before); v1.0.1 makes replicate 0 a **warm-up armed as neither** — `ArmOf` is `replicateIndex == 0 ? -1 : (replicateIndex >> 1) & 1`, `ApplyArm` assigns nothing at `_armIdx < 0`, and the capture self-labels `arm=-1`, which `compare-runs.py` files as a third group no A/B reaches. SQL filter for direct work: **`entry_snapBackM <> 0`**. *An absent `snapBackM` is unknown, never 0.* **Why EXCLUDE rather than balance — the alternative is arithmetically unavailable, not merely worse:** the stratum is exactly **one** replicate per lane per run, and the lane *is* the unit of analysis (`compare-runs.py` groups by (airframe, card, arm) and refuses to pool across airframes). One capture cannot be split across two arms; alternating it across lanes or runs balances a pool nothing ever compares and leaves the per-lane A/B exactly as confounded. **The cost, because it lands on cards:** it is `repeat − 1` that must divide by 4, so cards want **4k+1** (5, 9, 13) and `repeat: 8` scores seven and warns UNBALANCED — shipped cards were deliberately left to warn rather than be silently changed in the same commit. `test-arm-schedule.py` asserts the **stratum property** ("no scored arm may ever contain replicate 0") rather than the pattern, and carries the pre-v1.0.1 form as a failing counterfactual |
+| X27 | *"Replicate 1 is a normal replicate."* Every ABBA batch ever flown assumed it. | `ArmOf` made index 0 **always arm 0** (32 of 32 captures across four R41 cards), and replicate 1 is the placement that **captures** the run anchor — so it snaps back 0 m by construction and flies from the spawn (`v = 250→250`, `alt = 6000`) while every sibling arrives teleported (`snapBackM ≈ 11,190`, `v ≈ 352→250`, `alt ≈ 2,180`). **Arm 0 was systematically handed a different flight condition.** | R41 §2 — caught it converting a null into an apparent **30% win** (`FastBomber1 · e1-below-suppress`: 1.572 vs 0.261 pooled, **0.223 vs 0.226** with the stratum dropped). Fixed both sides: `compare-runs.py._anchor_replicate_filter` drops an arm-unbalanced `snapBackM = 0` stratum and warns (fed by `scorecard.provenance` parsing `snapBackM` off the `# entry` line, which nothing read before); v1.0.1 makes replicate 0 a **warm-up armed as neither** — `ArmOf` is `replicateIndex == 0 ? -1 : (replicateIndex >> 1) & 1`, `ApplyArm` assigns nothing at `_armIdx < 0`, and the capture self-labels `arm=-1`, which `compare-runs.py` files as a third group no A/B reaches. SQL filter for direct work: **`entry_snapBackM <> 0`**. *An absent `snapBackM` is unknown, never 0.* **Why EXCLUDE rather than balance — the alternative is arithmetically unavailable, not merely worse:** the stratum is exactly **one** replicate per lane per run, and the lane *is* the unit of analysis (`compare-runs.py` groups by (airframe, card, arm) and refuses to pool across airframes). One capture cannot be split across two arms; alternating it across lanes or runs balances a pool nothing ever compares and leaves the per-lane A/B exactly as confounded. **The cost, because it lands on cards:** it is `repeat − 1` that must divide by 4, so cards want **4k+1** (5, 9, 13) and `repeat: 8` scores seven and warns UNBALANCED — shipped cards were deliberately left to warn rather than be silently changed in the same commit. `test-arm-schedule.py` asserts the **stratum property** ("no scored arm may ever contain replicate 0") rather than the pattern, and carries the pre-v1.0.1 form as a failing counterfactual. **v1.0.2 — CORRECTION TO THE v1.0.1 FIX: "replicate 0" was the INSTANCE, not the property, and a second instance arrived one release later.** Lane respawn (same release) resumes a dead lane's queue on **fresh metal**, and `StartSuite` sets `_anchorSet = false` on every suite — so the resumed replicate's placement *captures* the anchor exactly as replicate 0's does (`snapBackM ≈ 0`, flying from the spawn state, `# entry` reading `v = laneSpeed→laneSpeed`) while sitting at replicate 3 of 9, where an index test cannot see it. Merging the two features as written would have **scored** it: #55b restored on a different path, in the same release that closed it. The property is therefore restated index-free — **no SCORED replicate may be ANCHOR-CAPTURING** — and enforced by `ArmOfRun(replicateIndex, resumeReplicate) => replicateIndex == resumeReplicate ? -1 : ArmOf(replicateIndex)`, read by `ApplyArm` **and tallied by `SetUpArmSchedule`**, with `resumeReplicate == 0` making a never-respawned lane `ArmOf` **verbatim** (asserted: `ArmOfRun(i, 0) == ArmOf(i)` for i in 0..63). **Cost, stated because it is a real one:** a respawn spends **one more scored replicate** — a 9-replicate lane that dies twice scores 6 of 8 rather than 8 of 8, against R41's actual alternative of **0** (5 `Darkreach` + 1 `EW1` lanes lost outright, #51). It is never silent: the suite-start line names the resumed replicate as a warm-up, the schedule prints a second `.`, and the existing UNBALANCED warning fires off a tally computed through the same function. **REJECTED, and why.** *(a) Score it and let `_anchor_replicate_filter` catch it.* The filter only drops when the stratum is arm-**unbalanced** (equal counts return the pools untouched, by design, so `place-noop` cards survive) — a single respawn is exactly the balanced-looking case it declines to act on. It is also the wrong layer: the confound would be in the artifact, and every reader that is not `compare-runs.py` (`index-captures.py` SQL, `scorecard.py`, a hand analysis) pools it. The filter stays a **backstop** for the paths no arm reaches — an ungated card, a hand-flown capture, the pre-v1.0.1 corpus. *(b) Carry the lost aircraft's anchor to the replacement, so the resumed replicate snaps back like a sibling.* The tempting one, and it is **arithmetically empty**: `LaunchLane(slot, …)` is deterministic in `slot` (same azimuth, ring radius, deck offset and `SpawnAlt`), so the replacement spawns at the point the lost aircraft anchored on — which was its own spawn point. `snapBackM` reads ~0 either way. The distinguishing condition is not *where* the anchor is but that the placement is a **no-op on freshly spawned metal** (R41: `v = 250→250 alt = 6000→6000`) against an 11,190 m teleport with a ~100 m/s deceleration. Transferring it buys nothing measurable and adds cross-aircraft state. *(c) Fly the resumed replicate twice — once as a warm-up, then scored — or append one replicate to the queue.* Recovers the full scored count and breaks the respawn's own invariant: two captures share one replicate index (which `index-captures.py` keys on), the queue outgrows the card's declared `repeat` so `_block`/`reps` and the printed schedule stop describing the run, and each retry costs a full card duration against a cap of 2. One replicate is not worth the queue invariant. *(d) Restart the lane at 0.* Already rejected by the respawn design for re-flying captured replicates, and it does not even solve this: a restarted lane's own replicate 0 is anchor-capturing too. *(e) Key the warm-up off `!_anchorSet` inside `ApplyArm` rather than off an index.* Physically the exact invariant, and the call order permits it (`ApplyArm` runs before `PlaceOnCondition`). Fatal anyway: with `ScenarioForceEntry` off, or a card declaring no entry speed, **no placement ever runs**, so `_anchorSet` stays false forever and every replicate becomes a warm-up — silently disarming every ungated card. It is also not a pure function, so no extract-and-compile test could hold it. **Also corrected:** the respawn branch's own test asserted "the same complete, balanced arm sequence an undamaged lane would have" — written against v1.0.0's `ArmOf` and false under v1.0.1's, before the respawn was even considered. Replaced by the two properties that survive: every queue index re-flown, and no scored row is the first placement of its suite |
 | X29 | *"`AttackHelo1` diverges — the rotorcraft law fails on a plain helicopter."* R41's headline rotorcraft result: a monotone forward-speed runaway to 51 m/s with the bank railed at 72° and \|azErr\| growing to 34.1°. It was written into H4, into `GENERALITY-REVIEW.md` finding 6 and into §7's Tier 3. | **A stale live config, not the law.** `com.no.wtmouseaim.cfg` held the v0.43 pair 150 / 40.28 against the shipped 60 / 20, which makes `speedRamp ≡ 1.0` for every speed the card reaches and so deletes the bank channel outright. R42 re-flew the identical cards at 60/20: `fixedWindowOffDeg` **−85…−95%**, pedal rail 66.1% → 0.0%, 143 `persistent-miss` → **0** (H6). **A second, smaller correction rides along: "bank railed at 72°" was the TARGET.** In R41 `bankTR` reached 79.9° while the delivered `bank` never exceeded **3.3°** and averaged 0.02–0.88° — the aircraft was not banking at all, which is the *evidence* for the deleted channel and the opposite of what "railed bank" reads as. | Corrected here and in H4/H2; `GENERALITY-REVIEW.md` finding 6; `LAW-CHARACTERIZATION.md` §7 Tier 3. **The residue is real and is now H7** — convergence is not the same as closure |
 | X30 | *"The tiltwing blend sign is NOT inverted"* (H3), and the standing instruction that **the `ponytail:` flip at `ChaseController.cs:1128` must not be actioned.** | **R42 isolates `tiltFrac` for the first time and it runs the wrong way.** At `HeliForwardSpeed = 60` the whole `rotor-transition` leg flies above it (min `vFwd` ≥ 60 m/s over 8 captures × 8,960 rows), so `speedRamp ≡ 0.000` and `heliBlend` **is** `tiltFrac` — exactly the readout O12 predicted. Measured, by 10 m/s bin: **0.620 (100–110) → 0.535 (90–100) → 0.377 (80–90) → 0.224 (70–80) → 0.182 (60–70)**. Time runs high-speed → low-speed, so **`tiltFrac` falls monotonically as the aircraft decelerates toward the hover**; a correctly-oriented `tiltFrac` (1 = hover) must rise. Cross-checked against R41's own data: R41's `heliBlend` − speedRamp residual is +0.002 in the three slow bins and **+0.190 at 100–110**, i.e. `tiltFrac ≈ 0.619` there — agreeing with R42's 0.620 to **0.001**. The signal was in R41 all along, under the `max()`. | **But do NOT action the flip on this evidence either.** Flipped, `tiltFrac` would read 0.380 at 108 m/s in wing-borne cruise where it must be ~0 — the measured range spans 0.18–0.62, so **neither orientation lands on 0**, and the defect may be the limits `(lo, hi)` rather than the sign. `tiltwing=1` is confirmed in the log, so the term did resolve. The missing measurement is the hover end — O12's successor, **O13** |
 | X31 | §7 Tier 3 / `GENERALITY-REVIEW.md` finding 6: *"`AttackHelo1` can never leave the hover regime at any speed it is capable of flying — Vmax 100 m/s gives a lowest reachable `heliBlend` of 0.455."* | **Arithmetic done against the stale config.** 0.455 = (150 − 100)/110. At the **shipped** 60/20, `(60 − 100)/40` clamps to **0**, so `AttackHelo1` reaches full fixed-wing behaviour at any `vFwd ≥ 60` m/s. R42 measured it down to **0.55** at 38 m/s, matching `(60 − 38)/40 = 0.55` exactly. | The *structural* half of finding 6 stands untouched — these are still absolute m/s constants and a heavy compound heli still blends identically to a light scout. Only the "cannot leave the regime" consequence is withdrawn |

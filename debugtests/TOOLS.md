@@ -22,7 +22,7 @@ All tools are **stdlib-only Python**, run from the repo root, and every one has 
 | `check-architecture.py` | does `ARCHITECTURE.md` still match the code? | `CLAUDE.md` → Keeping the diagram current |
 | `index-decompiled.py` | reverse a `:NNNNN` citation into a type/member | [decompile index](#index-decompiledpy--the-decompile-index) |
 | **flying a batch** | the whole unattended procedure | [harness](#uncrewed-drones--the-harness-procedure), [run board](#the-harness-run-board), [sandbox](#hand-flying-the-law-the-sandbox-key) |
-| **source-region tests** | compile a region of the shipped C# and assert on it | [arm](#test-arm-schedulepy--concurrent-ab-arms), [grammar](#test-spec-grammarpy--config-spec-grammar), [fleet](#test-fleet-resolvepy--fleet-resolvers-and-the-entry-speed-gate), [lane](#test-lane-framepy--lane-frame--ring), [card model](#test-card-modelpy--card-deserialisation) |
+| **source-region tests** | compile a region of the shipped C# and assert on it | [arm](#test-arm-schedulepy--concurrent-ab-arms), [respawn](#test-lane-respawnpy--dead-lane-respawn), [collective](#test-collective-holdpy--the-rotorcraft-collective-hold), [grammar](#test-spec-grammarpy--config-spec-grammar), [fleet](#test-fleet-resolvepy--fleet-resolvers-and-the-entry-speed-gate), [lane](#test-lane-framepy--lane-frame--ring), [card model](#test-card-modelpy--card-deserialisation) |
 
 Related references: `debugtests/CAPTURES-DB.md` (schema + SQL traps), `cards/README.md` (the card
 grid), `AIRFRAMES.md` (jsonKeys and envelopes).
@@ -388,6 +388,36 @@ declarations `Cfg.cs` marks `(A/B lever)`, so adding OR removing a lever fails h
 caught — four levers, five sites now). **Run it after touching the arm machinery or adding an A/B
 lever** — none of those five fails to compile, and all five produce a batch that scores fine and
 answers a different question.
+
+## test-lane-respawn.py — dead-lane respawn
+
+**Dead-lane respawn (v1.0.2).** `python debugtests/test-lane-respawn.py` compiles the
+`LANE-CONTINUITY` **and** `ARM-SCHEDULE` regions of `ScenarioPlayer.cs` together, because the
+property is compositional and neither piece can state it alone: **a lane that loses its aircraft at
+any replicate and resumes where it left off flies every queue index an undamaged lane would have**
+(nothing re-flown, nothing skipped) **and scores no anchor-capturing replicate** (ledger `X27`) —
+the resumed one is a warm-up, and the check pins the cost at exactly that one replicate so a fix
+that unscored the whole resumed tail would fail too. Plus the **hard cap**: a lane that dies on
+every replicate must relaunch exactly `MaxLaneRespawns` times, not sixteen (R41's `UtilityHelo1`).
+Plus five source asserts the arithmetic cannot make about itself — `TestDrone.LaneLost` still asks
+the card player, **both** removal paths ask it *before* `ForgetState` (which nulls the queue that
+holds the answer), the respawn reuses `LaunchLane` rather than a second spawn site, `DespawnAll`
+guards with `_cancelling`, and the resume actually reaches `StartSuite`. Run it after touching the
+despawn paths, the lane spawn path, or the arm schedule.
+
+## test-collective-hold.py — the rotorcraft collective hold
+
+**The rotorcraft collective hold (v1.0.2).** `python debugtests/test-collective-hold.py` does the
+same extract-and-compile trick to the `COLLECTIVE-HOLD` region of `TestDrone.cs` — the PI altitude
+hold that owns the throttle on a drone-flown rotorcraft *hover* card. Two halves. (1) **Eleven
+one-step cases** pin the **sign** and the shipped gains: an inverted collective term does not
+wobble, it flies the aircraft into the ground at full deflection and the capture reads as a
+control-law failure. They also pin the `VsMax` cap, both clamps and the fact that `dt` scales the
+integrator *and nothing else*. (2) **Six closed-loop cases** fly a first-order rotorcraft for 120 s
+whose hover collective the loop is **never told**, spanning 0.35–0.90 — that is the generality rule
+asserted rather than argued, and it is the check that fails if anyone replaces the integrator with a
+constant (deleting it drops those cases 89–282 m off target). Run it after touching the loop or its
+gains. Needs the .NET SDK, like the other extract-and-compile checks.
 
 ## test-spec-grammar.py — config-spec grammar
 
