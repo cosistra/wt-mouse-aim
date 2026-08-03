@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Check the harness run board's arithmetic — by RUNNING IT, not by re-implementing it.
 
-The board (WTMouseAimPlugin.DrawRunBoard) shows an operator how long an unattended drone batch has
-left. Two pieces of it are non-trivial enough to get wrong silently: the m:ss / "0.0s" formatter and
-the seconds-left-in-this-card sum. Both live in ScenarioPlayer.cs between the BOARD-MATH markers,
+The board (WTMouseAimPlugin.DrawRunBoard) shows an operator which aircraft are flying and how long
+an unattended drone batch has left. Three pieces of it are non-trivial enough to get wrong silently:
+the m:ss / "0.0s" formatter, the seconds-left-in-this-card sum, and — since v1.0.2 — how many lane
+rows fit on the screen. All three live in ScenarioPlayer.cs between the BOARD-MATH markers,
 deliberately written with plain numbers and no Unity types.
+
+The row fit is the one with a field failure behind it: the board used to cap at 8 rows, so a 16-lane
+batch showed half its lanes and hid the rest behind "...and N more" — on the only instrument that
+says whether a lane has silently stopped flying. ROWS_CASES asserts no truncation at a full fleet on
+every screen anyone runs, which is the claim the fix makes.
 
 This extracts that region verbatim, wraps it in a throwaway console project, and runs the .NET SDK
 over it against the case table below. So a change to the C# is checked against the table, and the
@@ -47,6 +53,36 @@ CLOCK_CASES = [
     ("252.4f", "4:12"),
     ("1392f", "23:12"),      # 174 s x 8 replicates — the preflight's "per drone" number
     ("3600f", "60:00"),
+]
+
+# (lanes, pixels available below the panel top, row height, chrome rows, expected rows SHOWN).
+#
+# THE REGRESSION THIS TABLE EXISTS FOR: the board had a flat `BoardMaxRows = 8`, so lanes 9..16 of a
+# full batch — the size CountOf clamps to, and the size the shipped fleet cards fly — were
+# permanently collapsed into "...and N more" on the only instrument that says whether a lane is
+# still flying. The first three rows are the no-truncation claim on every screen anyone runs.
+#
+# `avail` is `Screen.height - BoardTop - BoardBottomPadPx` = height - 134 with the shipped
+# constants; `rowH` is BoardRow = 18 and `chrome` is BoardChrome = 2.
+ROWS_CASES = [
+    (16, 1080 - 134, "18f", 2, 16),     # 1080p, a FULL fleet: every lane shown
+    (16,  1440 - 134, "18f", 2, 16),
+    (16,  720 - 134, "18f", 2, 16),     # 720p still clears it with room to spare
+    (9,   1080 - 134, "18f", 2, 9),     # the first count the old cap of 8 used to truncate
+    (8,   1080 - 134, "18f", 2, 8),
+    (1,   1080 - 134, "18f", 2, 1),
+    (0,   1080 - 134, "18f", 2, 0),     # nothing flying: no rows, and no divide by anything
+    # THE SCREEN IS THE ONLY LIMIT. A short viewport still truncates, and must — the alternative is
+    # rows drawn off the bottom edge, which is truncation you cannot see.
+    (16,  200,  "18f", 2, 9),           # 200/18 = 11, less 2 chrome
+    (16,  40,   "18f", 2, 1),           # ...and it never returns 0 rows with lanes flying
+    (16,  0,    "18f", 2, 1),
+    (16,  -50,  "18f", 2, 1),           # a nonsense viewport clamps rather than going negative
+    # A degenerate row height shows EVERYTHING rather than nothing: the failure mode of a progress
+    # instrument must be "too much", never "silently short".
+    (16,  1080 - 134, "0f", 2, 16),
+    (16,  1080 - 134, "-18f", 2, 16),
+    (16,  1080 - 134, "float.NaN", 2, 16),
 ]
 
 # (segment durations, current index, seconds into it, expected seconds left in the card).
@@ -101,6 +137,11 @@ def program(body: str) -> str:
             f'        Near(M.SegsLeft(new float[]{{{durs}}}, {si}, {tseg}), {want}f, '
             f'"SegsLeft([{durs}], {si}, {tseg})");'
         )
+    for lanes, avail, rowh, chrome, want in ROWS_CASES:
+        checks.append(
+            f'        Int(M.BoardRows({lanes}, {avail}f, {rowh}, {chrome}), {want}, '
+            f'"BoardRows({lanes} lanes, {avail}px, row {rowh}, chrome {chrome})");'
+        )
     return (
         "using System;\nusing System.Globalization;\n\n"
         "internal static class M\n{\n" + body + "\n}\n\n"
@@ -113,6 +154,10 @@ def program(body: str) -> str:
         "    static void Near(float got, float want, string what)\n"
         "    {\n"
         "        if (Math.Abs(got - want) > 1e-4f) { Console.WriteLine($\"  FAIL {what}: got {got}, want {want}\"); fails++; }\n"
+        "    }\n"
+        "    static void Int(int got, int want, string what)\n"
+        "    {\n"
+        "        if (got != want) { Console.WriteLine($\"  FAIL {what}: got {got}, want {want}\"); fails++; }\n"
         "    }\n"
         "    static int Main()\n"
         "    {\n"

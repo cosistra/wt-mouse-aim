@@ -3,6 +3,84 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 1.0.3 — the test card is the single source of truth for every run parameter
+
+> Harness only. **No control-law change, no recorder columns added, moved or removed.**
+
+
+**A card whose meaning depends on unstated F1 state is not a repeatable experiment.** Two failures in
+one week, the same shape:
+
+* **`hs-hold`** was designed around `Drone/DroneAltDeckM = 3000` for its dynamic-pressure contrast.
+  The live config held `0`. Nothing refused — the operator had to be told to hand-edit F1, and had he
+  not been, the batch would have measured a different experiment and scored fine.
+* **Batch R41's entire rotorcraft verdict was withdrawn** because `Control/HeliForwardSpeed` and
+  `Control/HeliHoverSpeed` sat at stale v0.43 values that no card declared and no artifact recorded.
+
+### The card owns every run parameter, and wins
+
+The mechanism is the **existing** `config[]` array — no second schema, no new card grammar. What
+changed is that it had only ever reached half the run:
+
+| read | resolved by | why |
+|---|---|---|
+| per tick (`Control` levers, `ScenarioThrottle`, `ScenarioEntryFuel`) | `ApplyOverrides` **pins** the entry at card start | unchanged since v0.90 |
+| **pre-spawn** (`DroneAltDeckM`, `DroneStaggerSec`, the `ScenarioForceEntry` entry gate) | new `ScenarioPlayer.DeclaredFloat`/`DeclaredBool` read the card's array **directly** | the fleet is laid out *before* any card starts, so there is no pin to read — exactly where `hs-hold` fell through |
+
+Both share one grammar (`SplitSpec`), so `HeliHoverSpeed` and `Control/HeliHoverSpeed` are the same
+key; both are fail-soft, falling back to the live value on an unparseable literal rather than throwing
+on a hotkey path. `TestDrone.DeckSpreadM`/`StaggerSec` take the `Preflight` as an argument now, the
+same rule `AirframeOf`/`AltOf`/`SpeedOf` have followed since v0.90.
+
+`armToggle: "none"` is new and is not decoration: an absent `armToggle` and an empty one were the same
+string, so a card that is simply not an A/B inherited whatever `ScenarioArmToggle` was left holding.
+That is the R41 failure one field over.
+
+### All 39 shipped cards migrated
+
+Each now declares what it used to inherit, **at the shipped `Cfg` defaults**, so they fly exactly what
+they flew before: roster (the four `sweep-*` cards were falling through to `DroneAirframe`), `repeat`,
+`armToggle`, and `config[]` pins for `ScenarioThrottle`, `ScenarioEntryFuel`, `ScenarioForceEntry`,
+`DroneAltDeckM` and `DroneStaggerSec` — plus the `HeliForwardSpeed`/`HeliHoverSpeed` pair on the four
+rotorcraft cards. `check-card.py` gained **CHECK 6**, which **FAILS** (not warns) a card that leaves
+any of them undeclared; its lane/cost model reads the card's declared deck and stagger rather than the
+globals, and the run-level "`DroneAltDeckM` applies to every card below" banner is gone, because it is
+no longer true of a card that declares its own.
+
+### F1 is the operator's panel again
+
+Demoted to `IsAdvanced` with the description prefix `DEFAULT ONLY — THE TEST CARD OWNS THIS`:
+`DroneAirframe`, `DroneSpawnAlt`, `DroneAltDeckM`, `DroneSpawnSpeed`, `DroneCount`, `DroneStaggerSec`,
+`ScenarioRepeat`, `ScenarioArmToggle`, `ScenarioThrottle`, `ScenarioEntryFuel`, `ScenarioForceEntry`.
+**Demoted, not deleted** — the bind is what a `config[]` pin resolves against, it is still the
+fallback for a spawn with no card, and it is still the default the migrated cards declare verbatim.
+Kept at eye level: master enables, hotkeys, logging/HUD, and `ScenarioCardSet`/`ScenarioBatchQueue`
+plus the per-card checkboxes, which choose *which* card runs.
+
+**Cards are browsable in F1.** Each card's enable checkbox now carries its whole definition — roster,
+entry condition, replicate/arm schedule, every pin, and the segment layout — as hover text, built from
+the card itself by `ScenarioPlayer.Describe`. Read-only by construction, and no new UI: it is a
+`ConfigDescription`, which ConfigurationManager already renders.
+
+### The run board shows every lane
+
+`BoardMaxRows = 8` is gone. A 16-lane batch — the size `CountOf` clamps to and the size the shipped
+fleet cards fly — showed half its lanes and hid the rest behind "…and N more", on the only instrument
+that says whether a lane has silently stopped flying. `ScenarioPlayer.BoardRows` fits rows to the
+**screen** instead; a degenerate row height shows everything rather than nothing, because a progress
+instrument may fail long but never silently short.
+
+### Checks
+
+* **`debugtests/test-card-owns.py`** (new) compiles `CARD-OWNS` + `SPEC-GRAMMAR` and
+  `CARD-OWNS-SPAWN` verbatim: declared beats F1 at every site, silence does not, both spellings
+  resolve, unparseable falls back, null config/entry is skipped. Runs under `de-DE` on purpose — a
+  card file travels, and `"0.40"` must not become 40.
+* **`debugtests/test-board-math.py`** extended with `ROWS_CASES`: no truncation at 16 lanes on 720p,
+  1080p or 1440p; the screen is still a limit on a short viewport; never 0 rows with lanes flying.
+* **`check-card.py --selftest`** asserts CHECK 6 in **both** directions, and that a declared value
+  beats the shipped default in every value the checker models.
+
 ## 1.0.2
 
 **Two harness features that each recover a batch the old harness threw away — and one interaction

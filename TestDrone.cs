@@ -291,7 +291,10 @@ namespace NuclearOptionMouseAim
             // The sky just went empty; let the last capture close and flush before the next fleet
             // spawns on top of it. Reuses the stagger knob instead of adding a second timing knob,
             // floored at 3 s because DroneStaggerSec can legitimately be 0 for a one-drone batch.
-            if (_batchNextAt <= 0f) { _batchNextAt = Time.time + Mathf.Max(3f, Cfg.DroneStaggerSec.Value); return; }
+            // `_plan` is the fleet that just finished, which is the right card to ask: this gap belongs
+            // to the batch entry whose sky is being cleared, not to the one about to spawn (whose card
+            // has not been selected yet — ScenarioCardSet is advanced below).
+            if (_batchNextAt <= 0f) { _batchNextAt = Time.time + Mathf.Max(3f, StaggerSec(_plan)); return; }
             if (Time.time < _batchNextAt) return;
 
             _batchIdx++;
@@ -397,7 +400,7 @@ namespace NuclearOptionMouseAim
             // per lane would let a mid-stagger change move the ring under the lanes already on it,
             // and a ring whose radius moved is exactly the distance spread this layout removes.
             _laneN        = _pending;
-            _laneDeckM    = DeckSpreadM();
+            _laneDeckM    = DeckSpreadM(pre);
             _laneDecks    = _laneDeckM > 0f ? 2 : 1;
             _lanesPerRing = (_laneN + _laneDecks - 1) / _laneDecks;      // ceil
             _laneRadius   = RingRadius(_lanesPerRing, _laneDecks, _laneDeckM);
@@ -413,16 +416,23 @@ namespace NuclearOptionMouseAim
             if (deckPart.Length > 0) deckPart = ", " + deckPart;
             WTMouseAimPlugin.Log.LogInfo(
                 $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
-                + $"{SpeedText(pre)}, {Cfg.DroneStaggerSec.Value:0.#}s apart, {ringPart}, each heading outward along its own radius"
+                + $"{SpeedText(pre)}, {StaggerSec(pre):0.#}s apart, {ringPart}, each heading outward along its own radius"
                 + $"{deckPart}.");
-            // LEGAL, BUT SAY IT OUT LOUD. The deck spread is the OPERATOR's knob and it lands on top
-            // of whatever altitude the card asked for, so a card that declares startAlt and a knob
-            // left set from a previous session combine into an entry condition neither of them names
-            // — the class of mismatch that never refuses and writes a capture that scores fine.
+            // LEGAL, BUT SAY IT OUT LOUD — AND SAY WHO ASKED (v1.0.2). The deck spread lands on top of
+            // whatever altitude the card asked for, so a card that declares startAlt flies at NEITHER
+            // of the two numbers it names. That is fine when the CARD declared the spread (it is then
+            // one experiment, and `hs-hold`'s density contrast is exactly it) and it is the old
+            // never-refuses mismatch when the spread is just a knob left set from a previous session.
+            // Same line, different verdict, so the source is named rather than assumed.
             if (_laneDecks > 1 && ScenarioPlayer.Card.Declared(pre.StartAlt))
-                WTMouseAimPlugin.Log.LogWarning(
-                    $"[drone] Drone/DroneAltDeckM = {_laneDeckM:0} m is being applied ON TOP OF the card's own "
-                    + $"startAlt {pre.StartAlt:0} m — no lane will fly at the altitude the card declares. Set it to 0 for a single deck.");
+            {
+                bool fromCard = ScenarioPlayer.DeclaredText(pre.Config, "Drone/DroneAltDeckM") != null;
+                WTMouseAimPlugin.Log.Log(fromCard ? BepInEx.Logging.LogLevel.Info : BepInEx.Logging.LogLevel.Warning,
+                    $"[drone] DroneAltDeckM = {_laneDeckM:0} m [{(fromCard ? "from card" : "FROM F1")}] is applied ON TOP OF "
+                    + $"the card's own startAlt {pre.StartAlt:0} m — the decks are at {pre.StartAlt - _laneDeckM * 0.5f:0} and "
+                    + $"{pre.StartAlt + _laneDeckM * 0.5f:0} m and no lane flies {pre.StartAlt:0}."
+                    + (fromCard ? "" : " The card does not declare it — pin 'Drone/DroneAltDeckM' in its config[] so the run is repeatable."));
+            }
             // WHO DECIDED, ITEM BY ITEM. This is the operator's ONLY confirmation that the card drove
             // the spawn — "4000 m" alone looks the same whether the card asked for it or the knob just
             // happened to be there, and the difference is exactly what the self-describing card was
@@ -568,9 +578,28 @@ namespace NuclearOptionMouseAim
         private static int DeckOf(int k) =>
             _laneDecks < 2 ? 0 : ((k / _laneRoster) + (k % _laneRoster)) & 1;
 
-        // The deck spread as the geometry uses it. Negative is meaningless and the Cfg range already
-        // forbids it; clamping here rather than trusting the range keeps this readable from the test.
-        internal static float DeckSpreadM() => Mathf.Max(0f, Cfg.DroneAltDeckM.Value);
+        // THE TWO PRE-SPAWN KNOBS, CARD-FIRST (v1.0.2). Both are read while the fleet is being laid
+        // out, i.e. BEFORE any card starts and therefore before `ApplyOverrides` has pinned anything —
+        // so a card's `config[]` cannot reach them the way it reaches a Control lever. They resolve
+        // through `ScenarioPlayer.DeclaredFloat` against the card's own array instead: same file, same
+        // grammar, and the card wins.
+        //
+        // `Drone/DroneAltDeckM` is the one that cost a card: `hs-hold` was designed around a 3000 m
+        // deck spread for its dynamic-pressure contrast, the live config held 0, and the batch would
+        // have measured a different experiment and scored fine. Negative is meaningless and the Cfg
+        // range already forbids it; clamping here rather than trusting the range covers the card path
+        // too, which has no range to trust.
+        //
+        // Between markers because debugtests/test-card-owns.py compiles them verbatim against the
+        // shipped CARD-OWNS region: these two ARE the pre-spawn half of the ownership rule, and the
+        // way it breaks is someone "simplifying" one back to a bare Cfg read.
+        // --- CARD-OWNS-SPAWN BEGIN ---
+        internal static float DeckSpreadM(ScenarioPlayer.Preflight p) =>
+            Mathf.Max(0f, ScenarioPlayer.DeclaredFloat(p.Config, "Drone/DroneAltDeckM", Cfg.DroneAltDeckM.Value));
+
+        internal static float StaggerSec(ScenarioPlayer.Preflight p) =>
+            Mathf.Max(0f, ScenarioPlayer.DeclaredFloat(p.Config, "Drone/DroneStaggerSec", Cfg.DroneStaggerSec.Value));
+        // --- CARD-OWNS-SPAWN END ---
 
         // The decks as the OPERATOR needs to read them, for the launch log and the run board — the
         // same shared-wording rule as SpeedText, and for the same reason: those two lines are his
@@ -652,7 +681,10 @@ namespace NuclearOptionMouseAim
         private static void LaunchDue()
         {
             if (Time.time < _nextAt) return;
-            _nextAt = Time.time + Mathf.Max(0f, Cfg.DroneStaggerSec.Value);
+            // `_plan` — the Preflight this launch was sized from — so the lane spacing in TIME comes
+            // from the same card that sized the ring in SPACE. Re-reading Cfg here would let an F1 edit
+            // mid-stagger change the spacing of the lanes still to come (v1.0.2).
+            _nextAt = Time.time + Mathf.Max(0f, StaggerSec(_plan));
             _pending--;
             LaunchLane(_slot++, 0, 0);
         }

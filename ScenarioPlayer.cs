@@ -530,6 +530,29 @@ namespace NuclearOptionMouseAim
             left -= tSeg;
             return left > 0f ? left : 0f;
         }
+
+        // HOW MANY AIRCRAFT ROWS THE RUN BOARD SHOWS — it AUTO-GROWS to the fleet (v1.0.2).
+        //
+        // It used to be a flat `BoardMaxRows = 8`, so a 16-lane batch — the size CountOf clamps to and
+        // the size the shipped fleet cards actually fly — collapsed half its lanes into "...and 8
+        // more" on the one instrument that says whether the batch is still alive. A lane that has
+        // silently stopped flying is invisible below the fold, which is the whole reason the board
+        // exists.
+        //
+        // The ONLY remaining limit is the screen. `avail` is the pixels below the panel's top edge;
+        // `chromeRows` is what the panel spends on non-lane rows (the header, plus the "...and N
+        // more" line the truncation itself costs, so the cap pays for its own footer). Never returns
+        // less than 1 — a board with a header and no lanes is worse than one cramped row — and a
+        // degenerate row height (0, negative, NaN) shows everything rather than nothing, because the
+        // failure mode of a progress instrument must be "too much", never "silently short".
+        internal static int BoardRows(int lanes, float avail, float rowH, int chromeRows)
+        {
+            if (lanes <= 0) return 0;
+            if (!(rowH > 0f)) return lanes;              // written as a NOT so NaN lands here too
+            int fits = (int)(avail / rowH) - chromeRows;
+            if (fits < 1) fits = 1;
+            return lanes < fits ? lanes : fits;
+        }
         // --- BOARD-MATH END ---
 
         // =========================================================================================
@@ -587,10 +610,80 @@ namespace NuclearOptionMouseAim
             _cards.Add(c);
             _enable[c.name] = _cf.Bind("Scenario Cards", c.name, false, new ConfigDescription(
                 $"Include this test card when the run hotkey ({Cfg.ScenarioRunKey.Value}) starts a suite. "
-                + $"{(builtIn ? "Built-in" : "Recorded")} card: {c.segments?.Length ?? 0} segments, "
-                + $"{c.Duration:0}s, airframe class '{(string.IsNullOrEmpty(c.cls) ? "any" : c.cls)}'. "
-                + "Cards whose class doesn't match the aircraft you're flying are skipped automatically."));
+                + "Cards whose class doesn't match the aircraft you're flying are skipped automatically.\n"
+                + Describe(c, builtIn)));
             return true;
+        }
+
+        // =========================================================================================
+        // THE CARD AS A BROWSABLE LAYOUT (v1.0.2) — requirement 5, and no new UI to maintain.
+        //
+        // Since v1.0.2 the CARD owns every parameter that decides what a run measures, so "what does
+        // this card actually do?" has one complete answer and it is in a JSON file the operator has
+        // no reason to open mid-session. ConfigurationManager already renders a setting's
+        // ConfigDescription as its hover text, and every card already has a setting — its enable
+        // checkbox. So the description IS the viewer: hover a card in F1 > 'Scenario Cards' and read
+        // its roster, entry condition, schedule, pins and segment layout.
+        //
+        // ponytail: a tooltip, not a panel. A real card browser is a CustomDrawer, a scroll state and
+        // a layout pass to keep working across ConfigurationManager versions — for a READ-ONLY view of
+        // data that is already one string. Upgrade path if it ever needs selection or editing:
+        // Cfg.DrawResetButton is the CustomDrawer precedent in this codebase.
+        //
+        // Read-only by construction: it is built from the loaded Card at bind time and nothing writes
+        // back. Edit the JSON and reload to change a card — which is what the file being the source of
+        // truth means.
+        // =========================================================================================
+        private static string Describe(Card c, bool builtIn)
+        {
+            var b = new System.Text.StringBuilder(256);
+            b.Append(builtIn ? "BUILT-IN" : "FROM DISK").Append("   class ")
+             .Append(string.IsNullOrEmpty(c.cls) ? "any" : c.cls);
+
+            // ENTRY. Spelled the way TestDrone.SpeedText spells it, because a corner-relative card has
+            // a different entry speed per lane and one number here would be a promise nothing keeps.
+            // Through the ONE resolver even for a display: with no corner declared it returns
+            // `startSpeed` verbatim, and a corner card never reaches it (the branch below prints the
+            // multiple, the only honest answer with no lane in hand). check-architecture.py's rule 5
+            // enforces that routing, and it is right to — a second reading of the entry speed is how
+            // a card gets checked at one speed and placed at another.
+            float entryV = c.startSpeedCorner > 0f ? Card.Unset
+                         : ResolveStartSpeed(c.startSpeed, c.startSpeedCorner, null);
+            b.Append("\nentry     ")
+             .Append(c.startSpeedCorner > 0f ? $"{c.startSpeedCorner:0.00}x corner (per airframe)"
+                   : Card.Declared(entryV) ? $"{entryV:0} m/s" : "(not declared)")
+             .Append(Card.Declared(c.startAlt) ? $" at {c.startAlt:0} m" : " at (not declared)");
+
+            // ROSTER + SCHEDULE. ResolveCount/ResolveRepeat, not the raw fields — the operator needs
+            // the number that will fly, and the middle rule ("as many lanes as airframes named") is
+            // exactly the one that is invisible in the JSON.
+            b.Append("\nroster    ")
+             .Append(string.IsNullOrEmpty(c.airframe) ? "(not declared — Drone/DroneAirframe stands)" : c.airframe)
+             .Append("   x").Append(ResolveCount(c, out _)).Append(" lanes");
+            b.Append("\nschedule  x").Append(ResolveRepeat(c, out _)).Append(" replicates   A/B ")
+             .Append(string.IsNullOrEmpty(c.armToggle) ? "none" : c.armToggle);
+
+            // THE PINS — the half that used to be invisible. Every one of these was an F1 knob the
+            // operator had to match to the card by hand until v1.0.2.
+            b.Append("\npins      ");
+            if (c.config == null || c.config.Length == 0) b.Append("none");
+            else for (int i = 0; i < c.config.Length; i++)
+            {
+                var o = c.config[i];
+                if (o == null || string.IsNullOrEmpty(o.key)) continue;
+                b.Append(i > 0 ? "\n          " : "").Append(o.key).Append(" = ").Append(o.value);
+            }
+
+            // GEOMETRY. Capped: a sweep card is 30+ segments and a tooltip that scrolls off the
+            // screen shows less than one that stops. The count and total are always exact.
+            int n = c.segments != null ? c.segments.Length : 0;
+            b.Append($"\ngeometry  {n} segments, {c.Duration:0}s: ");
+            const int MaxSegs = 8;
+            for (int i = 0; i < n && i < MaxSegs; i++)
+                b.Append(i > 0 ? ", " : "").Append(c.segments[i].tag).Append(' ')
+                 .Append($"{c.segments[i].dur:0.#}s");
+            if (n > MaxSegs) b.Append($", ...+{n - MaxSegs} more");
+            return b.ToString();
         }
 
         public static string CardDir() =>
@@ -825,6 +918,11 @@ namespace NuclearOptionMouseAim
             public string ArmSrc;
             public int    Count;        // drones to launch (v0.91)
             public string CountSrc;
+            // sel[0]'s `config[]`, carried raw (v1.0.2). The PRE-SPAWN reads — the altitude decks,
+            // the launch stagger, the entry gate — resolve through DeclaredFloat/DeclaredBool
+            // against this, because a card's pins are not applied until the card STARTS and the
+            // fleet is laid out before that. See the CARD-OWNS region.
+            public CfgOverride[] Config;
         }
 
         internal static Preflight Preview(bool quiet = false)
@@ -845,6 +943,7 @@ namespace NuclearOptionMouseAim
                 p.StartAlt   = c.startAlt;
                 p.StartSpeed = c.startSpeed;
                 p.StartSpeedCorner = c.startSpeedCorner;
+                p.Config     = c.config;
                 p.Duration   = c.Duration;
                 foreach (var x in sel) p.AllDuration += x.Duration;
                 p.Repeat     = ResolveRepeat(c, out string rsrc); p.RepeatSrc = rsrc;
@@ -927,8 +1026,25 @@ namespace NuclearOptionMouseAim
         {
             bool fromCard = first != null && !string.IsNullOrEmpty(first.armToggle);
             src = fromCard ? $"card '{first.name}' armToggle" : "Cfg.ScenarioArmToggle";
-            return fromCard ? first.armToggle : Cfg.ScenarioArmToggle.Value;
+            string spec = fromCard ? first.armToggle : Cfg.ScenarioArmToggle.Value;
+            // `armToggle: "none"` = THE CARD DECLARES NO A/B, AND MEANS IT (v1.0.2). Every other
+            // card-owned field has a value that means "unset" and one that means the thing; this one
+            // did not — an absent armToggle and an empty one are the same string, so a card that is
+            // simply not an A/B silently inherits whatever Scenario/ScenarioArmToggle was left
+            // holding, and every replicate flies a knob the card never mentions. That is the shape of
+            // the R41 failure (stale F1 state no card declared), one field over.
+            // Checked BEFORE SplitSpec, which would otherwise read it as the key "Control/none" and
+            // report a spelling mistake for a card that is being explicit.
+            if (string.Equals(spec, ArmNone, System.StringComparison.OrdinalIgnoreCase))
+            {
+                src = fromCard ? $"card '{first.name}' armToggle: none" : src;
+                return "";
+            }
+            return spec;
         }
+
+        // The literal a card writes to mean "no A/B schedule". Not a magic string at three sites.
+        internal const string ArmNone = "none";
 
         // The cards a run would fly RIGHT NOW: the ScenarioCardSet override if one is set, else every
         // ticked checkbox, minus anything whose airframe class doesn't match what you're in. Shared so
@@ -1165,6 +1281,70 @@ namespace NuclearOptionMouseAim
             return sec.Length > 0 && key.Length > 0;
         }
         // --- SPEC-GRAMMAR END ---
+
+        // =========================================================================================
+        // THE OWNERSHIP RULE (v1.0.2) — A CARD'S DECLARED VALUE BEATS THE F1 VALUE, EVERYWHERE.
+        //
+        // `config[]` was already the one override channel, but it only reached HALF the run.
+        // `ApplyOverrides` pins an entry when a CARD STARTS, which covers everything read per tick
+        // (every Control lever, ScenarioThrottle, ScenarioEntryFuel). The fleet, though, is laid out
+        // BEFORE any card starts — so the knobs read at spawn time (Drone/DroneAltDeckM,
+        // Drone/DroneStaggerSec) and the pre-run entry gate (Scenario/ScenarioForceEntry) went on
+        // reading F1 no matter what the card said, and nothing refused.
+        //
+        // That is the `hs-hold` defect exactly: the card was DESIGNED around DroneAltDeckM = 3000 for
+        // its dynamic-pressure contrast, the live config held 0, and the batch would have measured a
+        // different experiment while scoring fine. It is also how batch R41's rotorcraft verdict died
+        // — HeliForwardSpeed/HeliHoverSpeed sat at stale v0.43 values that no card declared.
+        //
+        // So the pre-spawn sites read THROUGH here. Same array, same grammar (SplitSpec), no second
+        // schema: the card file did not change, only who is allowed to ignore it.
+        //
+        // FAIL-SOFT, like every probe in this codebase. An unparseable literal falls back to the live
+        // value rather than throwing on a hotkey path — `ApplyOverrides` prints the one warning for
+        // that same string a moment later, and two warnings for one typo read as two problems.
+        //
+        // Between markers because debugtests/test-card-owns.py compiles this region verbatim: these
+        // three functions ARE the ownership property, and a Python copy would agree with itself
+        // forever. `Fmt` (below) is deliberately outside them — it is display, not policy.
+        // =========================================================================================
+        // --- CARD-OWNS BEGIN ---
+        // The TOML text a card declares for `spec`, or null when it declares nothing. Both sides go
+        // through SplitSpec, so a card writing "MarkerRateFeedForward" and a caller asking for
+        // "Control/MarkerRateFeedForward" are the same key — one grammar, three spellings, no drift.
+        internal static string DeclaredText(CfgOverride[] config, string spec)
+        {
+            if (config == null || !SplitSpec(spec, out string sec, out string key)) return null;
+            for (int i = 0; i < config.Length; i++)
+            {
+                var o = config[i];
+                if (o == null || string.IsNullOrEmpty(o.key)) continue;
+                if (!SplitSpec(o.key, out string s2, out string k2)) continue;
+                if (s2 == sec && k2 == key) return o.value;
+            }
+            return null;
+        }
+
+        // Invariant culture on purpose (v1.0.1's rule): a card file is an artifact that travels, and
+        // "0.40" must not become 40 on a machine whose decimal separator is a comma.
+        internal static float DeclaredFloat(CfgOverride[] config, string spec, float fallback)
+        {
+            string t = DeclaredText(config, spec);
+            return t != null && float.TryParse(t.Trim(), System.Globalization.NumberStyles.Float,
+                                               System.Globalization.CultureInfo.InvariantCulture, out float v)
+                 ? v : fallback;
+        }
+
+        internal static bool DeclaredBool(CfgOverride[] config, string spec, bool fallback)
+        {
+            string t = DeclaredText(config, spec);
+            if (t == null) return fallback;
+            t = t.Trim();
+            if (t == "true"  || t == "True")  return true;
+            if (t == "false" || t == "False") return false;
+            return fallback;
+        }
+        // --- CARD-OWNS END ---
 
         // Any bound entry, of ANY type — a card can pin a float or a KeyCode, not just the bool the
         // arm schedule sweeps. ConfigFile implements IDictionary<ConfigDefinition, ConfigEntryBase>
@@ -1497,7 +1677,13 @@ namespace NuclearOptionMouseAim
             // StartCard puts the aircraft on condition instead, so this is only the fallback for when
             // forcing is off or failed — refusing costs 5 seconds of setup, flying out-of-condition
             // costs a 3-minute run that scores against a different question.
-            string entry = Cfg.ScenarioForceEntry.Value ? null : EntryConditionError(sel[0], ac);
+            // v1.0.2: through DeclaredBool, not straight off Cfg. This read happens BEFORE StartCard,
+            // so the card's own pins are not live yet — a card that declares `Scenario/ScenarioForceEntry`
+            // would have been gated by whatever F1 held instead, which is the pre-spawn half of the
+            // ownership hole this release closes. Every LATER read of the same knob (line ~2134) is
+            // inside the pin window and needs no change.
+            string entry = DeclaredBool(sel[0].config, "Scenario/ScenarioForceEntry", Cfg.ScenarioForceEntry.Value)
+                         ? null : EntryConditionError(sel[0], ac);
             if (entry != null)
             {
                 WTMouseAimPlugin.Log.LogWarning(
@@ -2155,7 +2341,12 @@ namespace NuclearOptionMouseAim
                 // Place first, start second — and place ONCE PER CARD, so every card in a suite gets its
                 // own entry condition rather than inheriting the state the previous one left behind.
                 // Returning after the placement gives it a tick to settle before the card is timed.
-                if (Cfg.ScenarioForceEntry.Value && Card.Declared(EntrySpeed(_card)) && !_placed)
+                // Through DeclaredBool even though the pin IS live here (ApplyOverrides ran two lines
+                // up, so this would agree anyway): ONE rule for a card-owned knob — never read it
+                // bare — is worth more than a per-site argument about whether the pin has landed yet.
+                // test-card-owns.py asserts exactly that, over the whole harness.
+                if (DeclaredBool(_card.config, "Scenario/ScenarioForceEntry", Cfg.ScenarioForceEntry.Value)
+                    && Card.Declared(EntrySpeed(_card)) && !_placed)
                 {
                     _placed = true;
                     var placed = PlaceOnCondition(ac, _card);
@@ -2462,7 +2653,13 @@ namespace NuclearOptionMouseAim
                 }
                 Vector3 fwd = _anchorFwd;
 
-                float fuel0 = -1f, fuelTgt = Cfg.ScenarioEntryFuel.Value;
+                // Card-first (v1.0.2). Inside a card's run this agrees with the live entry — the pin
+                // is already applied — but the standalone entry key (ForceEntryNow) reaches this same
+                // placement with NO pins live, and fuel is MASS: a card placed at F1's fuel and then
+                // flown at its own is a different aircraft on the two paths, from the same key.
+                float fuel0 = -1f;
+                float fuelTgt = DeclaredFloat(c != null ? c.config : null,
+                                              "Scenario/ScenarioEntryFuel", Cfg.ScenarioEntryFuel.Value);
                 if (fuelTgt > 0f)
                 {
                     fuel0 = ac.GetFuelLevel();          // the ACTUAL ratio; ac.fuelLevel is the target

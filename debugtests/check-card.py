@@ -102,6 +102,10 @@ def constants():
     missing = [n for n in ("Drone/DroneSpawnSpeed", "Drone/DroneSpawnAlt", "Drone/DroneAirframe",
                            "Drone/DroneCount", "Drone/DroneAltDeckM", "Drone/DroneStaggerSec",
                            "Scenario/ScenarioRepeat", "Scenario/ScenarioThrottle",
+                           # the v1.0.2 ownership set -- every one of these is a shipped default a
+                           # migrated card declares verbatim, so a rename here must not go silent
+                           "Scenario/ScenarioEntryFuel", "Scenario/ScenarioForceEntry",
+                           "Control/HeliForwardSpeed", "Control/HeliHoverSpeed",
                            "Control/MaxBankAngle",
                            "MinThrottle", "StallMargin", "VMaxMargin",
                            "RateMinDegS", "RateMaxDegS", "FloorAltM") if n not in k]
@@ -261,18 +265,77 @@ def entry_speed(card, af, K):
     return float(K["Drone/DroneSpawnSpeed"]), "FALLTHROUGH Drone/DroneSpawnSpeed"
 
 
-def effective_throttle(card, K):
-    """(value, how) -- the card's own pin if it has one, else Cfg. EntryThrottle then SNAPS anything
-    under MinThrottle back to the DEFAULT (0.70), not to MinThrottle: a card asking for 0.10 flies
-    at 0.70, which is the opposite of what it asked for."""
+# THE PARAMETERS A CARD MUST OWN (v1.0.2). Each is `spec -> what it decides`, and every one of them
+# used to be read off a live F1 knob that no card named. Two field reports are the reason this list
+# is enforced rather than advisory:
+#   * `hs-hold` was designed around Drone/DroneAltDeckM = 3000 for its dynamic-pressure contrast, the
+#     live config held 0, and the batch would have measured a different experiment and scored fine;
+#   * batch R41's entire rotorcraft verdict was withdrawn because Control/HeliForwardSpeed and
+#     Control/HeliHoverSpeed held stale v0.43 values, which no card declared and no artifact recorded.
+# The native card FIELDS (airframe, count, repeat, armToggle, startSpeed/startSpeedCorner, startAlt)
+# are checked separately below -- they have their own fallthrough rules and their own messages.
+PINS_REQUIRED = [
+    ("Scenario/ScenarioThrottle",   "the throttle held for the whole card = the energy profile"),
+    ("Scenario/ScenarioEntryFuel",  "the fuel ratio set at entry = the MASS every replicate flies"),
+    ("Scenario/ScenarioForceEntry", "whether the aircraft is PUT on condition or merely asked to be"),
+    ("Drone/DroneAltDeckM",         "the two altitude decks = the air density the fleet is split over"),
+    ("Drone/DroneStaggerSec",       "the launch spacing = whether replicates are independent samples"),
+]
+# Rotorcraft only. `heliBlend` interpolates between these two speeds, so they decide WHICH LAW a
+# rotorcraft card is measuring -- the R41 pair.
+PINS_ROTOR = [
+    ("Control/HeliForwardSpeed", "the speed at/above which a rotorcraft is flown as fixed-wing"),
+    ("Control/HeliHoverSpeed",   "the speed at/below which it is flown as a pure hover"),
+]
+ROTOR_CLS = ("Helo", "Tiltwing", "VTOL")
+
+
+def is_rotor(card):
+    return any(t.strip() in ROTOR_CLS for t in str(card.get("cls") or "").split(","))
+
+
+def pinned(card, spec):
+    """The TOML text a card declares for `spec`, or None -- ScenarioPlayer.DeclaredText in Python.
+    Both sides go through scorecard.split_spec, the one shared grammar, so a card writing the bare
+    'HeliHoverSpeed' and a caller asking for 'Control/HeliHoverSpeed' are the same key."""
+    want = scorecard.split_spec(spec)
     for o in card.get("config") or []:
-        parsed = scorecard.split_spec((o or {}).get("key") or "")
-        if parsed == ("Scenario", "ScenarioThrottle"):
-            try:
-                return float(o.get("value")), "card pin"
-            except (TypeError, ValueError):
-                return None, "card pin (unparseable)"
-    return float(K["Scenario/ScenarioThrottle"]), "FALLTHROUGH Scenario/ScenarioThrottle"
+        if scorecard.split_spec((o or {}).get("key") or "") == want:
+            return (o or {}).get("value")
+    return None
+
+
+def pinned_num(card, spec, K):
+    """(value, how) -- the card's declared number if it has one, else the Cfg default. Mirrors
+    ScenarioPlayer.DeclaredFloat, fallthrough naming included, so every "who decided" string this
+    tool prints comes from the same rule the harness resolves by."""
+    t = pinned(card, spec)
+    if t is None:
+        return float(K[spec]), "FALLTHROUGH " + spec
+    try:
+        return float(t), "card pin"
+    except (TypeError, ValueError):
+        return None, "card pin (unparseable)"
+
+
+def effective_throttle(card, K):
+    """(value, how). EntryThrottle SNAPS anything under MinThrottle back to the DEFAULT (0.70), not
+    to MinThrottle: a card asking for 0.10 flies at 0.70, the opposite of what it asked for."""
+    return pinned_num(card, "Scenario/ScenarioThrottle", K)
+
+
+def deck_spread(card, K):
+    """(m, how) -- TestDrone.DeckSpreadM. Card-first since v1.0.2: this is read while the fleet is
+    laid out, BEFORE any card starts, so it is resolved off the card's array rather than off the pin
+    (which is not applied yet). Negative is clamped away exactly as the C# does."""
+    v, how = pinned_num(card, "Drone/DroneAltDeckM", K)
+    return (max(0.0, v) if v is not None else 0.0), how
+
+
+def stagger(card, K):
+    """(s, how) -- TestDrone.StaggerSec, the other pre-spawn read."""
+    v, how = pinned_num(card, "Drone/DroneStaggerSec", K)
+    return (max(0.0, v) if v is not None else 0.0), how
 
 
 def replicates(card, K):
@@ -413,12 +476,13 @@ def check_card(card, K, AF):
                                "ScenarioPlayer aborts the card on the first tick below it, every "
                                "replicate. This is what `startAlt: 0` did to the rotor pair."
                                % (float(card["startAlt"]), K["FloorAltM"]))
-    elif float(card["startAlt"]) - K["Drone/DroneAltDeckM"] / 2 < K["FloorAltM"]:
-        add(WARN, "entry-alt", "startAlt %g m is fine, but Drone/DroneAltDeckM = %g puts the LOWER "
+    elif float(card["startAlt"]) - deck_spread(card, K)[0] / 2 < K["FloorAltM"]:
+        add(WARN, "entry-alt", "startAlt %g m is fine, but DroneAltDeckM = %g (%s) puts the LOWER "
                                "deck at %g m -- under the %g m card floor, so half the fleet aborts "
-                               "on its first tick. Set the knob to 0 for this card."
-                               % (float(card["startAlt"]), K["Drone/DroneAltDeckM"],
-                                  float(card["startAlt"]) - K["Drone/DroneAltDeckM"] / 2,
+                               "on its first tick. Declare 'Drone/DroneAltDeckM': '0' on this card."
+                               % (float(card["startAlt"]), deck_spread(card, K)[0],
+                                  deck_spread(card, K)[1],
+                                  float(card["startAlt"]) - deck_spread(card, K)[0] / 2,
                                   K["FloorAltM"]))
 
     thr, thr_src = effective_throttle(card, K)
@@ -430,7 +494,7 @@ def check_card(card, K, AF):
                                  K["Scenario/ScenarioThrottle"]))
 
     alt = float(card["startAlt"]) if has_alt else float(K["Drone/DroneSpawnAlt"])
-    deck = float(K["Drone/DroneAltDeckM"])
+    deck, deck_src = deck_spread(card, K)
 
     for k, r in rows:
         v, how = entry_speed(card, r, K)
@@ -458,8 +522,8 @@ def check_card(card, K, AF):
         # altitude is Vstall/sqrt(rho/rho0), and the gate compares against the sea-level figure.
         if vs and not refused:
             for a, label in ((alt, "the card's %g m" % alt),
-                             (alt + deck / 2.0, "the UPPER deck %g m (Drone/DroneAltDeckM = %g)"
-                              % (alt + deck / 2.0, deck)) if deck > 0 else (None, None)):
+                             (alt + deck / 2.0, "the UPPER deck %g m (DroneAltDeckM = %g, %s)"
+                              % (alt + deck / 2.0, deck, deck_src)) if deck > 0 else (None, None)):
                 if a is None:
                     continue
                 stall_tas = vs / math.sqrt(rho_ratio(a))
@@ -560,17 +624,53 @@ def check_card(card, K, AF):
     dur = sum(float(s.get("dur") or 0) for s in segs)
     rep, rep_src = replicates(card, K)
     cnt, cnt_src = fleet_size(card, K, len(keys), af_src == "card")
-    stagger = float(K["Drone/DroneStaggerSec"])
+    stag, stag_src = stagger(card, K)
     lane_s = dur * rep
-    wall_s = lane_s + max(0, cnt - 1) * stagger
+    wall_s = lane_s + max(0, cnt - 1) * stag
     add(INFO, "cost", "%.0f s/replicate x %d (%s) = %.1f min per lane; %d lane(s) (%s) fly "
-                      "concurrently on a %gs stagger -> %.1f min wall clock, %.1f drone-minutes, "
-                      "%d captures"
-        % (dur, rep, rep_src, lane_s / 60.0, cnt, cnt_src, stagger,
+                      "concurrently on a %gs stagger (%s) -> %.1f min wall clock, %.1f "
+                      "drone-minutes, %d captures"
+        % (dur, rep, rep_src, lane_s / 60.0, cnt, cnt_src, stag, stag_src,
            wall_s / 60.0, lane_s * cnt / 60.0, rep * cnt))
     if wall_s > 15 * 60:
         add(WARN, "cost", "%.1f min of wall clock for ONE card -- a batch that long is a night, not "
                           "a test. Split it or cut `repeat`." % (wall_s / 60.0))
+    # --- CHECK 6: OWNERSHIP (v1.0.2) -- does the card say what it measures, or does F1? -----------
+    #
+    # THE RULE: a card whose meaning depends on unstated F1 state is not a repeatable experiment.
+    # Every parameter below silently resolved to a live config value until v1.0.2, and a mismatch
+    # never refuses -- it writes a full batch of captures that score fine and answer a different
+    # question. `hs-hold` (DroneAltDeckM) and batch R41 (the Heli pair) are the two that got caught;
+    # the point of failing here is that the next one does not need to be.
+    #
+    # FAIL, not WARN, and deliberately so: a warning on a batch of 500 captures is read after the
+    # batch. The C# half of this is ScenarioPlayer's CARD-OWNS region, which makes the declared
+    # value WIN; this half makes sure there is one to win with.
+    for spec, why in PINS_REQUIRED + (PINS_ROTOR if is_rotor(card) else []):
+        if pinned(card, spec) is None:
+            add(FAIL, "ownership",
+                "does not declare '%s' -- it decides %s, and undeclared it comes from whatever F1 "
+                "happens to hold (shipped default %s). Add {\"key\": \"%s\", \"value\": \"...\"} to "
+                "the card's config[]." % (spec, why, K[spec], spec))
+    # The native fields have their own fallthroughs, and each one is a different silent answer.
+    if not (card.get("airframe") or "").strip():
+        add(FAIL, "ownership", "declares no `airframe`, so the test article is whatever "
+                               "Drone/DroneAirframe holds ('%s')." % K["Drone/DroneAirframe"])
+    elif not (int(card.get("count") or 0) > 0 or len(keys) > 0):
+        add(FAIL, "ownership", "neither `count` nor a usable `airframe` list, so the fleet size is "
+                               "Drone/DroneCount (%g)." % K["Drone/DroneCount"])
+    if not int(card.get("repeat") or 0) > 0:
+        add(FAIL, "ownership", "declares no `repeat`, so the replicate count is Scenario/"
+                               "ScenarioRepeat (%g) -- one run of a card measures nothing."
+                               % K["Scenario/ScenarioRepeat"])
+    # "" and absent are the same string, so the A/B needs an explicit "no schedule" literal --
+    # otherwise a card that is not an A/B sweeps whatever Scenario/ScenarioArmToggle was left at.
+    # ScenarioPlayer.ArmNone is that literal; matched case-insensitively there, so likewise here.
+    if not (card.get("armToggle") or "").strip():
+        add(FAIL, "ownership", "declares no `armToggle`, so the A/B knob is whatever Scenario/"
+                               "ScenarioArmToggle holds. Write \"armToggle\": \"none\" to mean no "
+                               "A/B schedule -- an empty string is indistinguishable from absent.")
+
     if name and card.get("note") and "SUPERSEDED" in str(card.get("note")).upper():
         add(WARN, "superseded", "the card's own note says SUPERSEDED -- it is on disk for the "
                                 "capture index, not to be flown")
@@ -596,14 +696,10 @@ def run(paths, verbose=False):
     for p in source_invariants():
         _emit(FAIL, "*harness", p)
         bad = 1
-    if float(K["Drone/DroneAltDeckM"]) > 0:
-        _emit(WARN, "*altitude", "Drone/DroneAltDeckM = %g splits every fleet over decks at "
-                                 "startAlt +/- %g m, so NO lane flies the altitude its card "
-                                 "declares. Applies to all %d cards below; set it to 0 for a single "
-                                 "deck. Every density figure below is quoted at the DECLARED "
-                                 "altitude, with the binding upper deck called out per lane."
-              % (K["Drone/DroneAltDeckM"], K["Drone/DroneAltDeckM"] / 2, len(paths)))
-        print()
+    # The run-level "Drone/DroneAltDeckM applies to every card below" banner is GONE (v1.0.2): the
+    # deck spread is now a per-card declaration, so one global statement about it would be false for
+    # any card that declares its own. The per-card figure is quoted in the stall-density lines, which
+    # name their source ("card pin" / "FALLTHROUGH ..."), and CHECK 6 fails a card that declares none.
     for p in paths:
         try:
             with open(p, encoding="utf-8") as f:
@@ -694,12 +790,43 @@ def selftest():
     def levels(card, check):
         return [(l, m) for l, c, m in check_card(card, K, AF) if c == check]
 
-    # the baseline every negative control is a variation of -- nothing here may FAIL
+    # The baseline every negative control is a variation of -- nothing here may FAIL. Since v1.0.2
+    # that includes CHECK 6: a card is only clean if it OWNS every parameter that decides what it
+    # measures, so the baseline declares the whole PINS_REQUIRED set at the shipped defaults (which
+    # is exactly what the 39 shipped cards were migrated to). Built from the table rather than typed
+    # out, so adding a parameter to the inventory cannot leave this baseline quietly non-compliant.
     good = {"name": "ok", "cls": "Plane", "step": 0.02, "airframe": "Fighter1",
-            "startSpeed": 250, "startAlt": 4000, "repeat": 4,
+            "startSpeed": 250, "startAlt": 4000, "repeat": 4, "armToggle": "none",
+            "config": [{"key": s, "value": str(K[s])} for s, _ in PINS_REQUIRED],
             "segments": [{"tag": "arm", "dur": 6, "az": 0, "el": 0},
                          {"tag": "az30R", "dur": 8, "az": 30, "el": 0}]}
     assert not [x for x in check_card(good, K, AF) if x[0] == FAIL], check_card(good, K, AF)
+
+    # --- CHECK 6, both directions. The whole point is that it FAILS the pre-v1.0.2 shape.
+    for spec, _ in PINS_REQUIRED:
+        stripped = dict(good, config=[o for o in good["config"] if o["key"] != spec])
+        assert any(l == FAIL and spec in m for l, m in levels(stripped, "ownership")), spec
+    for field, val in (("airframe", ""), ("repeat", 0), ("armToggle", "")):
+        assert any(l == FAIL for l, _ in levels(dict(good, **{field: val}), "ownership")), field
+    # A rotorcraft card owns two MORE knobs -- the R41 pair -- and a fixed-wing card does not.
+    rot = dict(good, cls="Helo,Tiltwing,VTOL", airframe="AttackHelo1")
+    assert any(l == FAIL and "HeliForwardSpeed" in m for l, m in levels(rot, "ownership"))
+    assert not [1 for l, m in levels(good, "ownership") if "Heli" in m]
+    assert not levels(dict(rot, config=good["config"]
+                           + [{"key": s, "value": str(K[s])} for s, _ in PINS_ROTOR]), "ownership")
+    # The DECLARED value must beat the shipped default everywhere the checker models it -- the same
+    # property test-card-owns.py asserts against the compiled C#.
+    pin = lambda c, s, v: dict(c, config=[o for o in c["config"] if o["key"] != s]
+                                          + [{"key": s, "value": v}])
+    assert deck_spread(pin(good, "Drone/DroneAltDeckM", "0"), K) == (0.0, "card pin")
+    assert deck_spread(good, K)[0] == float(K["Drone/DroneAltDeckM"])
+    assert stagger(pin(good, "Drone/DroneStaggerSec", "12"), K) == (12.0, "card pin")
+    assert effective_throttle(pin(good, "Scenario/ScenarioThrottle", "0.40"), K) == (0.40, "card pin")
+    # ...and a card that declares NOTHING must name the fallthrough, not pretend it decided.
+    bare = dict(good, config=[])
+    for fn, spec in ((deck_spread, "Drone/DroneAltDeckM"), (stagger, "Drone/DroneStaggerSec"),
+                     (effective_throttle, "Scenario/ScenarioThrottle")):
+        assert fn(bare, K) == (float(K[spec]), "FALLTHROUGH " + spec), spec
 
     # --- REGRESSION 1: alpha-sweep is structurally incapable of its own experiment
     hits = levels(R_ALPHA_SWEEP, "alpha-reach")
@@ -741,8 +868,16 @@ def selftest():
         "a rotorcraft cls with no airframe list falls through to a fixed-wing key"
     assert any(l == FAIL and "card floor" in m for l, m in levels(R_ROTOR_HOVER_ASFLOWN, "entry-alt")), \
         "startAlt 0 is sea level, under the 500 m card floor"
-    # the shipped rewrite (roster + startAlt 1000) must now come out clean
-    fixed = dict(R_ROTOR_HOVER_ASFLOWN, airframe="AttackHelo1, UtilityHelo1, QuadVTOL1", startAlt=1000)
+    # The shipped rewrite (roster + startAlt 1000) must now come out clean -- and since v1.0.2 that
+    # takes the full ownership set, INCLUDING the rotor pair. Note the deck: at startAlt 1000 the
+    # 3000 m shipped default would put the lower deck at -500 m, so this card has to declare 0. That
+    # is the ownership rule doing its job -- pre-v1.0.2 the card said nothing and the answer came
+    # from whatever F1 held, which for exactly this shape is half a fleet aborting on tick one.
+    fixed = dict(R_ROTOR_HOVER_ASFLOWN, airframe="AttackHelo1, UtilityHelo1, QuadVTOL1",
+                 startAlt=1000, repeat=4, armToggle="none",
+                 config=[{"key": s, "value": str(K[s])} for s, _ in PINS_REQUIRED + PINS_ROTOR
+                         if s != "Drone/DroneAltDeckM"]
+                        + [{"key": "Drone/DroneAltDeckM", "value": "0"}])
     assert not [x for x in check_card(fixed, K, AF) if x[0] == FAIL], check_card(fixed, K, AF)
     # the mirror defect: a declared hover on a card with no hover segment
     assert any(l == FAIL for l, _ in levels(dict(good, startSpeed=0), "entry-speed"))

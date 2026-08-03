@@ -399,8 +399,11 @@ namespace NuclearOptionMouseAim
         // post-gate debug ladder (rows at y=12..84, 22 high) so the two never overlap when the
         // operator is flying with ShowDebugHud on.
         private const float BoardX = 12f, BoardTop = 110f, BoardW = 780f, BoardRow = 18f;
-        // DroneCount goes to 16 and a 17-line panel is unreadable; the tail collapses to a count.
-        private const int   BoardMaxRows = 8;
+        // Rows the panel spends on things that are not a lane: the header, plus the "...and N more"
+        // line a truncation would cost. Fed to ScenarioPlayer.BoardRows, which does the fitting.
+        private const int   BoardChrome = 2;
+        // Pixels kept clear at the bottom of the screen so the last row is never flush with the edge.
+        private const float BoardBottomPadPx = 24f;
 
         // Reused, not allocated per call: OnGUI runs at least twice a frame (layout + repaint).
         private static readonly List<ScenarioPlayer> _board = new List<ScenarioPlayer>();
@@ -441,7 +444,14 @@ namespace NuclearOptionMouseAim
 
         private static void DrawFlying()
         {
-            int n = _board.Count, shown = Mathf.Min(n, BoardMaxRows);
+            // AUTO-GROW TO THE FLEET (v1.0.2). This was a flat cap of 8, so lanes 9..16 of a full
+            // batch — the size CountOf clamps to, and the size the shipped fleet cards fly — lived
+            // permanently under "...and N more" on the only instrument that says whether they are
+            // still flying. The cap is now the SCREEN and nothing else; BoardRows does the arithmetic
+            // and debugtests/test-board-math.py asserts 16 lanes are never truncated on a real one.
+            int n = _board.Count;
+            int shown = ScenarioPlayer.BoardRows(
+                n, Screen.height - BoardTop - BoardBottomPadPx, BoardRow, BoardChrome);
             BoardPanel(1 + shown + (n > shown ? 1 : 0));
 
             // Header aggregates over the MAX: the batch is finished when the slowest aircraft is, and
@@ -515,15 +525,21 @@ namespace NuclearOptionMouseAim
             // PER VALUE, not one marker for the line: airframe, altitude and speed fall back
             // independently, and "the card is driving this run" is only true of the ones marked so.
             // This distinction is the whole reason the panel is worth drawing before a launch.
-            // ALTITUDE DECKS ARE THE OPERATOR'S KNOB LANDING ON TOP OF THE CARD'S ALTITUDE (v0.99), so
-            // the altitude marked `[from card]` beside it is then the MEAN of two decks and no lane
-            // flies it. Built here and shown only when decks are on: the same DeckText the launch log
-            // prints, so the panel cannot promise a spread the spawn does not use.
-            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadM());
-            if (deck.Length > 0) deck = "   " + deck + " [from F1]";
+            // ALTITUDE DECKS LAND ON TOP OF THE CARD'S ALTITUDE (v0.99), so the altitude marked
+            // `[from card]` beside them is the MEAN of two decks and no lane flies it. Shown only
+            // when decks are on, through the same DeckText the launch log prints, so the panel cannot
+            // promise a spread the spawn does not use.
+            // v1.0.2: the spread is card-first now, so its marker is RESOLVED rather than hardcoded —
+            // "[from F1]" on a value the card declared is the same lie this panel exists to prevent.
+            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadM(p));
+            if (deck.Length > 0)
+                deck = "   " + deck + " " + Src(ScenarioPlayer.DeclaredText(p.Config, "Drone/DroneAltDeckM") != null);
             BoardLine(2, BoardDim,
                 $"  plant {TestDrone.AirframeOf(p)} {Src(!string.IsNullOrEmpty(p.Airframe))}   "
-              + $"{TestDrone.AltOf(p):0} m {Src(p.StartAlt > 0f)}{deck}   "
+              // Card.Declared, not `> 0f` (v1.0.2): a card declaring sea level means it, and the
+              // board saying [from F1] about a value the card set is the exact confusion this
+              // panel exists to remove. Same rule as AltOf itself — see ScenarioPlayer.Card.Unset.
+              + $"{TestDrone.AltOf(p):0} m {Src(ScenarioPlayer.Card.Declared(p.StartAlt))}{deck}   "
               // SpeedText, not a number: a v0.93 corner-relative card has a DIFFERENT entry speed per
               // lane, so it reads "1.00x corner (per airframe)". Printing one number here would be a
               // promise the spawn does not keep — on a panel whose whole job is that it cannot be.

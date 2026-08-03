@@ -304,6 +304,22 @@ fix the prose too.** A green checker on a wrong diagram is the failure mode to a
   loaded jet mushing near its alpha limit above corner speed, a low-limit STOL trainer, and a
   hovering helo. `GENERALITY-REVIEW.md` is the standing audit of the law against this rule —
   update it when a finding is fixed or a new one is discovered.
+- **THE TEST CARD OWNS EVERY RUN PARAMETER; F1 OWNS THE OPERATOR (v1.0.3).** A card whose meaning
+  depends on unstated F1 state is not a repeatable experiment — `hs-hold` needed `DroneAltDeckM =
+  3000` against a live 0, and R41's whole rotorcraft verdict died on a stale `HeliForwardSpeed`.
+  So anything that decides *what a run measures* is declared on the card and the card **wins**;
+  F1 keeps master enables, hotkeys, logging/HUD and which card runs. Two rules follow:
+  - **Adding such a knob?** Bind it with `Cfg.CardOwned` + the `Owned` description prefix, add it to
+    `PINS_REQUIRED`/`PINS_ROTOR` in `debugtests/check-card.py`, and declare it on every shipped card.
+    `check-card.py` **fails** a card that leaves one out.
+  - **Never read it bare off `Cfg` in the harness** — go through `ScenarioPlayer.DeclaredFloat` /
+    `DeclaredBool` (the `CARD-OWNS` region), or a value read before the card starts still comes from
+    F1. `debugtests/test-card-owns.py` enforces both halves.
+
+  **Declare what a card FLEW, not the shipped default.** `captures.db` is the evidence — the deck is
+  `entry_alt_from` on a run's first placement, throttle is the `thr` column, fuel is `entry_fuel_to`.
+  Where the corpus and the default disagree the corpus wins and the card's `note` records why.
+  See `ARCHITECTURE.md` L1.7 for the mechanism and `cards/README.md` for the declaration table.
 - **A batch analysis UPDATES a standing doc. Never mint a new `R##-*.md`, `SESSION-*.md` or
   `*-FINDINGS.md`.** That habit produced ~25 files that went stale faster than they could be
   maintained, disagreed with each other and with the code, and were consolidated away on 2026-08-02.

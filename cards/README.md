@@ -369,8 +369,8 @@ unless you quit in between.
 |---|---|---|
 | `Drone/DroneEnabled` | **ON** | master switch; the harness is inert and its hotkeys unread while off |
 | `Scenario/ScenarioCardSet` | **the card name** | the only safe way to pick a card — see the `sel[0]` rule below |
-| `Scenario/ScenarioArmToggle` | **empty** unless the batch says otherwise | a leftover value here sweeps a knob nobody asked to sweep. `e*` cards name their own `armToggle` and win; other cards declare none |
-| `Scenario/ScenarioForceEntry` | ON (default) | the placement writes the entry condition; off, a lane not already on condition simply refuses |
+| ~~`Scenario/ScenarioArmToggle`~~ | **card-owned since v1.0.2** | every card declares its own `armToggle` (`"none"` when it is not an A/B), so a leftover value here no longer reaches a batch |
+| ~~`Scenario/ScenarioForceEntry`~~ | **card-owned since v1.0.2** | declared in each card's `config[]`; the entry gate reads the card, not this |
 | `Control/Enabled`, `Control/WriteControl` | **ON** | with either off the card moves the marker and nothing chases it. `[card]` warns, and the capture is not a law measurement |
 | `Recording/DebugLogging` | **OFF** | per-tick spam; it costs frames on a wide fleet |
 
@@ -425,6 +425,51 @@ A card carries its own run configuration, so the operator ticks **one** checkbox
 spawn key. Every field falls back to the matching global when absent, so a card that declares
 nothing behaves exactly as it always did.
 
+### v1.0.2 — the card is the SINGLE SOURCE OF TRUTH, and `check-card.py` enforces it
+
+> **A card whose meaning depends on unstated F1 state is not a repeatable experiment.**
+
+Falling back was the design; it was also the hole. `hs-hold` was written around
+`Drone/DroneAltDeckM = 3000` for its dynamic-pressure contrast, the live config held `0`, and nothing
+refused — the batch would have measured a different experiment and scored fine. Batch R41's entire
+rotorcraft verdict was withdrawn for the same reason one section over: `HeliForwardSpeed` /
+`HeliHoverSpeed` sat at stale v0.43 values that no card declared and no artifact recorded.
+
+So every parameter that decides **what a run measures** must now be declared on the card, and the
+card **wins**. All 39 shipped cards were migrated to declare theirs at the shipped Cfg defaults, so
+they fly exactly what they flew before. `check-card.py` **FAILS** a card that leaves one out:
+
+| must be declared | as | decides |
+|---|---|---|
+| `airframe` | field | the test article |
+| `count` (or a roster to count) | field | the fleet size |
+| `repeat` | field | replicates — one run measures nothing |
+| `armToggle` | field, **`"none"` to mean no A/B** | which knob is swept |
+| `startSpeed` / `startSpeedCorner`, `startAlt` | fields | the entry condition |
+| `Scenario/ScenarioThrottle` | `config[]` | the energy profile |
+| `Scenario/ScenarioEntryFuel` | `config[]` | the **mass** every replicate flies |
+| `Scenario/ScenarioForceEntry` | `config[]` | whether the aircraft is *put* on condition |
+| `Drone/DroneAltDeckM` | `config[]` | the two decks = the air density the fleet is split over |
+| `Drone/DroneStaggerSec` | `config[]` | launch spacing = whether replicates are independent |
+| `Control/HeliForwardSpeed`, `Control/HeliHoverSpeed` | `config[]`, **rotorcraft cards only** | which law a rotorcraft card is measuring (the R41 pair) |
+
+Two notes on the mechanics:
+
+* **`armToggle: "none"` is not decoration.** An absent `armToggle` and an empty one are the same
+  string, so without the literal a card that is simply not an A/B sweeps whatever
+  `Scenario/ScenarioArmToggle` was left holding.
+* **`config[]` now reaches the pre-spawn reads.** Pins are applied when a card *starts*, but the
+  fleet is laid out before that — so `DroneAltDeckM`, `DroneStaggerSec` and the `ScenarioForceEntry`
+  entry gate are resolved off the card's array **directly**. Nothing about the card file changed;
+  only who is allowed to ignore it.
+
+**F1 is now the operator's panel only.** The knobs above are still bound (a `config[]` pin needs an
+entry to resolve against, and a no-card spawn still needs a default) but are marked *advanced* and
+labelled `DEFAULT ONLY — THE TEST CARD OWNS THIS`. What stays at eye level: master enables, hotkeys,
+logging/HUD, and `ScenarioCardSet` / `ScenarioBatchQueue` / the per-card checkboxes, which choose
+*which* card runs. **Hover a card's checkbox in F1 > `Scenario Cards`** to read its whole definition
+— roster, entry, schedule, pins, segment layout — without opening the JSON.
+
 **Since v0.91 that covers the fleet too**, which was the last thing still living in F1: `airframe` is
 a comma list (one jsonKey per drone lane, wrapping) and `count` says how many drones one press
 launches. So the whole procedure for a batch is now **tick `Drone/DroneEnabled`, tick one card, press
@@ -453,7 +498,7 @@ question, and the `Drone*` knobs are now purely the fallback for a card that dec
 | `startSpeedCorner` | `startSpeed` | **v0.93.** Entry speed as a multiple of **the lane airframe's own corner speed** — the **FBW's** since v0.96, not the encyclopedia's AI one ([`AIRFRAMES.md`](../AIRFRAMES.md) trap 6) — resolved per lane. `0` = unset. When `> 0` it **wins over `startSpeed`**, which stays as the fail-soft fallback if the envelope cannot be read. Sane range 0.5–3.0 |
 | `repeat` | `Scenario/ScenarioRepeat` | `0` = fall back. The **first selected card** decides for the whole queue |
 | `armToggle` | `Scenario/ScenarioArmToggle` | must name a **bool**; interleaved ABBA. First card decides. Since v0.94 the arm is **per aircraft** (never written to the config), so every lane sweeps its own schedule concurrently |
-| `config[]` | — | `"Section/Key"` (bare key ⇒ section `Control`); pinned at card start, **restored** at card end |
+| `config[]` | — | `"Section/Key"` (bare key ⇒ section `Control`); pinned at card start, **restored** at card end. **v1.0.2:** the three knobs read *before* a card starts (`Drone/DroneAltDeckM`, `Drone/DroneStaggerSec`, `Scenario/ScenarioForceEntry`) are resolved straight off this array instead, since there is no pin yet when the fleet is laid out |
 
 ### The `sel[0]` rule — tick ONE card, and know which one is first
 

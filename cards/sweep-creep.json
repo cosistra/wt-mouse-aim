@@ -2,10 +2,19 @@
  "name": "sweep-creep",
  "cls": "Plane",
  "step": 0.02,
- "airframe": "",
+ "airframe": "Multirole1",
  "note": "Sustained demand at 1.5 deg/s. Expected standing lag ~1.2 deg: inside FineBankDeadzone=2.5, where the bank servo is only PARTIALLY commanded (measured: targetBank>0.5 deg on 43.5% of samples in the 0.5-2.5 deg azErr band, vs 0.0% below 0.5 and 97.8% above 2.5). Rung 1 of the sustained ladder. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
  "startSpeed": 250,
  "startAlt": 4000,
+ "repeat": 1,
+ "armToggle": "none",
+ "config": [
+  { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
+  { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+  { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+  { "key": "Drone/DroneAltDeckM", "value": "3000" },
+  { "key": "Drone/DroneStaggerSec", "value": "3" }
+ ],
  "segments": [
   {
    "tag": "arm",

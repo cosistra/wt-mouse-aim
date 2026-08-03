@@ -996,7 +996,8 @@ consequently **no shared `_laneRot`**: each lane spawns with its own `LookRotati
 cached frame is the two basis rays `_laneRight`/`_laneFwd` (directions, so an origin shift — a pure
 translation — leaves them alone, exactly as before).
 
-**Altitude decks (`Cfg.DroneAltDeckM`, default 3000).** The fleet splits over two decks at
+**Altitude decks (`Drone/DroneAltDeckM`, default 3000 — CARD-OWNED since v1.0.2, read through
+`TestDrone.DeckSpreadM(Preflight)`, see L1.7).** The fleet splits over two decks at
 `startAlt ± spread/2` — 3000 under a card declaring 4500 m gives decks at 3000 and 6000 m, the band
 the roster is characterised over; 0 reproduces the plain single ring exactly. `DeckOf` is a
 **Latin-square diagonal** over (roster pass, airframe), `((k / A) + (k % A)) & 1`, and both obvious
@@ -1300,6 +1301,23 @@ runs twice a frame, so nothing on this path may allocate) with the header aggreg
 than a number no lane will fly) — the same pair the launch uses — polled at 2 Hz and marked `[from
 card]` / `[from F1]` per value
 
+#### v1.0.3 — the board auto-grows to the fleet
+
+Rows were capped at a flat 8, so lanes 9..16 of a full batch — the size `CountOf` clamps to, and the
+size the shipped fleet cards fly — lived permanently under *"…and N more"*, on the one instrument
+that says whether a lane has silently stopped flying. Since v1.0.2 a dead lane can also **respawn**,
+which makes the hidden half worse: the row that would show it coming back is the row that is not
+drawn. `ScenarioPlayer.BoardRows(lanes, avail, rowH, chromeRows)` fits the rows to the **screen**
+instead — `avail` is the pixels below the panel's top edge, `chromeRows` what the panel spends on
+non-lane rows (the header plus the *"…and N more"* line, so a truncation pays for its own footer).
+It never returns 0 rows with lanes flying, and a degenerate row height (0, negative, NaN) shows
+**everything** rather than nothing: a progress instrument may fail long, never silently short. It
+lives in the `BOARD-MATH` region so `debugtests/test-board-math.py` compiles it — `ROWS_CASES`
+asserts no truncation at 16 lanes on 720p/1080p/1440p.
+
+Marked `[from card]` / `[from F1]` per value is also now **resolved rather than hardcoded** for the
+altitude decks (see [L1.7](#l17--cfg-configuration--live-tuning)) — the board printing `[from F1]`
+beside a value the card declared is the same lie the panel exists to prevent.
 
 ### `scenario` — playback, placement, cards and arms
 
@@ -1899,6 +1917,48 @@ restore at suite end, and **`SnapshotString` now takes the aircraft's controller
 header prints those four levers *as flown* rather than as configured — printing `Cfg`'s own value
 would put it on the same line as `arm=1` and contradict it, which is precisely the self-describing
 property that line exists for.
+
+**THE OWNERSHIP RULE (v1.0.2): the CARD owns every parameter that decides what a run measures, and
+F1 owns the operator.** The card was already *a* writer of this config; it is now the *authority* for
+that set, and the F1 entry is demoted to the default a card that says nothing inherits. Two field
+failures forced it. `hs-hold` was designed around `Drone/DroneAltDeckM = 3000` for its
+dynamic-pressure contrast, the live config held 0, and the batch would have measured a different
+experiment while scoring fine — the operator had to be told to hand-edit F1, which is the definition
+of a run that is not repeatable. Batch R41's entire rotorcraft verdict was withdrawn for the same
+shape one section over: `HeliForwardSpeed`/`HeliHoverSpeed` sat at stale v0.43 values that no card
+declared and no artifact recorded.
+
+The mechanism is the **existing** `config[]` array, not a second channel — but it had only ever
+reached half the run:
+
+| when the value is read | who resolves it | why |
+| --- | --- | --- |
+| **per tick** (every `Control` lever, `ScenarioThrottle`, `ScenarioEntryFuel`) | `ApplyOverrides` **pins** the entry at card start, releases at card end | the entry *is* what the law reads; pinning it is the whole mechanism |
+| **pre-spawn** (`DroneAltDeckM`, `DroneStaggerSec`, the `ScenarioForceEntry` entry gate) | `ScenarioPlayer.DeclaredFloat` / `DeclaredBool` read the card's array **directly** | the fleet is laid out *before* any card starts, so there is no pin to read yet — this is exactly where `hs-hold` fell through |
+
+Both paths share one grammar (`SplitSpec`), so a card writing `HeliHoverSpeed` and a call site asking
+for `Control/HeliHoverSpeed` are the same key. Both are fail-soft: an unparseable literal falls back
+to the live value rather than throwing on a hotkey path. The C# lives between the `CARD-OWNS` markers
+in `ScenarioPlayer.cs` and `CARD-OWNS-SPAWN` in `TestDrone.cs`, compiled verbatim by
+`debugtests/test-card-owns.py`; the JSON half — *does every shipped card actually declare the
+inventory?* — is `check-card.py` CHECK 6, which **fails** rather than warns.
+
+Two smaller holes closed with it. `armToggle: "none"` is now an explicit "no A/B schedule", because
+an absent `armToggle` and an empty one were the same string and a card that is simply not an A/B
+inherited whatever `ScenarioArmToggle` was left holding. And **F1 shows a card's full definition**:
+`Register` builds each card's enable-checkbox description from the card itself (roster, entry,
+schedule, pins, segment layout), so hovering it in *Scenario Cards* is the read-only card browser —
+no new UI, since ConfigurationManager already renders a `ConfigDescription` as hover text.
+
+**F1's keep/remove split.** Kept at eye level: master enables, hotkeys, logging/HUD, and the two that
+select *which* card runs (`ScenarioCardSet`, `ScenarioBatchQueue`) plus the per-card checkboxes.
+Demoted (`IsAdvanced`, description prefixed `DEFAULT ONLY — THE TEST CARD OWNS THIS`):
+`DroneAirframe`, `DroneSpawnAlt`, `DroneAltDeckM`, `DroneSpawnSpeed`, `DroneCount`,
+`DroneStaggerSec`, `ScenarioRepeat`, `ScenarioArmToggle`, `ScenarioThrottle`, `ScenarioEntryFuel`,
+`ScenarioForceEntry`. **Demoted, not deleted**, and that is load-bearing three ways: the bind is what
+a card's `config[]` *pins* against (delete it and `ResolveEntry` returns null and the override is
+skipped), it is still the fallback for a spawn with no card selected, and it is still the shipped
+default that the 39 migrated cards declare verbatim.
 
 **The `Sandbox` section (v0.95) shares nothing with `Drone`, deliberately.** Four knobs — key,
 airframe, altitude, speed — duplicating two the harness already has. Reusing

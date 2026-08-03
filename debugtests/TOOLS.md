@@ -22,7 +22,8 @@ All tools are **stdlib-only Python**, run from the repo root, and every one has 
 | `check-architecture.py` | does `ARCHITECTURE.md` still match the code? | `CLAUDE.md` → Keeping the diagram current |
 | `index-decompiled.py` | reverse a `:NNNNN` citation into a type/member | [decompile index](#index-decompiledpy--the-decompile-index) |
 | **flying a batch** | the whole unattended procedure | [harness](#uncrewed-drones--the-harness-procedure), [run board](#the-harness-run-board), [sandbox](#hand-flying-the-law-the-sandbox-key) |
-| **source-region tests** | compile a region of the shipped C# and assert on it | [arm](#test-arm-schedulepy--concurrent-ab-arms), [respawn](#test-lane-respawnpy--dead-lane-respawn), [collective](#test-collective-holdpy--the-rotorcraft-collective-hold), [grammar](#test-spec-grammarpy--config-spec-grammar), [fleet](#test-fleet-resolvepy--fleet-resolvers-and-the-entry-speed-gate), [lane](#test-lane-framepy--lane-frame--ring), [card model](#test-card-modelpy--card-deserialisation) |
+| `test-card-owns.py` | does a card's declared value beat the F1 value? | [ownership](#test-card-ownspy--the-ownership-rule) |
+| **source-region tests** | compile a region of the shipped C# and assert on it | [arm](#test-arm-schedulepy--concurrent-ab-arms), [respawn](#test-lane-respawnpy--dead-lane-respawn), [collective](#test-collective-holdpy--the-rotorcraft-collective-hold), [grammar](#test-spec-grammarpy--config-spec-grammar), [fleet](#test-fleet-resolvepy--fleet-resolvers-and-the-entry-speed-gate), [lane](#test-lane-framepy--lane-frame--ring), [card model](#test-card-modelpy--card-deserialisation), [ownership](#test-card-ownspy--the-ownership-rule), [board](#test-board-mathpy--the-run-boards-arithmetic) |
 
 Related references: `debugtests/CAPTURES-DB.md` (schema + SQL traps), `cards/README.md` (the card
 grid), `AIRFRAMES.md` (jsonKeys and envelopes).
@@ -45,6 +46,17 @@ Every constant is parsed from `Cfg.cs` / `ScenarioPlayer.cs` / `TestDrone.cs` / 
 runtime and it hard-errors if a regex stops matching — a hardcoded copy here would be exactly the
 drift the tool exists to catch. **The fallthrough table in its header is the authoritative list of
 every card field that resolves silently**; read it before adding a card field.
+
+**v1.0.3 — CHECK 6, ownership, and it FAILS rather than warns.** Every parameter that decides what a
+run measures must be declared on the card: the fields (`airframe`, a resolvable lane count,
+`repeat`, `armToggle` — `"none"` is the explicit "no A/B", since absent and empty are the same
+string) and the `config[]` pins in `PINS_REQUIRED` (`ScenarioThrottle`, `ScenarioEntryFuel`,
+`ScenarioForceEntry`, `DroneAltDeckM`, `DroneStaggerSec`) plus `PINS_ROTOR`
+(`HeliForwardSpeed`/`HeliHoverSpeed`) on rotorcraft cards. A warning on a 500-capture batch is read
+*after* the batch. The lane/cost model reads the card's declared deck and stagger through
+`pinned_num`, so its arithmetic follows the card rather than the globals. **Adding a card-owned knob
+means adding it to `PINS_REQUIRED` here and to every shipped card.** The runtime half is
+[`test-card-owns.py`](#test-card-ownspy--the-ownership-rule).
 
 ## analyze-wobble.py — wobble scoring and --digest
 
@@ -504,3 +516,37 @@ game (v1.0.0).
 
 Extracts the BOARD-MATH region from `ScenarioPlayer.cs` **verbatim**, compiles it with the .NET SDK
 and runs 23 cases (v0.90). It checks the shipped code, not a Python copy that would drift.
+
+**v1.0.3 — `ROWS_CASES`, the no-truncation claim.** `BoardRows` joined the region when the board
+stopped capping at 8 rows. The table asserts a full 16-lane fleet is shown whole on 720p, 1080p and
+1440p; that a short viewport still truncates (rows drawn off the bottom edge are truncation you
+cannot see); that it never returns 0 rows with lanes flying; and that a degenerate row height
+(0, negative, NaN) shows **everything** — a progress instrument may fail long, never silently short.
+
+## test-card-owns.py — the ownership rule
+
+**A card's declared value beats the F1 value, and its silence does not.** That property is what
+makes a card a repeatable experiment rather than a stimulus whose meaning depends on whatever the
+config file happened to hold, and two field failures are why it is a test and not a convention:
+`hs-hold` was designed around `Drone/DroneAltDeckM = 3000` while the live config held 0 (nothing
+refused — the operator was told to hand-edit F1), and batch **R41**'s entire rotorcraft verdict was
+withdrawn because `HeliForwardSpeed`/`HeliHoverSpeed` sat at stale v0.43 values no card declared.
+
+Compiles three shipped regions verbatim: `CARD-OWNS` + `SPEC-GRAMMAR` (`ScenarioPlayer.cs`) and
+`CARD-OWNS-SPAWN` (`TestDrone.cs`). The last is the half that was actually broken — a card's pins
+are applied when the card *starts*, and the fleet is laid out before that, so `DeckSpreadM` and
+`StaggerSec` cannot read the pin and must read the card. Cases cover both directions, bare vs
+`Section/Key` spellings of one entry, a near-miss key, duplicate keys (first wins, matching
+`PinShared`), whitespace, unparseable and empty literals (fail soft to the live value, never throw
+— this runs on a hotkey path), and null config/entry (skipped, not dereferenced). **Runs under
+`de-DE`** on purpose: a card file travels between machines and `"0.40"` must not become 40.
+
+Plus a **source invariant** the compiled region cannot make about itself: no file in
+`ScenarioPlayer.cs` / `TestDrone.cs` / `WTMouseAimPlugin.cs` may read `Cfg.DroneAltDeckM`,
+`Cfg.DroneStaggerSec`, `Cfg.ScenarioForceEntry` or `Cfg.ScenarioEntryFuel` **bare** — the only legal
+shape is as the fallback argument of the resolver, in the same statement. A resolver nobody calls is
+exactly the state the harness was in before v1.0.3.
+
+Its sibling is `check-card.py` CHECK 6: this one proves the harness **honours** a declaration, that
+one proves each shipped card **makes** it. Neither sees the other's half, and a card that declares
+nothing fails the same way as a resolver that ignores what it declares.

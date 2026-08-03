@@ -8,6 +8,14 @@
   "startSpeedCorner": 0.95,
   "startAlt": 6000,
   "repeat": 8,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
   "segments": [
     {
       "tag": "arm",

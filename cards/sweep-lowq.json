@@ -2,10 +2,19 @@
   "name": "sweep-lowq",
   "cls": "Plane",
   "step": 0.02,
-  "airframe": "",
+  "airframe": "Multirole1",
   "note": "Same sustained-sweep shape as fixedwing-sweep, entered at 150 m/s instead of 250: below corner for every jet, so qSched (the low-q demand schedule) and the q-scaled omegaMax actually bind. Third point of the loading sweep: fixedwing-sweep = high q, this = low q, alpha-sweep = alpha-limited. AIRFRAME: any jet, BELOW its corner speed at this entry condition.",
   "startSpeed": 150,
   "startAlt": 6000,
+  "repeat": 1,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
   "segments": [
     { "tag": "arm",         "dur": 6,  "az": 0, "el": 0 },
     { "tag": "turn360loq",  "dur": 30, "az": 0, "el": 0, "deriveAzRate": true }
