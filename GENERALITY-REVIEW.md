@@ -137,6 +137,37 @@ assume; the mod's AoA block is the *only* alpha protection in the loop at card s
 - **Relative, not absolute**: AoA margins are fractions of the probed limiter (v0.56); the v0.59
   AoA-utilization schedule is relative to the same probed ceiling.
 
+## Finding index — read one finding, not the file
+
+**This file is ~44 KB.** The per-finding verdicts below are the authority; the summary blocks in the
+header stop at v0.65 and are stale. Jump to the finding you need — grep `### 16.` if the line
+offset has drifted. Cite as `GENERALITY-REVIEW.md finding 16`; these numbers are a **separate
+namespace** from `LAW-CHARACTERIZATION.md` §7's `#n`.
+
+<!-- FINDING-INDEX:BEGIN -->
+
+| # | severity | finding | verdict | line |
+|---|---|---|---|---|
+| `1` | HIGH | the fixed-wing pitch error term is not achievability-normalized | PARTIAL (v0.65; was FIXED-by-Unified v0.60) | 173 |
+| `2` | HIGH | no measured pitch-effectiveness estimator (yaw has one, pitch doesn't) | PARTIAL (v0.65; the estimator itself is FIXED) | 191 |
+| `3` | MEDIUM | helo yaw carries the fixed-wing reactive damping term | — | 205 |
+| `4` | MEDIUM | `kHelo = 2.0` assumes a universal ~0.3 s helo inner-loop lag | — | 212 |
+| `5` | HIGH | the roll axis is the least normalized axis | OPEN, and FIELD-CONFIRMED (2026-08-02) | 218 |
+| `6` | MEDIUM | regime thresholds for plain helis are global speed constants | — | 258 |
+| `7` | LOW | fine boost is binary-off for collective airframes, not regime-blended | DEFERRED (v0.60) | 293 |
+| `8` | LOW | the two lockstep bank-target sites use different speed floors | FIXED (v0.60) | 302 |
+| `9` | LOW | pitch demand schedules only exist inside EvolvedLegacy | RESOLVED by construction (v0.60) | 307 |
+| `10` | WATCH | fixed "ponytail" time constants | — | 318 |
+| `11` | — | eAlign-slew stale-sign counter-roll (S1) | FIXED (v0.61, Track A.1) | 325 |
+| `12` | — | azErr noise-gate / predFloor interaction (S2) | PARTIAL (v0.61 Track A.2; the Unified "deeper cure" was… | 339 |
+| `14` | HIGH | `_pitchEff`'s v0.67 self-probe cannot clear its own threshold | OPEN (STRUCTURAL + MEASURED) | 351 |
+| `15` | HIGH | `_yawWeak` measures "the error did not close", not "the rudder is weak" | OPEN (STRUCTURAL + MEASURED) | 380 |
+| `16` | HIGH | `lateralHold` rails and disconnects the ENTIRE bank pipeline | SPLIT VERDICT (2026-08-02): the `blendWeight` hand-off… | 396 |
+| `17` | MEDIUM | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | STRUCTURAL, and FLOWN NULL on the 6° oblique (R41) | 442 |
+| `18` | HIGH | the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs | OPEN (MEASURED, R32) | 482 |
+
+<!-- FINDING-INDEX:END -->
+
 ## Findings (ranked)
 
 ### 1. HIGH — the fixed-wing pitch error term is not achievability-normalized — PARTIAL (v0.65; was FIXED-by-Unified v0.60)
@@ -230,18 +261,34 @@ tilt/nozzle gauge. Semi-principled (the 60 matches the game's own weathervane fa
 game-wide), but a heavy compound heli and a light scout blend identically.
 `CompoundHeloController` is detected but log-only.
 
-> **MEASURED CONSEQUENCE (R41, 2026-08-02).** Because these are absolute m/s, **`AttackHelo1` can never
-> leave the hover regime at any speed it is capable of flying** — Vmax 100 m/s gives a lowest reachable
-> `heliBlend` of 0.455 — while `QuadVTOL1` reaches full fixed-wing behaviour at its Vmax. R41 measured
-> the failure that follows: with the blend pinned at 1.0 the law **deletes the bank channel**
-> (`tBankE *= (1 − heliBlend)`), so `tgtBank` rails at 72° while `bank` delivers 0.3° and a saturated
-> pedal is the only actuator left; |azErr| then grows without bound to 34.1°. See `LAW-LEDGER.md` H4.
+> **~~MEASURED CONSEQUENCE (R41)~~ — WITHDRAWN 2026-08-02 BY R42. Read `LAW-LEDGER.md` X29 and X31.**
+> This block said *"`AttackHelo1` can never leave the hover regime at any speed it is capable of
+> flying — Vmax 100 m/s gives a lowest reachable `heliBlend` of 0.455"*, and attributed R41's runaway
+> to that. **Both halves were computed against a stale live config.** 0.455 is `(150 − 100)/110`; at
+> the **shipped** 60/20 the expression is `(60 − 100)/40`, which clamps to **0**, so `AttackHelo1`
+> reaches full fixed-wing behaviour at any `vFwd ≥ 60` m/s. R42 measured `heliBlend` down to **0.55**
+> at 38 m/s — `(60 − 38)/40` exactly — and the divergence is gone with it: `fixedWindowOffDeg` down
+> 85–95%, pedal rail 66.1% → 0.0%, 143 `persistent-miss` → 0 (ledger **H6**).
 >
-> **A second, separate hazard the same batch exposed: these knobs are live config and drift.** R41 flew
-> with `HeliForwardSpeed = 150` / `HeliHoverSpeed = 40.28` — a hand-tuned **v0.43** pair that had never
-> been reset — which configured the v0.58 design's central mechanism (hand the turn to the wing as
-> speed builds) out of the entire batch. At the shipped 60/20 the diverging segments would have handed
-> **52.9%** of the bank demand back instead of 0.8%. A defaults-vs-live check belongs in the preflight.
+> **THE STRUCTURAL FINDING IS UNCHANGED AND STILL OPEN.** These are still absolute m/s; a heavy
+> compound heli and a light scout still blend identically; nothing keys off the airframe's own
+> `heloMaxAngularVel`, Vmax or disc loading. What R42 removes is the *worked example*, not the
+> violation.
+>
+> **The hazard that R41 actually exposed, and it is the durable one: these knobs are LIVE CONFIG and
+> they drift.** R41 flew `HeliForwardSpeed = 150` / `HeliHoverSpeed = 40.28` — a hand-tuned **v0.43**
+> pair that had never been reset — which configured the v0.58 design's central mechanism (hand the
+> turn to the wing as speed builds) out of the entire batch and produced a publishable law verdict
+> that was an artifact. **A defaults-vs-live check belongs in the preflight**, and a capture's
+> `# config` line is the only thing that can be trusted about what flew.
+>
+> **NEW, and it is a real ONE-LAW violation in the same family (R42, ledger X30):** the tilt-driven
+> branch that is *supposed* to replace these speed constants on a tiltwing — `tiltFrac` at
+> `ChaseController.cs:1132` — is measured running **backwards**: 0.620 at 108 m/s falling to 0.182 at
+> 60 m/s, where a correct hover blend must rise as the aircraft slows. So on the one airframe that has
+> a real tilt gauge, the principled term is not merely unused but adds 18–62% of hover blend in
+> wing-borne cruise. The sign flip is the leading candidate and is **not** a confirmed fix — the
+> measured range spans neither endpoint. Ledger **O13** is the measurement that decides it.
 
 ### 7. LOW — fine boost is binary-off for collective airframes, not regime-blended — DEFERRED (v0.60)
 **Deferred:** the `if (_collective) fineGain = 1` line is in shared pre-compute that EvolvedLegacy

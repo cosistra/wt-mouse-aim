@@ -1,9 +1,10 @@
 # `captures.db` — the flight-capture index, for an agent who has never seen this repo
 
 `debugtests/captures.db` is a SQLite index over every recorder CSV the mod has ever written
-(**2576 captures / 11015 segments / ~2.12M recorder rows / 31 batches as of R40, 2026-08-02** — the
-older "1604 / 7081 / ~954k as of R32" figures are retired; re-derive with `--stats` rather than
-trusting any number written here). It exists so a question spanning
+(**3083 captures / 13263 segments / ~2.59M recorder rows / 33 non-NULL run tags as of R42,
+2026-08-02** — the older "2576 / 11015 / ~2.12M as of R40" and "1604 / 7081 / ~954k as of R32" figures
+are retired; re-derive with `--stats` rather than trusting any number written here). It exists so a
+question spanning
 batches — *"does this effect hold in R28, R29 AND R30?"* — is one `GROUP BY`, not three tool runs
 stitched into prose.
 
@@ -16,6 +17,36 @@ python debugtests/index-captures.py --stats            # WHAT IS IN HERE — run
 python debugtests/index-captures.py --check R29        # is that batch complete and intact?
 python debugtests/index-captures.py --query "SELECT …" # read-only by default
 ```
+
+<!-- DB-INDEX:BEGIN -->
+## Index — read a slice, not the file
+
+**This file is ~46 KB (~11k tokens). Do not read it whole to write one query.** Find your row, read
+that section (`Read` with `offset`/`limit`, or grep the heading).
+
+| you want | section | line |
+|---|---|---|
+| the two rules that stop wrong answers | [The two rules](#the-two-rules) | 51 |
+| just run something | [the three built-in commands](#start-here-the-three-built-in-commands) | 68 |
+| **what a run tag flew, where its findings went** | [The batch index](#the-batch-index--what-each-run-tag-flew-and-where-its-conclusions-live) | 95 |
+| where a new analysis should land | [The doc convention](#the-doc-convention--batch-analyses-update-standing-docs) | 140 |
+| **column reference** — one row per CSV | [`captures`](#captures--one-row-per-csv-86-columns-today-the-sc_entry_ov_-ones-are-dynamic) | 165 |
+| column reference — one row per segment | [`segments`](#segments--one-row-per-capture-segment-62-columns-12-fixed--50-dynamic-metrics) | 216 |
+| raw recorder rows (opt-in) | [`rows`](#rows--raw-recorder-rows-opt-in) | 243 |
+| the card grid tables | [`cards`, `card_airframes`](#cards-card_airframes--the-card-grid-opt-in) | 250 |
+| **which metric is valid for which segment** | [The metric × segment-type matrix](#the-metric--segment-type-matrix) | 261 |
+| why my query returned NULL | [The three NULL idioms](#the-three-null-idioms) | 317 |
+| why a small effect is not real | [The resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check) | 373 |
+| which `sc_` column to join on | [The six `sc_` twins](#the-six-sc_-twins--which-one-to-join-on) | 424 |
+| **a worked query to copy** | [Cookbook](#cookbook) | 444 |
+| `--query` semantics | [`--query` behaviour](#--query-behaviour) | 601 |
+| everything that bit someone once | [Gotchas, condensed](#gotchas-condensed) | 610 |
+
+> **Every trap in this schema returns a plausible number instead of an error.** If you are about to
+> write SQL, read *The two rules* and the matrix row for your metric first — that is ~60 lines, and
+> it is the difference between a result and a retraction.
+
+<!-- DB-INDEX:END -->
 
 ## The two rules
 
@@ -99,6 +130,7 @@ those citations (`H7`, `§5a`, `1d`, `F2`) were document-local and are gone; the
 | **R40** | v0.99.1 | `alpha-pullup`, `place-noop`, `place-deflect`, 109 caps | `LAW-LEDGER.md` **N2** (the law never backs off — commanding into the ceiling on 100% of gate-biting samples), **X26** (the #51 phenomenon did not reproduce; 32 clean placements) |
 | **R40** · metric repair | v0.99.1 | corpus-wide re-score, no flying | The **two corpus-wide invalidations** at the head of `LAW-LEDGER.md`, and the metric definitions in this file. Cited from `ScenarioPlayer.cs` |
 | **R41** | v1.0.0 | seven fixed-wing cards + three rotor, 451 caps | `LAW-LEDGER.md` **A1** (feed-forward off the rail), **A2** (the `e1*` nulls), **H3–H5** (rotorcraft), **I11** (the ring geometry), **X27** (replicate 1 is a different flight condition). Cited from `compare-runs.py` |
+| **R42** | v1.0.1 | the **rotor re-fly**: `rotor-hover` + `rotor-bistab` + `rotor-transition`, 3 rotorcraft, 14 lanes, 56 caps — R41's three rotor cards at the **shipped** `HeliForwardSpeed`/`HeliHoverSpeed` 60/20 instead of the stale v0.43 150/40 | `LAW-LEDGER.md` **H6** (`AttackHelo1` converges — R41's divergence was the config), **H7** (the blend-band standing residual, the first above-floor rotorcraft pointing measurement), **H2**/**H4**/**H5** amended, **L15** (candidate mechanism), **X29** (the divergence retracted), **X30** (`tiltFrac` runs backwards — O12 answered, and it corrects H3), **X31** (the `heliBlend` 0.455 arithmetic), **O13**/**O14** (new); `GENERALITY-REVIEW.md` finding 6 (consequence withdrawn, structure stands); `LAW-CHARACTERIZATION.md` §7 Tier 1(f), Tier 2, Tier 3 and the rotorcraft re-fly list. **R41 vs R42 is a clean one-knob intervention on an identical card/roster — but only on `AttackHelo1` above 20 m/s and `QuadVTOL1`'s `rotor-transition`; everywhere else both configs clamp `speedRamp` to 1.0 and the two batches are the same expression.** |
 | **Discord v0.68 field bundle** | v0.68.0 | two users, six recordings, not a batch | `LAW-LEDGER.md` **X28** (the locale formatting bug, fixed v1.0.1) and **O11** (the high-q roll limit cycle); `GENERALITY-REVIEW.md` finding 5. Cited from `WTMouseAimPlugin.cs`, `Recording.cs` |
 
 **Raw evidence** for R28–R37 is in `debugtests/archive/R<n>-<date>/` (CSVs, sidecars, logs). Later
@@ -264,7 +296,7 @@ beside `avg()` or you are averaging the survivors.
 `aoaRecoverActivePct`, `commandIntoCeilingPct`, `qSchedMin`, `gateMinUp`, `gateMinDn`),
 `hover_hold` (`positionRMSM`, `driftRateMS`), `bobup` / `translate` (`demandM`, `overshootM`),
 `transition` (`altExcursionM`). Those cards exist in `cards/` and have never been run — see
-[cookbook Q10](#q10-which-grid-cells-have-we-never-flown-needs---cards). `aoaAboveCeilingPct` is one
+[cookbook Q10](#q10-which-grid-cells-have-we-never-flown--needs---cards-cards-first). `aoaAboveCeilingPct` is one
 of scorecard's four RAIL_METRICS, so `segments.railed` already accounts for it; you just cannot
 `SELECT` it today.
 
@@ -610,3 +642,27 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
     the R33 batch; `LAW-LEDGER.md` I8) — moves with it, **mid-batch, without warning and in opposite directions on
     different lanes**. Check the per-*replicate* series, not the mean: R33's flip is invisible in a
     lane average. A noise floor quoted without its `gJitterG` is one session's camera position.
+13. **`settleTime95 = 0.0` on a MONOTONE DIVERGENCE — it reads as "settled instantly" and it is the
+    opposite.** The band is `max(0.05, 1.05 × terminalOffDeg)` held to the segment end
+    (`scorecard.SETTLE95_FRAC`), and `terminalOffDeg` is anchored at that end — so on a leg whose `off`
+    ramps monotonically UP to its own maximum, every earlier sample is inside 1.05× that maximum and
+    the metric returns **0.0**. Live instance: R41 `AttackHelo1 · rotor-bistab` returned
+    `settleTime95` **0.0 / 0.0 / 0.9 / 1.6** on the four legs where `|azErr|` grew to 19–30° and the
+    pedal railed 66% of samples; the same cells in R42, which genuinely converge, return **7.4–24.9**.
+    The censoring the metric was designed for (NULL on a still-decaying leg) only catches a
+    *decaying* tail. **`settleTime95` near 0 with a large `fixedWindowOffDeg` is a divergence, not a
+    fast settle** — read the pair, never the one.
+14. **`aoaPeakDeg` / `aoaLimiterActivePct` / `gPeak` are meaningless on ANY rotorcraft segment**, not
+    just the slowest. `aoa` is the angle of a near-zero velocity vector off the nose, so it is noise
+    amplified: across all 28 R42 rotorcraft cells `aoaPeakDeg` averages **68–177°**, including 143–177°
+    on the yaw legs. They are non-NULL, plausibly formatted, and in the generic metric block that
+    applies to every type — so nothing filters them out for you. Filter `airframe NOT IN
+    ('AttackHelo1','UtilityHelo1','QuadVTOL1')` for anything AoA-derived, and see
+    `LAW-CHARACTERIZATION.md` §7 Tier 2.
+15. **Trusting a knob's SHIPPED default over the capture's own `# config` line.** `Cfg` values persist
+    in `<game>/BepInEx/config/com.no.wtmouseaim.cfg` and drift silently across versions. R41 flew its
+    entire rotorcraft batch on `heliFwd=150 heliHover=40` — a **v0.43** pair, 39 versions stale —
+    while every doc quoted the shipped 60/20, and that alone produced a published law verdict
+    (`AttackHelo1` diverges) which R42 retracted (`LAW-LEDGER.md` X29). The `config` column is the
+    capture's own record of the levers **as flown**; a two-batch comparison must diff it first:
+    `SELECT run_tag, count(*), config FROM captures WHERE run_tag IN (...) GROUP BY 1,3`.

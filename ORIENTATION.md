@@ -15,19 +15,34 @@ scorer, a SQLite corpus of ~2,600 captures.
 **Current state, honestly:** the instrument is now good; the law has barely moved. Most findings of the
 last two weeks are instrument defects, several of which invalidated earlier law conclusions.
 
-## 2. Read these in this order
+## 2. Read these in this order — BUT READ A SLICE, NOT A FILE
+
+> **THE READING PROTOCOL, AND THE MEASURED REASON FOR IT.** These docs total ~500 KB. An agent that
+> opened the five it is usually pointed at spent **~85k tokens before doing any work**; one
+> batch-analysis run cost ~300k, almost none of it on the 563 MB SQLite corpus — **the prose was the
+> cost.** So every large doc below now opens with an **index**. The rule, in three steps:
+>
+> 1. **Read the index at the top of the doc** — a screenful, not a file.
+> 2. **Read only the section you need**, via `Read` with `offset`/`limit`, or by grepping its heading.
+> 3. **Never read a large doc end-to-end** unless you are rewriting it.
+>
+> Findings are addressed **by stable ID** — `LAW-LEDGER.md X27`, `GENERALITY-REVIEW.md finding 16`,
+> `LAW-CHARACTERIZATION.md §7 #45`. IDs are permanent; **line numbers drift, so grep the ID if an
+> offset misses.** Cite the ID, never a bare line number. `grep` covers this — there is deliberately
+> no query tool to learn.
 
 | # | File | What it is FOR | Authoritative when |
 |---|---|---|---|
-| 1 | **`CLAUDE.md`** | *Where code lives.* Layout, paths, build/deploy, every offline tool, the conventions. | Always, for structure + build + sign conventions. Start your first edit here. |
-| 2 | **`ARCHITECTURE.md`** | *How it works.* Subsystem map, frame timeline, the `Apply` pipeline in order, mod/game boundary. | Always, for behaviour and call order. Kept green by `debugtests/check-architecture.py`. |
-| 3 | **`LAW-LEDGER.md`** | ESTABLISHED / PLAUSIBLE / REFUTED / OPEN, with a citation per line. **All per-batch findings live here now** — see note below. | The arbiter of **what we are entitled to believe**. Read the three corpus-wide invalidations in its header before quoting any pre-R40 number. If a claim is not in ESTABLISHED, do not build on it. |
-| 4 | **`LAW-CHARACTERIZATION.md`** | The standing test plan — what to fly, in what order, and why. **§7 is the numbered backlog.** | Authoritative for the test plan and for what a `#n` means (see §6 below — it is currently behind). |
-| 5 | **`LAW-WEAKNESS-MAP.md`** | Where the law is weak, ranked by effect × confidence × cost to settle. W1–W8. | For *ranking* what to attack. Each W now carries its own dated correction; read those, not the TL;DR table alone. |
-| 6 | **`GENERALITY-REVIEW.md`** | The standing ONE-LAW audit — every constant that should be a probe. Findings 1–18. | For ONE-LAW compliance. Its per-finding verdicts win over its (stale, v0.65-era) summary blocks. |
+| 1 | **`CLAUDE.md`** (~30 KB) | *Where code lives.* Layout table, paths, build/deploy, the conventions. Points at the detail rather than restating it. | Always, for structure + build + sign conventions. Start your first edit here. |
+| 2 | **`ARCHITECTURE.md`** (~180 KB) | *How it works.* Subsystem map, frame timeline, the `Apply` pipeline in order, mod/game boundary. **Index at top → one `L1.x` section.** | Always, for behaviour and call order. Kept green by `debugtests/check-architecture.py`. |
+| 3 | **`LAW-LEDGER.md`** (~99 KB) | ESTABLISHED / PLAUSIBLE / REFUTED / OPEN, with a citation per line. **All per-batch findings live here now** — see note below. **Start at its finding index and fetch by ID (`X27`, `H7`, …).** | The arbiter of **what we are entitled to believe**. Read the three corpus-wide invalidations in its header before quoting any pre-R40 number. If a claim is not in ESTABLISHED, do not build on it. |
+| 4 | **`LAW-CHARACTERIZATION.md`** (~62 KB) | The standing test plan — what to fly, in what order, and why. **§7 is the numbered backlog**, and it has its own `#n` item index. | Authoritative for the test plan and for what a `#n` means (see §6 below — it is currently behind). |
+| 5 | **`LAW-WEAKNESS-MAP.md`** (~57 KB) | Where the law is weak, ranked by effect × confidence × cost to settle. W1–W8. | For *ranking* what to attack. Each W now carries its own dated correction; read those, not the TL;DR table alone. |
+| 6 | **`GENERALITY-REVIEW.md`** (~47 KB) | The standing ONE-LAW audit — every constant that should be a probe. Findings 1–18. | For ONE-LAW compliance. **Finding index at top.** Its per-finding verdicts win over its (stale, v0.65-era) summary blocks. |
 | 7 | **`AIRFRAMES.md`** | The 14 real jsonKeys + Vstall/Vmax/corner/gLimit/mass, and six traps in the underlying fields. | **Before writing any card `airframe` list or `startSpeed`.** Nothing else in the repo records this data. |
 | 8 | **`cards/README.md`** → then `python debugtests/check-card.py cards/*.json` | The card grid, the field table, the `sel[0]` rule, and the launch/preflight procedure. | Before adding or flying a card. Run the checker — it is the cheapest check in the repo. |
-| 9 | **`debugtests/CAPTURES-DB.md`** | Column-by-column reference for `captures.db`, the metric × segment-type matrix, the traps — **and the batch index**. | **Before writing any SQL.** Every trap in that schema returns a plausible number instead of an error. |
+| 9 | **`debugtests/CAPTURES-DB.md`** (~48 KB) | Column-by-column reference for `captures.db`, the metric × segment-type matrix, the traps — **and the batch index**. | **Before writing any SQL.** **Index at top.** Every trap in that schema returns a plausible number instead of an error. |
+| 10 | **`debugtests/TOOLS.md`** (~39 KB) | Every offline tool: what it answers, when to run it, its traps — plus the unattended drone-harness procedure. **Tool table at top.** | Before running any `debugtests/*.py`. Read the one tool's row, not the file. |
 
 > **There are no per-batch findings documents.** ~25 of them (`R21`…`R41`, `GATE-CHATTER`,
 > `LOOP-AUDIT`, `SESSION-*`, `FLIGHT-PROTOCOL`, `cards/TOMORROW.md`) were consolidated into the

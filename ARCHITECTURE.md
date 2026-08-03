@@ -10,6 +10,36 @@ each id to the file and type that implements it, and that table is what keeps th
 > in the `Apply` pipeline, or add/remove a Harmony patch, update the matching L1 diagram and the node
 > index in the *same* change. See [Keeping this current](#keeping-this-current).
 
+## Index — read a slice, not the file
+
+This file is ~170 KB. **Never read it whole**; that is ~42k tokens for one answer. Find your subsystem
+below, then read only that line region (`Read` with `offset`/`limit`, or grep for the heading).
+
+| you want | section | what is in it |
+|---|---|---|
+| the whole system at a glance | [L0 — System map](#l0--system-map) | one mermaid map, mod / game / platform coloured |
+| **who runs when** in a frame | [L1.1 — Frame timeline](#l11--frame-timeline-who-runs-when) | Update / FixedUpdate / OnGUI order, the seams |
+| the aim marker + raw mouse | [L1.2 — `aim_rig`](#l12--aim_rig-the-world-locked-marker) | world-locking, cursor regimes, `Guards` |
+| **the control law** | [L1.3 — `chase`](#l13--chase-the-instructor-the-heart-of-the-mod) | the `Apply` pipeline **in order**, the probes |
+| ↳ per-airframe probes | [Why the probes exist](#why-the-probes-exist) | FBW / canard / helo, all fail-soft |
+| ↳ the ONE-LAW rule | [The generality rule](#the-generality-rule-the-reason-the-probes-carry-so-much-weight) | why no constant may suit one plane |
+| ↳ instance model, A/B arm | [`chase` detail](#chase--instance-model-seams-and-the-ab-arm) | one controller per aircraft, `Arm()` seam |
+| the camera patches | [L1.4 — `campatch`](#l14--campatch-camera-follow) | cockpit + orbit follow |
+| **the recorder / CSV** | [L1.5 — `telem`](#l15--telem-the-instrumentation-loop) | sinks, anomaly log |
+| ↳ every CSV column | [`telem` detail](#telem--the-csv-contract-column-by-column) | the 72-column contract, sidecar fields |
+| **the drone harness** | [L1.6 — `drone`](#l16--drone-the-uncrewed-harness-v081-harness-v087-phase-2) | spawn, ring, decks, batch queue |
+| ↳ card playback + placement | [`scenario` detail](#scenario--playback-placement-cards-and-arms) | safe teleport, card config, arm schedule |
+| ↳ **the `MoveAssembly` graveyard** | [v0.97.2](#v0972--moveassembly-is-a-rigid-transform-and-nothing-else-the-graveyard) | **read before touching placement** — two dead fixes |
+| ↳ spawn + entry gates | [`drone` detail](#drone--spawn-lanes-and-the-entry-gates) | lanes, envelope refusal, corner speed |
+| ↳ hand-flying (F4) | [`sandbox` detail](#sandbox--hand-flying-the-law) | operator placement, no card |
+| config + live tuning | [L1.7 — `cfg`](#l17--cfg-configuration--live-tuning) | binds, card pins, refcounting |
+| **which file/type is which** | [Node index](#node-index) | node id → file → type → role (the checker's contract) |
+| what game code we touch | [Game types we patch or read](#game-types-we-patch-or-read) | every patched/read member, with `:citations` |
+| pitch/roll/yaw signs | [Sign conventions](#sign-conventions) | verify before changing any sign |
+| how to keep this honest | [Keeping this current](#keeping-this-current) | the drift rules + `check-architecture.py` |
+
+Offline tools are **not** in this file — see [`debugtests/TOOLS.md`](debugtests/TOOLS.md).
+
 **Colour convention, used in every diagram on this page:**
 
 | | meaning |
@@ -67,7 +97,7 @@ flowchart TB
         log["LogOutput.log<br/>[anomaly] [maneuver] [seam]"]
         csv["mouseaim-rec-VER-RUN-NN-*.csv<br/><b>72-column capture (v1.0.0)</b><br/>+ '# override' header: what the CARD pinned (v0.90)"]
         sidecar["mouseaim-rec-*.airframe.json<br/>readable capability snapshot (v0.69)<br/>aero areas from partsWithAero (v0.70)<br/>v0.92: + infoStallSpeed/infoMaxSpeed (m/s) —<br/>the two numbers a flyability check needs.<br/>NOT the same as maxSpeed, which is a normalizer<br/>v0.96: + detachedRatioAtStart — did this<br/>replicate START bent? (dmgFrac only reports NOW).<br/>Fail-soft to ABSENT, never 0"]
-        pytool["debugtests/analyze-wobble.py<br/>--digest · scoring · --selftest<br/>debugtests/scorecard.py<br/>per-segment metrics → score.json (v0.69) · --selftest<br/>v0.97.1: fixedWindowOffDeg · settleTime95 · offFloorPct<br/>replace terminalOffDeg for ranking — it is end-anchored<br/>(nothing settles under 9 s) AND floored (off quantum 0.0198°)<br/>debugtests/compare-runs.py<br/>cross-run spread, grouped by airframe+card+arm (v0.90)<br/>--summary = one line per card+segment · --selftest<br/>debugtests/gatechatter.py<br/>gate rail dwell/crossings + REGRESSING coincidence<br/>(MH-stratified, sham-gate control) · --selftest<br/>debugtests/loopaudit.py<br/>self-referential loops: can the command a term<br/>gates move that term? (v0.85) · --selftest<br/>debugtests/test-board-math.py<br/>extracts the BOARD-MATH region from<br/>ScenarioPlayer.cs VERBATIM, compiles it with the<br/>.NET SDK and runs 23 cases (v0.90) — it checks the<br/>shipped code, not a Python copy that would drift<br/>debugtests/test-card-model.py<br/>same trick on the CARD-MODEL region: compiles it<br/>against the game's Newtonsoft and round-trips every<br/>cards/*.json (v0.90.1). Exists because JsonUtility<br/>silently dropped Seg[] segments for nine versions<br/>+ one SYNTHETIC card for the fields no shipped card<br/>uses: config, and v0.91's comma-list airframe/count<br/>debugtests/test-arm-schedule.py<br/>same trick on TWO regions (v0.94): ARM-SCHEDULE in<br/>ScenarioPlayer.cs + ARM-SEAM in ChaseController.cs.<br/>ABBA sequence · equal MEAN POSITION at every<br/>multiple of 4 · the arm surviving a rebuilt<br/>controller · two aircraft on opposite arms at once.<br/>+ 5 source asserts (v0.96): Forget must NOT clear<br/>the arm, For must seed it, ApplyArm writes no<br/>global, all 6 lever sites read through Arm(),<br/>and LEVERS == Cfg.cs's '(A/B lever)' set<br/>debugtests/test-spec-grammar.py<br/>same trick on SPEC-GRAMMAR (SplitSpec) in<br/>ScenarioPlayer.cs, 16 cases run against BOTH it<br/>and scorecard.py's split_spec copy (v0.96)<br/>debugtests/test-fleet-resolve.py<br/>same trick on FLEET-RESOLVE (ResolveCount+CountKeys<br/>in ScenarioPlayer.cs; AirframeList+AirframeForLane<br/>in TestDrone.cs) + ENTRY-MARGINS (Stall/VMaxMargin).<br/>CountKeys(s) == len(AirframeList(s)) · lane wrap ·<br/>the 1..16 clamps · StallMargin stays BELOW 1.20 (v0.96)<br/>debugtests/test-lane-frame.py<br/>the lane base is a GlobalPosition and is converted<br/>at the LAUNCH instant, not cached at the keypress —<br/>plus the frame arithmetic: broken reproduces R35's<br/>origDist medians (against a FROZEN 8 km abeam, the<br/>constant those batches flew), fixed gives a uniform<br/>6 km ladder (v0.97.1)<br/>v0.99 also models the RING: radius at 1/2/3/8/16<br/>lanes per ring, in-deck chord and 3-D pair<br/>separation >= LaneM over N=2..16 x 6 deck spreads,<br/>|pos-base| equal across lanes at t=0 AND after<br/>31.5 km (with the shared-heading counterfactual<br/>asserted to smear, so it is not vacuous), the<br/>_slot-overflow guard, and the deck x airframe<br/>PROPERTY (every airframe on both decks, k%2 and<br/>(k/A)&amp;1 asserted to fail, deck x arm 2x2 balanced)<br/>debugtests/flightscore.py<br/>physics-normalized flight quality — every<br/>normalizer from the sidecar probe + live state,<br/>never a constant. Owns opposed(), the ONE<br/>roll/yaw cross-fight predicate · --selftest<br/>debugtests/index-captures.py<br/>SQLite cross-batch index: one row per capture, one<br/>per (capture, segment). EVERY metric comes from<br/>scorecard.score_run — one tag→metric table.<br/>--stats/--check/--diff/--cards/--archive/--query<br/>(read-only by default) · --selftest<br/>reference: debugtests/CAPTURES-DB.md<br/>debugtests/index-decompiled.py<br/>type/member index over the 0.34.1 decompile —<br/>--at NNNNN reverses a :NNNNN citation (v0.97.1).<br/>1655 types · cache lives BESIDE the decompile,<br/>never in the repo · --selftest re-derives 16 citations<br/><b>debugtests/check-card.py (v1.0.0)</b><br/>CARD PREFLIGHT — refuses a card that cannot fly its<br/>own experiment, BEFORE the game launches. Segment<br/>tags vs scorecard's table · envelope + DENSITY-<br/>corrected stall at the card's own altitude · the FBW<br/>authority knee · throttle floor · alpha reachability<br/>· wall clock. Three cards in two days failed on<br/>arithmetic it now catches. Every constant is PARSED<br/>from Cfg.cs / ScenarioPlayer.cs / TestDrone.cs /<br/>AIRFRAMES.md and it hard-errors if a regex stops<br/>matching — a hardcoded copy would be the drift it<br/>exists to catch · --selftest<br/><b>debugtests/test-helo-probe-order.py (v1.0.0)</b><br/>the v0.58 helo probe fires in the DRONE call order.<br/>(1) source: the retry structure + the three liveness<br/>columns wired end to end. (2) model: the trigger in<br/>Python over all three real call orders, with the<br/>PRE-FIX trigger as a counterfactual that MUST fail<br/>the drone case — without it the test would pass<br/>against the bug. No compiler sees a call order<br/><b>debugtests/test-card-declared.py (v1.0.0)</b><br/>the declared-zero rule: Card.Unset / Card.Declared.<br/>A SCAN, not a case table — fails on ANY comparison<br/>against zero of the four names in the two files that<br/>own them, because one more 'p.StartSpeed &gt; 0f'<br/>compiles, flies, scores, and restores the whole<br/>defect for that path. Stdlib, no SDK, no game"]
+        pytool["debugtests/*.py — offline tools<br/>digest · score · index · compare · preflight<br/>+ the source-region tests<br/><b>full catalogue: debugtests/TOOLS.md</b>"]
         cards["BepInEx/config/wtmouseaim-cards/NAME.json<br/>recorded test cards (v0.71)<br/>basename = card id · one F1 checkbox each<br/>v0.90: each card also carries its OWN run config —<br/>airframe · startAlt/Speed · repeat · armToggle ·<br/>pinned Cfg overrides (scorecard.py --selftest<br/>validates them; nothing at runtime will)<br/>v0.91: + count, and airframe is a COMMA LIST<br/>(one jsonKey per drone lane) — the card is now<br/>the whole test, F1 only the fallback"]
         range["harness/WTM-Range/WTM-Range.json<br/>isolated test mission — no units, pinned<br/>weather/wind/time, wreck cleanup on<br/>debugtests/check-mission.py validates it"]
     end
@@ -474,6 +504,84 @@ agnostic by construction. `GENERALITY-REVIEW.md` is the standing audit of the la
 
 ---
 
+
+### `chase` — instance model, seams and the A/B arm
+
+the instructor: measure → estimate → probe → law → condition → handoff → write. **An instance class
+since v0.82, one per aircraft** — every integrator, filter, ring buffer and probe cache in it is
+per-aircraft state, so N aircraft flown at once (the drone harness) need N controllers or they share
+one integrator and every capture is meaningless. Obtain one with `ChaseController.For(ac)` (keyed by
+`Aircraft.GetInstanceID()`), release one with `Forget`; `For` also sweeps controllers whose aircraft
+Unity destroyed, on the miss path so the hot path pays nothing. `ChaseController.Player` is the
+local player's controller, published from `BeginFrame` only when `GameManager.GetLocalAircraft`
+names that aircraft — it exists because `OnGUI` has no aircraft in hand and must never render a
+drone's numbers.
+
+#### v0.87 — the same law now flies uncrewed aircraft
+
+`Apply` reached for exactly three one-per-*process* things, all the human's: the `AimRig` marker,
+the Rewired player-0 stick and the `FlightHud` crosshair. The marker became a **parameter**
+(`Apply(ac)` wraps `Apply(ac, aimTarget)`; a drone passes its own `ScenarioPlayer.AimDemand`), and
+the other two are gated on `_uncrewed` — a per-instance bool whose ONLY writer is `FlyUncrewed`, the
+drone entry point that runs `BeginFrame` + `Apply` in one call because a drone has one seam where
+the player has two. So the crewed path cannot reach the uncrewed branches by construction:
+`FlyUncrewed` is called only from `TestDrone`, whose dictionary an aircraft can only enter through
+`Spawn`, which asserts `ac.Player == null`. `check-architecture.py` enforces the one-writer /
+one-caller pair, because neither fails to compile.
+
+#### v0.94 — the A/B sweep seam
+
+The four `(A/B lever)` bools are read as `Arm(Cfg.X)` rather than `Cfg.X.Value` at exactly five
+sites (`MarkerRateFeedForward` counts twice — both lockstep `omega` sites), so a swept aircraft
+flies *its* arm and everything else reads the live config. (Five levers / six sites until
+**v0.99.1** retired `RelativeTurnLead` — a spent A/B lever is deleted outright, knob and branch,
+rather than left defaulted.) Before this the knob was a process-global `ConfigEntry` read globally,
+so `scenario` had to stand the whole schedule down under concurrency and every A/B was a one-drone
+serial run. **A new lever must be read through `Arm()` to be sweepable** — `Cfg.X.Value` compiles
+and flies, it is just invisible to the schedule. The assignment lives in a static map **keyed by
+aircraft** (`_armByAircraft`, the third and last static here), NOT in the instance, because
+`scenario`'s per-replicate reset calls `Forget(ac)` every replicate and an instance field would be
+wiped at the start of each one — and because the arm is a property of the aircraft's current test
+assignment rather than of integrator state. `For` seeds a new controller from the map, `Forget`
+deliberately does not clear it, and exactly two things do: the suite's `Finish` and
+`TestDrone.ForgetState`. `debugtests/test-arm-schedule.py` compiles the `ARM-SEAM` region verbatim
+and also asserts those three source properties, none of which fails to compile
+
+#### Additional file-level notes
+
+- Contents: the control law in `Apply`, nested `AnFrame`; also `DetectAnomalies`/`TrackManeuver`,
+  the v0.55 FBW probe — per-airframe stick→pitch-rate params read from the game's
+  `ControlsFilter.FlyByWire`, fail-soft — and the v0.57 canard probe/`InvertCanardRemap` — undoes
+  the KR-67's `RelaxedStabilityController` pitch remap, fail-soft — and the v0.58 helo
+  probe/`ResolveHelo` — reads the private `heloFlyByWire` of `HeloControlsFilter` + tilt/nozzle
+  archetype components to rate-normalize rotorcraft commands and drive the hover regime by tilt
+  angle, fail-soft; rotorcraft are force-flown with EvolvedLegacy — and the v0.59 AoA-utilization
+  demand schedule/recovery bias — folds live AoA vs the probed alpha ceiling into `qSched`, gates
+  `FineGainBoost`, and adds a restoring pitch past the ceiling; the loaded-jet pitch-relay fix.
+
+- **v0.78** adds the marker-rate feed-forward: `_aimAzRateFilt` (signed marker azimuth rate, same
+  `HdgRateTau` LPF as `_headingRateFilt`) is added at UNIT gain to `omega` at **both** lockstep
+  sites, before the achievability cap so `omegaMax` bounds it — the fix for the standing 9.5° lag a
+  P-only loop must hold to fly a sweeping marker; gated by `Cfg.MarkerRateFeedForward` as the
+  in-session A/B lever.
+
+- **Do not "restore" it from the R39 null.** (b) `Cfg.IntegralStallGate` — `_iPitch`/`_iYaw` wound
+  on `fineBlend`, i.e. on error **magnitude**, so the anti-residual term was identically zero at
+  `off > FineAngle` (R21: ±0.001 against a 0.12 cap for a whole 30 s turn).
+
+- Two independent checkboxes, both default ON: (a) `Cfg.BelowAlignSuppress` — the v0.67
+  `belowSuppress` keyed on **body-frame** belowness, so the aircraft's own roll erased it (at 90° of
+  bank a straight-down target reads abeam), and its `(1 − lateralHold)` factor gated it on the very
+  azimuth error roll-to-align creates (51% of the suppression removed, on 88% of ticks).
+
+- (b) `Cfg.AlignRateLead` — the `eAlign` channel was a pure `phi/90` P map; `phi` is now led by the
+  new measured `_phiRateFilt` (same `HdgRateTau`, zeroed **and invalidated** under `EAlignLatGate`)
+  times `Cfg.RollDamping` as the lead time, stood down inside `phiWrapGate` where the two-rate
+  anti-relay slew owns the dynamics.
+
+- `For(ac)` seeds a freshly built controller from the map (`SeedArm`); **`Forget` must NOT clear
+  it**; exactly two things do — the suite's own `Finish` and `TestDrone.ForgetState` on despawn.
+
 ## L1.4 — `campatch`: camera follow
 
 ```mermaid
@@ -585,6 +693,90 @@ flowchart LR
 ```
 
 ---
+
+
+### `telem` — the CSV contract, column by column
+
+CSV capture (**69 cols** as of v0.97.0) + `.airframe.json` sidecar + event-only anomaly sink.
+**`ManeuverRecorder` is an instance class since v0.86, one per aircraft** — same registry as `chase`
+(`For(ac)` / `Forget` / `Sweep` / `Player`), because N drones writing one `StreamWriter` is not a
+worse capture but one file with N aircraft's rows interleaved under one header. `Forget` **closes an
+open capture** with a reason, so a drone despawned mid-card cannot leave a writer open and a
+truncated file that reads as a clean completion. Only `_recSeq` stays static, and it is not the
+`LastPhase` trap: it counts *files opened this run*, one artifact-stream numbering per process —
+which keeps take numbers unique across concurrent writers **and** keeps `rec=` monotonic in time,
+the key `compare-runs.py` orders its A/B balance check by. The header block now describes *this
+recorder's* aircraft rather than `GetLocalAircraft`'s (a drone capture used to name the player's
+airframe, which would have silently defeated `compare-runs.py`'s refusal to pool across airframes).
+**v0.90 added `OverrideNote`**, written as a `# override Section/Key=value …` header line under `#
+card`: the knobs THAT CARD pinned for itself. A header line rather than a 65th column because the
+value is constant for the whole capture by construction, and not redundant with `# config` — that
+reports the live values, and what it cannot report is that the *card* chose them, which is what
+separates "configured by its card" from "someone left a knob set". **v0.92 added three SIDECAR
+fields and no column** (64 at the time): `infoStallSpeed`/`infoMaxSpeed` (`aircraftInfo`, converted
+from km/h) and the advisory `infoMaxWeight`. The block recorded every capability *except* the two
+numbers a flyability question needs, so no capture was self-contained on "could this airframe fly
+the entry condition it was given?" — the question `drone`'s pre-spawn gate now asks, and the one an
+unflyable lane's capture looks innocent under. Distinct keys from the existing `maxSpeed`, which is
+the `aircraftParameters` normalizer and a different quantity; `infoMaxWeight`'s sibling
+`emptyWeight` is documented template junk, so normalise by `massKg`. **v0.96 added column 65,
+`dmgFrac`** — the fraction of THIS aircraft's parts currently DETACHED, from the game's own
+`Aircraft.partDamageTracker.GetDetachedRatio()` (event-driven, self-throttled to 1 Hz, so it hands
+back a cached float and is free per row). Read off the recorder's OWN aircraft, in its own
+try/catch, with **−1 = could not read it, never 0** — 0 is the ordinary "intact" reading, which is
+also why it is not folded into the M0 state block whose catch leaves zeros. v0.84 named damage as
+one of the two things the per-replicate reset cannot undo and must therefore *record*; this is that
+record. `aeroPartCount` is not a substitute: nothing on the detach path calls `RemoveFromUnit()`,
+the only caller of `DeregisterAeroPart` (`AeroPart:74749-74755`), so it never decreases. The sidecar
+gained `detachedRatioAtStart` (did this replicate START bent? — the column only reports *now*),
+fail-soft to **absent**, not 0. **v0.96.2 added column 66, `origDist`** — metres from the **Unity
+world origin**, the one quantity `posX/Y/Z` cannot express (those are DATUM-relative by design, so a
+floating-origin rebase leaves no step in them). Float32 grain at distance *d* is ~`d·1.2e-7` m and
+`Aircraft.gForce` = `|v−vPrev|/(dt·9.81)` off the cockpit part's rigidbody multiplies it by 60; R33
+tied the resulting `gJitterG` to `terminalOffDeg` replicate scatter at r = 0.886 and traced the
+datum itself to `OriginShift(cameraPosition)` (`:19365`) — **the world origin follows the OPERATOR'S
+CAMERA**, so one operator moving mid-batch re-bands every lane at once. Previously recoverable only
+from `LogOutput.log` spawn lines, overwritten every session; as a column it is per-row and **a step
+in it IS an origin shift**. Fail-soft to **0** — the opposite of `dmgFrac`'s −1, and correct here
+because a lane spawns 8–68 km out, so 0 m cannot be mistaken for data. **v0.97 corrects that entry's
+conclusion and adds columns 67–69, `datumX/Y/Z`.** The v0.96.2 note read the R29/R33 inversion as
+ruling distance out; R35 measured r(`origDist`, `gJitterG`) = **0.948** across 16 lanes with a
+log-log slope of **0.885**, which is the *d*·1.2e-7 grain prediction — distance IS the driver, and
+the inversion was measuring the wrong **radius**, since distance to the lane base and distance to
+the world origin acquire opposite orderings once the origin drifts (within R35's near six lanes,
+−0.810 nominal against +0.962 flown). `origDist` alone says a shift *happened*; it cannot say
+whether the lane moved or the origin did. `Datum.originPosition` (`:19234`, public static on the
+static class at `:19215`) is precisely what the game subtracts to make `GlobalPosition`, so
+recording the vector alongside `pos` makes the whole frame recoverable — world = `pos` + `datum`, a
+step in `datum` with none in `pos` is an `OriginShift`, and the reverse is the aircraft actually
+moving. R35 needed that distinction 237 times in one card. **No sentinel, and it cannot have one**:
+`Vector3.zero` is a genuine reading before the first shift and after a reset (`:19267`), which costs
+nothing because `origDist` failing to 0 beside a plausible datum already reads as a failed probe.
+`AnomalyLog` stays static: one log stream per process
+
+#### Additional file-level notes
+
+- **`ManeuverRecorder` is an instance class, ONE PER AIRCRAFT (v0.86)** — same registry as
+  `ChaseController`: `For(aircraft)`, `Forget(aircraft)`/`Forget(int id)` (which **closes an open
+  capture** so a despawned drone doesn't leave a writer open with no `# stop` line), `Sweep()`, and
+  `ManeuverRecorder.Player` (derived from `GameManager.GetLocalAircraft`) for the HUD and the
+  RecordKey hotkey (`ToggleLocal`).
+
+- **New columns are appended at the END** — the Python tools index by header name but the contract
+  in `Recording.cs` is positional-safe; keep it. v0.84 added no column: it added the `# entry`
+  **header line** (`EntryNote`, set by `ScenarioPlayer` at its placement) carrying the per-replicate
+  reset provenance — `snapBackM`, the pre-placement speed/altitude, the fuel write, `ctrlReset` —
+  i.e. the record of what the reset had to undo, so a batch can covary out what it *couldn't* undo
+  (session age; airframe damage — **fully** so again as of v0.97.2, since the `Repair` pass that
+  used to reset hit points was reverted with the rest of the failed placement fix) instead of being
+  poisoned by it. v0.86 added `frameMs` (the rendered-frame time that fixed step saw, from
+  `TestDrone.FrameDt` — **sampled in `Update()`, and it must stay there**: `Time.unscaledDeltaTime`
+  read from `FixedUpdate` returns `fixedUnscaledDeltaTime`, a CONSTANT, which is what it did from
+  v0.86 to v0.92 — R27 read exactly 16.70 ms on all 223,899 rows of a 352-capture batch and missed a
+  logged 119 ms hitch.
+
+- Sanitised on assignment like `EntryNote`; absent entirely for a hand-flown capture or a card that
+  pins nothing.
 
 ## L1.6 — `drone`: the uncrewed harness (v0.81 harness, v0.87 phase 2)
 
@@ -976,6 +1168,561 @@ level-hold capture against a card capture: they are not the same controller.
 
 ---
 
+
+### `plugin` — the harness run board
+
+BepInEx entry point, hotkeys, IMGUI overlay, `PluginVersion` SoT, session id, and the `FixedUpdate`
+that drives `drone.FixedTick` (the mod's only fixed-step hook that exists before any aircraft does).
+
+#### v0.90 — the harness run board
+
+: `DrawRunBoard`, top-left, drawn in the **pre-gate** band before `ShowOverlay`/`Enabled` and before
+the local-aircraft resolve, because the operator watching an unattended batch is usually in no
+aircraft at all — which is exactly when every gate below has already returned. Gated on
+`Cfg.DroneEnabled` alone, so the whole cost when the harness is idle is one bool read. FLYING draws
+one row per aircraft flying a card (`ScenarioPlayer.CollectRunning` into a reused list — `OnGUI`
+runs twice a frame, so nothing on this path may allocate) with the header aggregating over the
+**max**, since a staggered batch ends when the slowest lane does; PREFLIGHT draws what the spawn key
+*would* fly, every value from `ScenarioPlayer.Preview()` and `TestDrone.AirframeOf/AltOf/SpeedOf`
+(v0.93: `SpeedText`, which prints `1.00x corner (per airframe)` for a corner-relative card rather
+than a number no lane will fly) — the same pair the launch uses — polled at 2 Hz and marked `[from
+card]` / `[from F1]` per value
+
+
+### `scenario` — playback, placement, cards and arms
+
+test-card playback + card recording. **An instance class since v0.86, one per aircraft** (`For(ac)`
+/ `Forget` / `Sweep` / `Player`), so N drones each fly their own card: every bit of playback state —
+queue, segment index, segment clock, heading frame, entry anchor, placement audit, card-recording
+buffers — is per-instance. Three things stay static and each says why in place: the **card library**
+(`_cards`/`_enable`/`_cf`, shared read-only config), the **on-screen notice** (one screen per
+process), and the **A/B arm schedule** (below). Hotkey doors stay static and resolve the local
+aircraft, then call the instance body, so a phase-2 drone runner drives the same code with no second
+copy to drift. `Tick` runs from the seam prefix for the player and from `TestDrone.OnPilotStep`
+**immediately before `Drone.Fly`** for a drone — the same zero-tick property at that aircraft's own
+seam. Each instance publishes `AimDemand`; the local one *also* writes `AimRig.SetAimForward` (that
+marker is the human's, one per process). **v0.87 gave `AimDemand` its consumer**: a drone's
+`Drone.Fly` passes it straight into `ChaseController.FlyUncrewed`, and `TestDrone.OnPilotStep` calls
+`StartSuite` on the drone's first pilot step and `OwnInputs` between the stick write and
+`FilterInputs` — the same three entry points the player's seam uses, driven from the drone's own
+seam. The **entry anchor is per aircraft**, which is the only reading that survives N of them: one
+shared anchor would stack every drone on one spot on the first replicate. Lateral separation stays
+the one `drone` already builds (`AbeamM + LaneM * slot`, on the launch stagger) rather than a second
+spacing constant fighting the first. Writes the aim demand from the seam prefix, tags rows via
+`ManeuverRecorder.SegmentTag`. **Owns the mod's only write of aircraft PHYSICS state**
+(`rb.position/rotation/velocity` + fuel, at card start only — see below) rather than only control
+inputs — and **since v0.95 that primitive has two callers**: `PlaceOnCondition` here, and
+`sandbox`'s hand-flight placement, which reuses `ResetGLoadTrackers` + `MoveAssembly` (`internal
+static` for exactly that) instead of copying them. Everything *around* the write stays card-only and
+stays here: the run anchor, the fuel write, the stale-demand write, the two-frame audit and the `#
+entry` header. That write has **two** mandatory pairings, both learned by destroying the aircraft:
+(1) zero `Pilot.velocityPrev` — the game derives G by differencing velocity across fixed steps, and
+past 20 g `Pilot.TakeGForceDamage` (`:85989`) applies `(sqrG − 400)·0.007` of damage, so an unpaired
+velocity step reads as ~870 g and four figures of damage. (**v0.96 correction:** that damage lands
+on the PILOT's own part index, not on the airframe — there is no structural-G path anywhere in the
+decompile. It still kills the run, which is why the pairing is mandatory, but "the law bent an
+airframe" is not a possible diagnosis. See CLAUDE.md Conventions and `LAW-LEDGER.md` K1-K5 §1–§2.);
+(2) move the WHOLE ASSEMBLY — an aircraft under complex physics is one rigidbody per part joined by
+FixedJoints, so moving only `Aircraft.rb` stretches every joint by the displacement and PhysX pays
+it back as ~`err/dt` of velocity (measured 19× err). Apply the same rigid transform to every
+`partLookup[].rb` and no joint sees a relative change.
+
+#### v0.97.2 — `MoveAssembly` is a rigid transform and nothing else (the graveyard)
+
+**Two fixes have been tried in this spot and both are gone. Read this before adding a third.**
+
+The problem is real and still OPEN (ledger #51): `AeroPart.CheckAttachment` (`:74349-74365`)
+detaches on **geometry alone** — 0.5 m between the part's transform and `attachInfo.localPosition`,
+the pose captured once in `UnitPart.Awake`→`CreateAttachInfo` (`:84155`), measured in the PARENT
+PART's frame, no force, no damage, no joint break — and for an aircraft it is the *only* detach
+route, since `UnitPart.TakeDamage`'s clause reads `&& !(this is AeroPart)` (`:84304`) and every
+`partLookup` entry is an `AeroPart` (`:74091`/`:81321`, `:61451`). It looks intermittent because
+`Aircraft.PartChecker` (`:60157-60180`, from `LocalSimFixedUpdate` `:61976`) samples **one part per
+fixed step, round-robin**. **Attempt 1, v0.96.1 — a mod-side audit that was a TAUTOLOGY and could
+never fire**: it iterated the same list with the same `pr == rb` skip as the move loop and rebuilt
+its target with the same expression — both call sites (`:1920` here, `PlayerSpawn.cs:69`) pass
+`pivot = rb.position` and `dRot = rot1 * Inverse(rb.rotation)`, so `pivot + dRot*(p0−pivot) + dPos`
+and `(pivot+dPos) + rot1*inv0*(p0−pivot)` are the same number and its `err` was float noise by
+construction. Its domain was exactly the set it had just assigned, so it skipped precisely the
+shared-body parts its own comment said it existed to check. R35's **zero `[place]` lines over 186
+placements** is what a tautology returns, not evidence that nothing was left behind. **Attempt 2,
+v0.97.0 — calling the game's own `AeroPart.Repair` (`:74231`), which destroyed the aircraft on EVERY
+placement.** The reasoning about WHICH QUANTITY to write was right — `Repair` does write exactly
+what `CheckAttachment` compares — and that is as far as it goes; the approach was fatal anyway —
+`Repair` writes `xform.position =
+attachInfo.parentPart.xform.TransformPoint(attachInfo.localPosition)` plus the matching rotation,
+exactly the quantity `CheckAttachment` compares, in the frame it compares in. **R36 lost 32 of 32
+placements, 100%, every airframe.** The signature is distinctive and worth recognising: replicate 1
+always completes (it flies from the SPAWN and never places), then the FIRST `PlaceOnCondition` kills
+the aircraft at `segment arm at 0.0s` with speed going ~150 m/s → **40,000–68,000 m/s in one 0.02 s
+fixed step**, logged as `ABORT (aircraft gone)` / `despawned (pilot killed)`. Cause:
+`Rigidbody.position` writes the PhysX pose and leaves the `Transform` stale until the next
+simulation step, and `Physics.SyncTransforms()` copies Transform → PhysX and never the reverse — so
+`Repair` read a **pre-teleport** parent (`attachInfo.parentPart.xform`) and wrote a **pre-teleport**
+pose into `xform`, which for a bodied part (a scene root since `CreateRB` `:74418` unparents it) is
+a teleport back to the old lane position on the next sync. `Aircraft.rb` was untouched (root part
+has `attachInfo == null`), so `Physics.Simulate` ran with the root **13.8–41 km from its own parts**
+and every `FixedJoint` stretched by the full snapback; `Pilot.TakeGForceDamage` (`:85989`) finished
+it. Deleting only the second `SyncTransforms` would not have helped — the physics step syncs dirty
+transforms before simulating regardless, so **the lethal act is writing a `Transform` inside
+`MoveAssembly` at all**. Proven by a natural experiment in the same log: R36's 32 `snapped back 0 m`
+placements (still a full `MoveAssembly` call, the call is unconditional) were **32/32 clean**, its
+32 placements of 13.8–41 km **32/32 fatal** — the fault scales with the **move**, and every rival
+explanation (stale baseline, `partLookup` order, negative gear scale, parts that had genuinely swung
+since `Awake`) is capped at `CheckAttachment`'s own 0.5 m, ~475 m/s, three orders under the recorded
+10,602–172,586 m/s. That spread is **saturated, not `err/dt`** — 20,415 m at the rig's measured 19×
+predicts 388,000 m/s and read 60,147, because `breakForce` and solver clamps cap the impulse. The
+`try`/`catch` around it **never fired** — `Repair` completes cleanly and kills the aircraft anyway,
+so a green build, a green checker and a silent log proved nothing. The 0.34.1 game update in the
+same window is **refuted at byte level, not by its changelog**: `ilspycmd` on the installed
+`Assembly-CSharp.dll` against the 0.34 decompile leaves `AeroPart`, `UnitPart`, `Pilot`,
+`FloatingOrigin` and `PartJoint` **byte-identical**, with `Aircraft` differing by exactly one line
+(`NetworkunitName`, `GetCensoredName()` → `GetDisplayName(PlayerNameContext.Other)`). **So: rigid
+move, one `Physics.SyncTransforms` as the last statement, and #51 stays instrumented rather than
+fixed** — `dmgFrac` (column 65) records it per row and the v0.96 damage abort ends the run. A
+1-in-35 intermittent shed is enormously cheaper than a 100% kill, and that is the bar a third
+attempt must clear. `check-architecture.py` enforces it as an **ANTI-invariant**, and the rule is
+broader than `Repair`: **no `Transform` write of any kind inside `MoveAssembly`** — any
+`.position`/`.rotation`/`.localPosition`/`.localRotation`/`SetPositionAndRotation` on a `Transform`,
+`.Repair()`, or more than one `Physics.SyncTransforms` — is a checker FAILURE carrying the R36
+numbers. `Repair` was one instance of the class; the class is "mixing transform writes into a
+function that moves bodies". That gate is the only thing standing between the next agent and attempt
+three. If you do try again, fix the **displacement**, not the detection, and pick one of exactly two
+shapes. **(i) All-transform move:** write `xform.position/rotation` for every part **and the root**,
+applying the same rigid formula, then one `Physics.SyncTransforms()` as the last statement — and
+write **no** `Rigidbody.position` at all. This is safe for the exact reason the `Repair` loop was
+not: transform reads are uniformly stale, so the rigid formula is applied to a self-consistent
+pre-move pose and the single sync commits one coherent new pose. It is what
+`FloatingOrigin.OriginShift` (`:19380-19384`) does. **Mixing the two schemes is what killed R36.**
+**(ii) Re-capture, not restore:** `UnitPart.CreateAttachInfo(attachInfo.parentPart)` (`:84151`)
+rebaselines to the *current* pose, writes no transform, and reads only relative geometry — correct
+even with stale transforms. Its costs are an `onParentDetached` subscription leaked on every call
+(`:84156`, `+=` with no `-=`), replacing the game's own detach reference for the rest of the flight,
+and silently clearing `detachedFromParentPart`. Note also that `PartChecker` iterates
+`Aircraft.partsWithAero` (**private**, `:60559`), **not** `partLookup`, so any mod-side
+re-derivation is already looking at the wrong set without reflection. The revert also gives back the
+one thing v0.97.0 improved — `UnitPart.Repair`'s `hitPoints = 100f` (`:84262`, driving
+`wingEffectiveness` `:74628`) is gone with it, so airframe damage is once again **fully**
+unresettable between replicates. **Also refuted, so it is not re-proposed**: the “frame mismatch”
+theory (that preserving poses in the ROOT body's frame is weaker than the parent-part frame
+`CheckAttachment` tests in) is **wrong** — root-frame preservation is strictly STRONGER, since if
+every part keeps its pose in the root's frame then every pairwise relative pose is preserved,
+part-to-parent-part included; float grain at the 60–100 km world coordinates a lane flies is ~0.004
+m per component, ~125× under 0.5 m. **Now settled, and it cuts the other way:** the v0.97 excursion
+happened at the placement (32/32 vs 32/32 on move size), but `MoveAssembly` itself is an exact rigid
+transform whose float32 grain at 60–100 km is ~0.004 m, ~125× under 0.5 m — so the *placement*
+cannot produce an attach failure at all, and #51's premise ("the reset sheds parts") is the next
+thing to doubt. The remaining suspects are ordinary flight loads and the post-placement 1 g catch,
+sampled by `PartChecker`'s round-robin. **Do not** merge via `SetSimplePhysics` instead: its
+`Destroy` is deferred to end-of-frame (so a FixedUpdate caller still simulates with live stretched
+joints) and destroying components invalidates whatever the game cached.
+
+#### v0.84 — the placement is a full RESET, not just a speed/altitude write
+
+A batch of ten identical replicates was found non-exchangeable (`terminalOffDeg` vs run index r =
+−0.824; a first-half/second-half split of one unchanged arm beat its own detection threshold), and
+the three leaks were all *around* the placement, landing on the state the scored segment starts
+from: position was never reset (30 km of downrange walk), the aim demand was **stale for one tick**
+(the postfix `Apply` chased the previous card's marker from the freshly levelled attitude — measured
+`outP` −0.487 at the first sample of the late runs), and the per-*aircraft* `ChaseController`
+(v0.82) carried integrators/filters/`_pitchEff` across replicates flown by the same aircraft. So the
+placement now snaps back to an **anchor** (position + heading, captured on the first placement of a
+run, held in the datum-relative `GlobalPosition` frame so a floating-origin rebase cannot move it),
+writes the demand the card is about to ask for, and calls `ChaseController.Forget(ac)`. Engine spool
+is deliberately *not* reset (`OwnInputs` pins throttle across the card boundary, so it does not
+drift); session age and airframe damage are both unresettable — v0.97.0 briefly made damage
+HALF-resettable as a side effect of its `Repair` pass (`UnitPart.Repair` `:84262` sets `hitPoints =
+100f`, driving `wingEffectiveness` `:74628`), but that pass was reverted in v0.97.2 for destroying
+the aircraft on every placement, so a bent-but-attached wing once again hands its degradation to the
+next replicate. Both are **recorded** in the new `# entry` CSV header line (`snapBackM`,
+pre-placement `v`/`alt`, fuel, `ctrlReset`) so an analysis can covary them out. Also owns the **A/B
+arm schedule**: `Cfg.ScenarioArmToggle` (or the first card's own `armToggle`) names a bool knob,
+alternated **ABBA** by queue index (`((i+1)>>1)&1`) so a monotonic session drift lands on both arms
+equally instead of loading onto the second block; each capture self-identifies via `arm=`/`armKnob=`
+on its `# config` line.
+
+#### v0.94 — that schedule is PER AIRCRAFT and a fleet sweeps concurrently
+
+(this supersedes the v0.86 "it stays static, and it is forced" note, which described a limitation
+that no longer exists). `ApplyArm` calls `ChaseController.SetArm(_acId, key, arm)` and the law reads
+the lever through `chase`'s `Arm()`, so the global knob is **never written**: `_armEntry`/`_armIdx`
+are per-instance and `_armSaved`, `_armOwner`, the save/restore dance, the "another aircraft owns
+the schedule" refusal, the concurrency stand-down and the `SettingChanged` re-entrancy guard around
+the arm write are all deleted — nothing to restore, nothing to own, nothing to fire the event.
+`ArmTag`/`ArmLabel` are per-instance too (`ArmTagFor(ac)`, non-creating, for the recorder header),
+so the run board's lines legitimately disagree: four drones mid-ABBA read A/B/B/A. Each aircraft's
+own ABBA keeps the drift-cancelling invariant **within every lane**, which is the right unit because
+`compare-runs.py` groups by (airframe, card, arm) and never pools across airframes; it deliberately
+does *not* balance arms across aircraft at one wall-clock instant, since a confound would have to
+hit the fleet at one instant AND correlate with lane, and both candidates are already handled
+(`frameMs` is a per-row column, airframes are never pooled). `ArmOf` sits between `ARM-SCHEDULE`
+markers for `debugtests/test-arm-schedule.py`. A card pinning the swept knob is still refused, for
+the mirror-image reason: the arm now *wins*, so the pin would change nothing about what flew while
+`# config` and `# override` both advertised it. **v0.88 trimmed the placement; v0.89 REVERTED it.**
+v0.88 wrote the velocity one measured trim-AoA below the level nose, on the theory that AoA = 0 is
+zero lift and the ~1 g catch was the entry thump. Gate B (R23) disproved it: run 01 is the run's
+first placement, so it was written **untrimmed** — the exact condition v0.88 blamed — and had the
+cleanest entry of the four (no AoA overshoot at all, `off` peak 0.59° against 1.72–1.97°). It also
+coupled each replicate's entry to a value measured during the previous replicate, in a rig built for
+replicate independence. The `# entry` line no longer carries `aoaTrim=`. **The measured,
+still-unfixed defect: `ChaseController.Forget(ac)` does not take effect on the placement tick** — at
+`tSeg=0.000` of every placed capture the controller holds pre-placement state (`rollRate` −58.99 vs
+−0.16 unplaced, `rollRateF` −12.83, `headingRateFilt` 10.4–19.3, `leadDeg` 6.8–12.5° of phantom
+lead). `rollRate = (t.up − _prevUp)/dt` reading −59 needs `_prevUp` at the *banked* attitude: the
+placement snaps ~79° of bank level in one step and the difference straddles it. Direct measurements
+on that row are all correctly post-placement; only derivatives are poisoned. Left unfixed on purpose
+— a guard on the finite difference would clean `rollRate` and hide the cause.
+
+#### v0.90 — a card is the whole test, not just the stimulus
+
+`Card` gained `repeat`, `armToggle` and a `config` list of `{key, value}` knobs pinned for that
+card's duration, each falling back to its `Cfg` global when absent, so a card that declares nothing
+behaves exactly as it did in v0.89. One grammar for all three (`SplitSpec`: `"Key"` or
+`"Section/Key"`, bare ⇒ `Control`), values parsed by BepInEx's own `TomlTypeConverter` so one path
+covers every bindable type. **Order is load-bearing**: `ApplyOverrides` → `ApplyArm` → `StartCard`,
+and `RestoreOverrides` *after* `_rec.Stop` in both `Finish` and `NextCard` — because
+`SettingChanged` drives `NoteConfigChange`, which stamps a `# cfg` line into every open capture, so
+a card configuring itself after its own recorder opened would read as the law changing mid-run.
+Pinning the knob the A/B schedule sweeps is **refused loudly** (it flies every replicate on one arm
+while each capture still labels itself `arm=0`/`arm=1`); everything else is fail-soft, one warning
+per bad override. `Validate` **blanks a prose `airframe`** (whitespace ⇒ not a jsonKey) with a named
+warning, because the field was documentation in all 16 shipped cards until this release gave it
+behaviour. `Preview()` answers "what would a run fly?" with **no aircraft in hand** — its caller is
+choosing what metal to spawn — so it applies no `cls` filter and no replicate expansion, and never
+throws. Also publishes the read-only run-board accessors (field reads only; `IndexCard()` caches
+segment durations and must follow every write to `_card`/`_qi`/`_queue`) and keeps the two
+non-trivial ETA functions between `BOARD-MATH` markers in plain floats, because
+`debugtests/test-board-math.py` extracts and compiles that region verbatim.
+
+#### v0.90.1 — cards are (de)serialised with `Newtonsoft.Json`, not `UnityEngine.JsonUtility`
+
+JsonUtility silently dropped the `Seg[] segments` field in *both* directions, so every card written
+to disk had no `segments` key and every card read back was rejected by `Validate` as "no segments" —
+**no disk card loaded at all from v0.71 to v0.90**, invisible because the built-in cards are
+constructed in C# and never touch a serializer, which is the one path every gate and batch happened
+to use. Newtonsoft ships in the game's `Managed` folder, so this is still no library of our own;
+unknown keys are still ignored (`note` relies on it) and a malformed file still throws where `Load`
+catches it. The model classes now sit between `CARD-MODEL` markers so
+`debugtests/test-card-model.py` can compile them and round-trip every file in `cards/` offline.
+
+#### v0.91 — the card also names the FLEET
+
+`airframe` became a comma list (one jsonKey per lane, wrapping, read by the same `AirframeList`
+splitter as the `Cfg` knob) and `Card.count` says how many lanes to launch, so `Validate`'s prose
+detector is now per **token** — split, trim, then look for whitespace *inside* a token, which a
+jsonKey never contains — and a fleet is distinguishable from a sentence. `ResolveCount` answers in
+three steps and the middle one is why the field exists: the card's `count`; else the number of keys
+`airframe` names (`CountKeys`), because a card whose list *is* the fleet has already said how many
+drones it needs and twelve keys against `DroneCount` 4 would fly four lanes and answer a different
+question without refusing; else `DroneCount`. One clamp (1..16) for the value wherever it came from.
+`Preflight` gained `Count`/`CountSrc`, keeping the rule that every resolved value is paired with who
+decided it. `scorecard.py`'s `card_setup_problems` mirrors the per-token airframe rule and the
+`count` range offline — it is the only check on a card's setup, and a copy *stricter* than the mod
+would flag cards that fly perfectly well.
+
+#### v0.93 — `Card.startSpeedCorner`, the airframe-relative entry condition
+
+The entry speed may be declared as a multiple of *the lane airframe's own* corner speed and wins
+over `startSpeed` when set, so one card is flyable by a roster whose Vmax spans 141–479 m/s and
+every airframe enters at the same aerodynamic state rather than the same number.
+`ResolveStartSpeed(startSpeed, startSpeedCorner, jsonKey)` is the single definition — unset ⇒
+`startSpeed` (byte-identical to v0.92); else `TestDrone.TryEnvelope`'s `Corner` × the multiple; else
+**fail-soft to `startSpeed` with a named warning**, the probe contract, since a zero here would be a
+placement velocity of zero. It takes primitives because the other caller (`TestDrone.SpeedOfLane`,
+pre-spawn) has a `Preflight` and no aircraft; `EffectiveStartSpeed(Card, jsonKey)` is the wrapper
+and the instance `EntrySpeed(Card)` caches it on a reference compare, because `OwnInputs` asks on
+every fixed step. **Every** playback read routes through it — the placement, `EntryConditionError`
+(now an instance method for exactly this), `ForceEntry`'s card scan and the `Tick` placement gate —
+since converting only the spawn would place the aircraft at 180 m/s while the gate still demanded
+250 and refused forever. The card RECORDING path still writes an absolute `startSpeed`: a human
+flight has one real speed, not a multiple. No CSV column — the `# entry` header already carries the
+resolved speed and the sidecar this airframe's `cornerSpeed`.
+
+#### v0.96 — `Tick` gained a SECOND safety abort beside the altitude floor: airframe damage
+
+One clause, same `_frameSet` gate, threshold `> 0f` — *any* detachment, deliberately not the game
+AI's `> 0.12` (`:12206`/`:13466`), which asks whether the aircraft can still fight; this is a
+measurement rig, and an aircraft with a part missing is not the same airframe the previous replicate
+flew. The reason names the ratio and reaches the CSV's `# stop` line via the existing
+`Abort`→`Finish` path; one placement covers drones and the player. The read is fail-soft the
+OPPOSITE way from the recorder's `dmgFrac`: unreadable ⇒ *not* damaged, so a failed probe can never
+kill a good run, while the −1 in the column is what says the probe failed. Do not unify them. Two
+more extract-and-compile marker regions were added the same release — `SPEC-GRAMMAR` (`SplitSpec`,
+checked by `debugtests/test-spec-grammar.py`, which runs the same 16 cases against `scorecard.py`'s
+`split_spec` copy) and `FLEET-RESOLVE` (`ResolveCount`+`CountKeys`, checked by
+`debugtests/test-fleet-resolve.py`)
+
+#### Additional file-level notes
+
+- The hotkey doors (`ToggleSuite`/`ToggleRecord`/`ForceEntryNow`/`AbortLocal`) stay static and
+  resolve the LOCAL aircraft, then call the instance body — so a phase-2 drone runner drives the
+  same code (`For(droneAc).StartSuite(droneAc)`) with no second copy to drift.
+
+- **v0.87 gave `AimDemand` its consumer**: `TestDrone.ChaseCard` hands it to
+  `ChaseController.FlyUncrewed`, so a drone chases its own card through the same `Apply`.
+
+- **Owns the safe-teleport primitive — the mod's only way of writing aircraft PHYSICS state, and
+  since v0.95 it has TWO callers.** `PlaceOnCondition` (the per-replicate card reset) is one;
+  `PlayerSpawn.Place` (the F4 sandbox, hand-flight only) is the other, and it reuses
+  `ResetGLoadTrackers` + `MoveAssembly` — `internal static` for that reason — instead of copying
+  them.
+
+- `ResolveEntry` finds an entry of ANY type (a card can pin a float or a KeyCode); `ResolveArm`
+  additionally insists on `ConfigEntry<bool>` and says so *distinctly* from "not found", because
+  until v0.90 pointing the sweep at a real-but-numeric knob read as a typo.
+
+- Three states because the failures need opposite degradations: `Infeasible` wrote nothing ⇒ SKIP
+  that card and fly the rest of the queue; `Failed` may be half-written ⇒ end the suite (the catch's
+  long-standing argument). **v0.99.1 — a declared entry condition is WRITTEN once and HELD by
+  nothing, so `AuditHold` says so.** A card declaring `startSpeed: 90` with the throttle pinned at
+  1.00 was at 144–147 m/s by the end of its 6 s `arm` and 340–381 m/s by the last scored segment.
+
+- Now that the field is a comma list the test splits first and looks for whitespace **inside a
+  trimmed token**, so `"Fighter1, Multirole1"` is a two-airframe fleet and `"any jet at the
+  fixedwing-v2 entry condition"` is still prose; a jsonKey never contains whitespace, so a token
+  that does is unambiguous, and whitespace merely around the commas is formatting
+  `TestDrone.AirframeList` trims anyway.
+
+- Every resolved value is paired with a `*Src` string (`RepeatSrc`, `ArmSrc`, and v0.91's
+  `Count`/`CountSrc`) because "4 drones" reads identically whether the card asked for it or a knob
+  was left there, and that difference is the whole point of resolving it in one place.
+
+- **v0.93 adds `StartSpeedCorner` beside `StartSpeed`** — carried as the PAIR, not resolved into one
+  number, because a corner-relative card has a different entry speed in every lane and this struct
+  is answered with no aircraft in hand. **v0.93 — `startSpeedCorner`, and the reason it is a
+  RESOLVER and not a read.** A card may declare its entry speed as a multiple of **the lane
+  airframe's own corner speed** instead of an absolute m/s; when `> 0` it wins over `startSpeed`.
+
+- **Every read of `c.startSpeed` in the playback paths routes through it** — the placement,
+  `EntryConditionError` (now an INSTANCE method for exactly this), `ForceEntry`'s "does any card
+  declare an entry condition" scan, `OwnInputs`' ungated-card test and the `Tick` placement gate.
+
+- No CSV column: the `# entry` header already carries the resolved speed and the sidecar carries
+  this airframe's `cornerSpeed`, so the multiple is recoverable. **Run-board accessors**
+  (`CardName`/`RunIndex`/`SegTag`/`ArmLabel`/`SegSecondsLeft`/… and the static `CollectRunning`) are
+  field reads by design: `OnGUI` runs twice a frame, so nothing there may allocate or walk the
+  queue.
+
+### `drone` — spawn, lanes and the entry gates
+
+uncrewed test aircraft: spawn / AI-disable / start a card / fly it with the mod's real law /
+despawn, so a card is flown by the harness instead of by a human (**v0.87, phase 2** — `Drone.Fly`
+is `ChaseCard`, which chases this aircraft's `ScenarioPlayer.AimDemand` through
+`ChaseController.FlyUncrewed`; the built-in level-hold flies only a drone with no card, and is not
+the control law). Holds **N drones at once**, keyed by `Aircraft.GetInstanceID()` — the player's
+aircraft is never in that dictionary, which is the failure this subsystem is built to make
+impossible. Launches on a **stagger** (`DroneCount` × `DroneStaggerSec`): replicates that fly the
+same segment at the same instant are not independent samples, so one frame hitch would corrupt all
+of them identically and read as a *tighter* noise floor. Inert unless `DroneEnabled`. Also owns
+`FrameDt` — but it is sampled from **`plugin.Update`, per RENDERED frame**, never from the fixed
+step: `Time.unscaledDeltaTime` read inside `FixedUpdate` returns `fixedUnscaledDeltaTime`, a
+**constant**, which is exactly what v0.86–v0.92 shipped (R27: `frameMs` read 16.70 ms on all 223,899
+rows of a 352-capture batch and missed a logged 119 ms hitch). Fixed in v0.92.1; `SampleFrameTime`
+must stay called from `Update`. `TestDrone` is the manager (live list + dictionary + launch
+countdown + `FrameDt`); `Drone` is one aircraft — its id, its **cached** instance id (the dict key
+must outlive the aircraft), its spawn altitude, its idle clock, and its **own** `Fly` delegate, per
+drone rather than one static because N drones need N independent controllers. **The second place the
+mod writes aircraft state that is not the player's stick**, and the only one that *destroys* units
+(v0.95's `sandbox` also creates one, but never removes anything — swapping airframes is the game's
+own ejection): it spawns with `player=null, HQ=null`, which is what turns the AI off *by
+construction* (`SetStartingAiState` bails to `parkedState` when `NetworkHQ == null`), and refuses
+cleanly with no active server — SP is a host, an MP client is not. **v0.86**: `Cfg.DroneAirframe` is
+a **comma list** indexed by lane and wrapping, so a batch can be heterogeneous while a single value
+behaves exactly as before; an unknown `jsonKey` refuses that lane with its log line (with one key it
+cancels the launch, because the next lane would fail identically). Loadout is still `null` — the
+game's parameter is a `Loadout` object, not a name; the lane index is the hook when that API is
+known. Both removal paths call one `ForgetState(id)` dropping **every** per-aircraft registry
+(`scenario`, `telem`, `chase`), so the next one added cannot be forgotten on one of the two.
+
+#### v0.90 — the card configures the batch and the batch cleans up after itself
+
+`RequestLaunch` resolves one `ScenarioPlayer.Preflight` per batch (not per lane — a checkbox ticked
+mid-stagger would change the airframe half way through) and `AirframeOf`/`AltOf`/`SpeedOf` prefer
+the card's `airframe`/`startAlt`/`startSpeed` over the `Drone*` knobs, with the launch log naming
+which source won for each; those three take the `Preflight` as an **argument** so the run board can
+ask them of a fresh preview and be unable to promise something the spawn will not do. A card's
+`airframe` overrides the **whole** lane list, because one test on a mix of airframes is not
+replicates of anything (`compare-runs.py` refuses to pool across `jsonKey`s). `PruneDead` also
+despawns any drone with no card running for `IdleDespawnSec` (5 s) — one rule for suite-complete /
+aborted / refused / never-started, windowed by the `NextCard`→`StartCard` gap so a drone is never
+dropped between its own replicates, and motivated by the aero job and three registries a circling
+drone keeps alive. A **dead or ejected pilot** is caught in `OnPilotStep` instead, ahead of every
+write: the game never self-disables an `Aircraft` on damage, so `PruneDead` structurally cannot see
+a shot-down drone (R25 — one stayed registered until the mission quit). Lane geometry falls back to
+`Camera.main` rather than the scene origin, and `_slot` starts at `_live.Count`.
+
+#### v0.90.1 — `OnPilotStep` runs once per FIXED STEP, not once per pilot
+
+`Aircraft.pilots` is an array and `JobManager.PilotAeroInputs` calls the patched method on each
+element, so a **two-seat airframe ran the whole per-aircraft step twice per physics step** — 2× card
+clock (R26: `trainer`/`FastBomber1` flew a 6 s segment in 2.97 s and a 30 s one in 14.95 s, against
+5.97/29.95 single-seat) and, worse, `chase` double-stepped inside one `dt`, where every finite
+difference against a cached previous attitude read **zero** on the second call. The guard is a
+`Drone.LastStep` = `Time.fixedTime` stamp placed *after* the dead/ejected despawn so any seat's
+death still despawns, and it is deliberately **not** the game's `pilots[0] == p` idiom: a dead pilot
+is dropped from `JobManager`'s list, which would silently stop ticking a drone whose front-seater
+was killed. The spawn line reports `pilots.Length`, since seat count is prefab data with no
+code-side definition. `LaneM` also went 2 km → 6 km: a 360 at the 72° clamp and 250 m/s has radius
+`v²/(g·tan φ)` = 2.07 km, so neighbouring lanes flying the sustained-turn family swept overlapping
+ground tracks.
+
+#### v0.91 — the card picks how many drones and which
+
+`CountOf(Preflight)` joins `AirframeOf`/`AltOf`/`SpeedOf` and the launch log names its source too;
+`RequestLaunch` now resolves `_plan` **before** `_pending`, which is load-bearing rather than tidy,
+since `_pending` *is* the fleet size and reading `Cfg.DroneCount` first would pin every batch to the
+global and undo the card's `count`. `CountOf`'s `Cfg` fallback deliberately lives in
+`ScenarioPlayer.ResolveCount`, not here — the "as many as the airframe list names" rule needs the
+CARD, and a `Preflight` with no card already carries `Count` 0 — so this is a clamp and a no-card
+guard, not a second copy of the policy. A card's `airframe` still replaces the WHOLE lane list, but
+since it is itself a list the heterogeneous batch now lives *in the card* instead of being the
+reason to leave the field empty; `compare-runs.py` refuses to pool across `jsonKey`s, so a fleet
+card reads back as one row per airframe. Keys come from `AIRFRAMES.md` — 14 real ones, and an
+invented key costs a refused lane.
+
+#### v0.92 — an IMPOSSIBLE entry condition is refused too, before the spawn
+
+An invented key already refused; an airframe that simply cannot reach the card's `startSpeed` did
+not, and that is the worse of the two, because it produces an artifact: the lane spawns, the
+placement writes a speed the aircraft cannot hold, and the capture measures the decay back to what
+it *can* hold — segmenting cleanly, scoring fine, and pooled by `compare-runs.py` with the airframes
+that flew the real condition. The shipped grid contains three by construction (every
+`oblique-*`/`sweep-*`/`e1`–`e3` card asks 250 m/s; `CAS1` tops out at 205.6, `COIN` at 141.7, the
+rotorcraft lower). `TryEnvelope(jsonKey, out Envelope)` answers it off `Encyclopedia.Lookup` with
+**no aircraft instance** — refusing post-spawn would already have created the unit — reusing
+`Spawn`'s own `Encyclopedia.i == null` readiness test rather than a second one, and taking
+Vstall/Vmax from `aircraftInfo` (**km/h, ÷3.6**) because `aircraftParameters.maxSpeed` is a
+*normalizer* reading a flat 600 for every fast jet, on which the 141 m/s Cricket clears 250.
+Fail-soft on the probe contract: `false` is "could not read it", never "the bounds are zero" (the
+out-value is left untouched, so no zero can be mistaken for a bound), and an unknown envelope never
+refuses — a probe that cancels a batch over a missing field is worse than no probe. The band is
+`1.10 x Vstall` … `0.95 x Vmax`; the floor is deliberately **not** the round 1.20, since the grid's
+tightest legitimate pairing (`stol-*` at 90 m/s on `SmallFighter1`, Vstall exactly 75.0) sits at
+exactly 1.200 and would then be decided by the float rounding of `stallSpeed / 3.6`.
+`EntrySpeedFlyable` logs the one refusal line (airframe, requested speed, violated bound and its
+value, plus corner and g-limit so the operator can pick a workable number) and returns `null` into
+the **same** skip-or-cancel branch a bad `jsonKey` takes. Speed only — there is no service ceiling
+anywhere in the decompile, so altitude has no per-airframe bound to check.
+
+#### v0.93 — the entry speed became a PER-LANE question, so the gate now asks it per lane
+
+`SpeedOfLane(Preflight, jsonKey)` calls `ScenarioPlayer.ResolveStartSpeed` and is the real answer;
+the batch-wide `SpeedOf` stays for callers with no lane in hand and deliberately handles the
+absolute form only. `LaunchDue` resolves the lane's speed ONCE into a local and hands the same value
+to `EntrySpeedFlyable` and to the spawn velocity — asking twice, or gating on `SpeedOf`, is exactly
+how a lane gets checked at one speed and placed at another — and the no-argument `SpawnSpeed()` twin
+was deleted for that reason (`SpawnAlt()` remains; altitude has no per-airframe form).
+`SpeedText`/`SpeedFromCard` keep the operator-facing text honest: with a corner-relative card there
+is no single number, so the launch log prints `1.00x corner (per airframe)` and the per-drone spawn
+line carries each lane's actual m/s.
+
+#### v0.96 — `TryEnvelope`'s `Corner` is the FLIGHT MODEL's corner speed, not the AI's
+
+(backlog #41). `ControlsFilter.FlyByWire.cornerSpeed` (`:64877`) is the pitch-rate demand's
+saturation speed (`:65032`) and the G-limit knee (`:64845`); `aircraftParameters.cornerSpeed`
+(`:63097`) is read only by AI throttle/glideslope/effort code and never by the flight model. Over
+1604 archived sidecars they differ by 0.556× (Darkreach 100 vs 180) to 1.417× (AttackHelo1 170 vs
+120), so a `startSpeedCorner` card — whose entire claim is a *uniform aerodynamic* entry state — was
+entering the roster across a 2.2× spread. `FbwCornerSpeed(jsonKey)` reads it off the PREFAB with no
+aircraft instance and **no reflection**: `Encyclopedia.i.TryGetPrefab` →
+`GetComponentInChildren<ControlsFilter>(true)` (also catching `HeloControlsFilter : ControlsFilter`)
+→ the public `GetFlyByWireParameters()[2]`, the same accessor `chase`'s v0.55 in-flight probe
+already uses. Fail-soft on a **NaN sentinel** — 0 is a real speed and would silently become an entry
+condition — falling back to the encyclopedia value with one named warning per airframe, cached per
+key (the cache IS the once-only mechanism). Consequence: at `1.0x` all ten fixed-wing keys now pass
+(`CAS1`'s FBW corner is 160, under its 195.3 ceiling — it used to refuse on the AI's 200), and every
+corner-relative capture from R29 and earlier is NOT comparable with later ones. Both numbers were
+already in the sidecar (`cornerSpeed`, `fbwCornerSpeed`), so archived captures are self-describing
+about which corner they flew. `StallMargin`/`VMaxMargin` moved between `ENTRY-MARGINS` markers and
+`AirframeList`+`AirframeForLane` between `FLEET-RESOLVE` markers, both compiled verbatim by
+`debugtests/test-fleet-resolve.py`.
+
+#### v0.97.1 — lane geometry is captured in the DATUM frame
+
+`_laneBase` is a `GlobalPosition` converted back with `.ToLocalPosition()` per lane in `LaunchDue`,
+never a `Vector3` cached at the keypress: the stagger is long enough for
+`FloatingOrigin.OriginShift` (`:19365`) to re-centre the world on the operator's camera, which
+translates every root and the datum with them and leaves a cached world coordinate pointing at a
+different place. R33's own spawn log caught it (datum `local y` 2400 → −32 between lane 6 and lane
+7) and R35's `origDist` measured the cost: lanes 1–6 carried by the shift
+(24.0/18.5/12.8/6.2/0.6/7.4 km, running backwards through the new origin), lanes 7–16 re-laid from
+the stale base (44.0…98.5 km) — one fleet on two noise floors, invisible per-lane because each reads
+a clean `7.709 + 6.000k` at its own spawn instant. `_laneRight`/`_laneRot` are unaffected (a shift
+is a pure translation). Pinned by `debugtests/test-lane-frame.py`
+
+#### Additional file-level notes
+
+- **v0.87 — PHASE 2: the mod's real control law flies a drone.** `Drone.Fly` defaults to
+  `TestDrone.ChaseCard`: card running ⇒ `ChaseController.For(ac).FlyUncrewed(ac, sp.AimDemand)`; no
+  card ⇒ the built-in level-hold, which is a deliberately trivial altitude/wings hold and is **not**
+  the mod's control law (never tune it, never compare a level-hold capture against a card capture);
+  the instructor *declining* mid-card ⇒ **abort the card** with the reason in the CSV's `# stop`
+  line, because finishing the run on a different controller writes a capture that reads as clean.
+
+- Fail-soft via a **NaN sentinel** — 0 is a speed and would quietly become an entry condition —
+  falling back to the encyclopedia value with a named warning; cached per jsonKey in
+  `_fbwCornerByKey`, and **the cache IS the once-per-airframe warning mechanism**.
+
+### `drone_seam` — the per-pilot write seam
+
+Harmony postfix on `Pilot.Pilot_OnAeroInputsApplied`. This fires for **every** pilot's fixed step,
+player included, so it resolves `aircraft.GetInstanceID()` against the drone dictionary and returns
+immediately for anything else — the mod writing the player's stick from the drone path is the worst
+failure this file can have, so the guard is a dictionary miss rather than a heuristic. Chosen over a
+`MonoBehaviour.FixedUpdate` because `JobManager.FixedUpdateEarly` schedules the aero jobs *before*
+`PilotAeroInputs()`, so this is the seam where an input write still reaches the current tick — and
+it is the same seam the player path writes from (`PilotPlayerState.FixedUpdateState` is called from
+inside it), which is why a drone capture is comparable to a human one. Then calls
+`Aircraft.FilterInputs()` by hand: the FBW and `RelaxedStabilityController` are only ever run *from
+a pilot state*, and an uncrewed aircraft has none. It fires once per **pilot**, not per aircraft —
+`Aircraft.pilots` is an array and `JobManager.PilotAeroInputs` walks it — so since v0.90.1 the
+per-aircraft body it calls (`TestDrone.OnPilotStep`) de-dupes on a `Time.fixedTime` stamp; the patch
+itself stays a plain forwarder, because the state that decides "already run" is the drone's, not the
+patch's
+
+
+### `sandbox` — hand-flying the law
+
+**v0.95 — one key (`Cfg.SandboxKey`, default F4) puts the OPERATOR airborne at
+`SandboxAlt`/`SandboxSpeed`, so a law change can be hand-flown at the shipped grid's entry condition
+without building a mission, taking off and climbing to it.** Static, stateless, one entry point
+(`Trigger`), and **read outside the `DroneEnabled` gate** — this is hand-flying, not the harness,
+and needing to arm the drone subsystem for it would be a lie about what it does. **Two cases and the
+split is the design. (A) Already in an aircraft ⇒ PLACE it**, wings level, **current position and
+heading KEPT**; nothing spawns and nothing is lost. That is `scenario`'s `PlaceOnCondition` minus
+the card: no run anchor (a card needs every replicate in the *same* place; a pilot wants to be where
+he was pointing, higher and faster), no fuel write, no `# entry` note and no two-frame audit,
+because none of those is a measurement here. It does call `ChaseController.Forget(ac)`, for the
+reason the card placement does — every filter and finite difference in the controller straddles a
+teleport. **(B) Not in one ⇒ SPAWN one**, 500 m ahead of `Camera.main` on its flattened heading (the
+camera is the only thing that reliably exists when the operator is spectating or dead — the same
+fallback `drone` lanes take), and the game seats him. **THE LOAD-BEARING PART: case A reuses
+`ScenarioPlayer.ResetGLoadTrackers` + `MoveAssembly`** (`private static` → `internal static` in this
+release) rather than copying them. That pair *is* the safe-teleport primitive and **both halves were
+learned by destroying the airframe** — zero `Pilot.velocityPrev` before the velocity write or the G
+path reads ~870 g (v0.73), and move every `partLookup[].rb` or PhysX repays the stretched
+`FixedJoint`s at ~19× the displacement (R15). Anything that moves an aircraft must call both, so a
+second copy is a second chance to ship one half. **Case B is `TestDrone.Spawn` with `player` and
+`HQ` filled in** where the drone call passes `null` for both, and everything downstream is
+deliberately the game's: `Player.SetAircraft`, the pilot's player state (`SetStartingAiState` is
+skipped precisely *because* `player != null` — the exact mirror of what turns the drone AI off), the
+cockpit camera, HUD, map icon, throttle and gear. Swapping airframes while alive needs no
+despawn-first dance; the game ejects the old one. The HQ passed is **the player's own faction**,
+never `null`: `SetFaction(null)` would drop him out of his faction entirely, a far more confusing
+outcome than the refusal. **Why this is its own file and not in `TestDrone.cs`**: that file's
+load-bearing invariant is that an aircraft only enters its dictionary through `Spawn`, which asserts
+`ac.Player == null`, and a `player != null` spawn path beside that assertion is a trap for the next
+reader — nothing here touches the drone registry. Server-gated exactly like `drone` and asked of the
+same object (`Spawner.IsServer`, since `SpawnAircraft` carries no `[Server]` attribute but ends in
+`ServerObjectManager.Spawn`), so a refusal cannot disagree with reality. `SandboxSpeed` is **not**
+envelope-checked the way a lane is (v0.92): a pilot is not a batch, an out-of-envelope number
+visibly decays or overspeeds in seconds, and refusing to place him would be more annoying than the
+acceleration. Every refusal is one `[sandbox]` log line — no server, no `Spawner`, `Encyclopedia`
+not loaded, no local player, no faction HQ, an unresolvable `SandboxAirframe`, `SpawnAircraft`
+returning nothing — and `Trigger` catches everything else, because it runs straight off a keypress
+in `Update` and must never throw into the game loop. It writes **no artifact**: this is a way to
+reach a state, not an instrument
+
 ## L1.7 — `cfg`: configuration & live tuning
 
 ```mermaid
@@ -1051,18 +1798,18 @@ repo must appear here.** `debugtests/check-architecture.py` enforces exactly tha
 
 | node id | implemented by | type(s) | role |
 |---|---|---|---|
-| `plugin` | `WTMouseAimPlugin.cs` | `WTMouseAimPlugin` | BepInEx entry point, hotkeys, IMGUI overlay, `PluginVersion` SoT, session id, and the `FixedUpdate` that drives `drone.FixedTick` (the mod's only fixed-step hook that exists before any aircraft does). **v0.90 — the harness run board**: `DrawRunBoard`, top-left, drawn in the **pre-gate** band before `ShowOverlay`/`Enabled` and before the local-aircraft resolve, because the operator watching an unattended batch is usually in no aircraft at all — which is exactly when every gate below has already returned. Gated on `Cfg.DroneEnabled` alone, so the whole cost when the harness is idle is one bool read. FLYING draws one row per aircraft flying a card (`ScenarioPlayer.CollectRunning` into a reused list — `OnGUI` runs twice a frame, so nothing on this path may allocate) with the header aggregating over the **max**, since a staggered batch ends when the slowest lane does; PREFLIGHT draws what the spawn key *would* fly, every value from `ScenarioPlayer.Preview()` and `TestDrone.AirframeOf/AltOf/SpeedOf` (v0.93: `SpeedText`, which prints `1.00x corner (per airframe)` for a corner-relative card rather than a number no lane will fly) — the same pair the launch uses — polled at 2 Hz and marked `[from card]` / `[from F1]` per value |
+| `plugin` | `WTMouseAimPlugin.cs` | `WTMouseAimPlugin` | BepInEx entry point, hotkeys, IMGUI overlay, `PluginVersion` SoT, session id, and the `FixedUpdate` that drives `drone`'s `TestDrone.FixedTick` (the mod's only fixed-step hook that exists before any aircraft does). Also draws the harness run board — full detail: [L1.6](#plugin--the-harness-run-board) |
 | `cfg` | `Cfg.cs` | `Cfg`, `ConfigurationManagerAttributes` | every config bind + F1 metadata |
 | `aim_rig` | `AimRig.cs` | `AimRig`, `Guards` | world-locked marker, Win32 raw mouse, cursor regimes; `Guards` = "should the mod be passive" |
-| `chase` | `ChaseController.cs` | `ChaseController` | the instructor: measure → estimate → probe → law → condition → handoff → write. **An instance class since v0.82, one per aircraft** — every integrator, filter, ring buffer and probe cache in it is per-aircraft state, so N aircraft flown at once (the drone harness) need N controllers or they share one integrator and every capture is meaningless. Obtain one with `ChaseController.For(ac)` (keyed by `Aircraft.GetInstanceID()`), release one with `Forget`; `For` also sweeps controllers whose aircraft Unity destroyed, on the miss path so the hot path pays nothing. `ChaseController.Player` is the local player's controller, published from `BeginFrame` only when `GameManager.GetLocalAircraft` names that aircraft — it exists because `OnGUI` has no aircraft in hand and must never render a drone's numbers. **v0.87 — the same law now flies uncrewed aircraft.** `Apply` reached for exactly three one-per-*process* things, all the human's: the `AimRig` marker, the Rewired player-0 stick and the `FlightHud` crosshair. The marker became a **parameter** (`Apply(ac)` wraps `Apply(ac, aimTarget)`; a drone passes its own `ScenarioPlayer.AimDemand`), and the other two are gated on `_uncrewed` — a per-instance bool whose ONLY writer is `FlyUncrewed`, the drone entry point that runs `BeginFrame` + `Apply` in one call because a drone has one seam where the player has two. So the crewed path cannot reach the uncrewed branches by construction: `FlyUncrewed` is called only from `TestDrone`, whose dictionary an aircraft can only enter through `Spawn`, which asserts `ac.Player == null`. `check-architecture.py` enforces the one-writer / one-caller pair, because neither fails to compile. **v0.94 — the A/B sweep seam.** The four `(A/B lever)` bools are read as `Arm(Cfg.X)` rather than `Cfg.X.Value` at exactly five sites (`MarkerRateFeedForward` counts twice — both lockstep `omega` sites), so a swept aircraft flies *its* arm and everything else reads the live config. (Five levers / six sites until **v0.99.1** retired `RelativeTurnLead` — a spent A/B lever is deleted outright, knob and branch, rather than left defaulted.) Before this the knob was a process-global `ConfigEntry` read globally, so `scenario` had to stand the whole schedule down under concurrency and every A/B was a one-drone serial run. **A new lever must be read through `Arm()` to be sweepable** — `Cfg.X.Value` compiles and flies, it is just invisible to the schedule. The assignment lives in a static map **keyed by aircraft** (`_armByAircraft`, the third and last static here), NOT in the instance, because `scenario`'s per-replicate reset calls `Forget(ac)` every replicate and an instance field would be wiped at the start of each one — and because the arm is a property of the aircraft's current test assignment rather than of integrator state. `For` seeds a new controller from the map, `Forget` deliberately does not clear it, and exactly two things do: the suite's `Finish` and `TestDrone.ForgetState`. `debugtests/test-arm-schedule.py` compiles the `ARM-SEAM` region verbatim and also asserts those three source properties, none of which fails to compile |
+| `chase` | `ChaseController.cs` | `ChaseController` | the instructor: marker → stick. **One instance per aircraft** (`For(ac)`/`Forget`); holds the control law, the probes, and the A/B arm seam — full detail: [L1.3](#chase--instance-model-seams-and-the-ab-arm) |
 | `seam` | `ChaseController.cs` | `PilotPlayerStatePatch` | Harmony prefix/postfix on `PilotPlayerState.PlayerAxisControls` |
 | `seam_thr` | `ChaseController.cs` | `PilotThrottlePatch` | Harmony prefix on `PilotPlayerState.PlayerThrottleAxis1Controls` (**Update**, not FixedUpdate). Skips native while a card plays, so the pilot's throttle/customAxis1 axes never reach `ControlInputs` — the game's airbrake reads `throttle == 0` every rendered frame, so owning throttle on the fixed step alone left it half-open |
 | `campatch` | `CameraPatches.cs` | `CockpitCameraPatch`, `CameraOrbitPatch`, `CameraSwitchStatePatch` | view follows the marker in cockpit + orbit |
-| `telem` | `Recording.cs` | `ManeuverRecorder`, `AnomalyLog` | CSV capture (**69 cols** as of v0.97.0) + `.airframe.json` sidecar + event-only anomaly sink. **`ManeuverRecorder` is an instance class since v0.86, one per aircraft** — same registry as `chase` (`For(ac)` / `Forget` / `Sweep` / `Player`), because N drones writing one `StreamWriter` is not a worse capture but one file with N aircraft's rows interleaved under one header. `Forget` **closes an open capture** with a reason, so a drone despawned mid-card cannot leave a writer open and a truncated file that reads as a clean completion. Only `_recSeq` stays static, and it is not the `LastPhase` trap: it counts *files opened this run*, one artifact-stream numbering per process — which keeps take numbers unique across concurrent writers **and** keeps `rec=` monotonic in time, the key `compare-runs.py` orders its A/B balance check by. The header block now describes *this recorder's* aircraft rather than `GetLocalAircraft`'s (a drone capture used to name the player's airframe, which would have silently defeated `compare-runs.py`'s refusal to pool across airframes). **v0.90 added `OverrideNote`**, written as a `# override Section/Key=value …` header line under `# card`: the knobs THAT CARD pinned for itself. A header line rather than a 65th column because the value is constant for the whole capture by construction, and not redundant with `# config` — that reports the live values, and what it cannot report is that the *card* chose them, which is what separates "configured by its card" from "someone left a knob set". **v0.92 added three SIDECAR fields and no column** (64 at the time): `infoStallSpeed`/`infoMaxSpeed` (`aircraftInfo`, converted from km/h) and the advisory `infoMaxWeight`. The block recorded every capability *except* the two numbers a flyability question needs, so no capture was self-contained on "could this airframe fly the entry condition it was given?" — the question `drone`'s pre-spawn gate now asks, and the one an unflyable lane's capture looks innocent under. Distinct keys from the existing `maxSpeed`, which is the `aircraftParameters` normalizer and a different quantity; `infoMaxWeight`'s sibling `emptyWeight` is documented template junk, so normalise by `massKg`. **v0.96 added column 65, `dmgFrac`** — the fraction of THIS aircraft's parts currently DETACHED, from the game's own `Aircraft.partDamageTracker.GetDetachedRatio()` (event-driven, self-throttled to 1 Hz, so it hands back a cached float and is free per row). Read off the recorder's OWN aircraft, in its own try/catch, with **−1 = could not read it, never 0** — 0 is the ordinary "intact" reading, which is also why it is not folded into the M0 state block whose catch leaves zeros. v0.84 named damage as one of the two things the per-replicate reset cannot undo and must therefore *record*; this is that record. `aeroPartCount` is not a substitute: nothing on the detach path calls `RemoveFromUnit()`, the only caller of `DeregisterAeroPart` (`AeroPart:74749-74755`), so it never decreases. The sidecar gained `detachedRatioAtStart` (did this replicate START bent? — the column only reports *now*), fail-soft to **absent**, not 0. **v0.96.2 added column 66, `origDist`** — metres from the **Unity world origin**, the one quantity `posX/Y/Z` cannot express (those are DATUM-relative by design, so a floating-origin rebase leaves no step in them). Float32 grain at distance *d* is ~`d·1.2e-7` m and `Aircraft.gForce` = `|v−vPrev|/(dt·9.81)` off the cockpit part's rigidbody multiplies it by 60; R33 tied the resulting `gJitterG` to `terminalOffDeg` replicate scatter at r = 0.886 and traced the datum itself to `OriginShift(cameraPosition)` (`:19365`) — **the world origin follows the OPERATOR'S CAMERA**, so one operator moving mid-batch re-bands every lane at once. Previously recoverable only from `LogOutput.log` spawn lines, overwritten every session; as a column it is per-row and **a step in it IS an origin shift**. Fail-soft to **0** — the opposite of `dmgFrac`'s −1, and correct here because a lane spawns 8–68 km out, so 0 m cannot be mistaken for data. **v0.97 corrects that entry's conclusion and adds columns 67–69, `datumX/Y/Z`.** The v0.96.2 note read the R29/R33 inversion as ruling distance out; R35 measured r(`origDist`, `gJitterG`) = **0.948** across 16 lanes with a log-log slope of **0.885**, which is the *d*·1.2e-7 grain prediction — distance IS the driver, and the inversion was measuring the wrong **radius**, since distance to the lane base and distance to the world origin acquire opposite orderings once the origin drifts (within R35's near six lanes, −0.810 nominal against +0.962 flown). `origDist` alone says a shift *happened*; it cannot say whether the lane moved or the origin did. `Datum.originPosition` (`:19234`, public static on the static class at `:19215`) is precisely what the game subtracts to make `GlobalPosition`, so recording the vector alongside `pos` makes the whole frame recoverable — world = `pos` + `datum`, a step in `datum` with none in `pos` is an `OriginShift`, and the reverse is the aircraft actually moving. R35 needed that distinction 237 times in one card. **No sentinel, and it cannot have one**: `Vector3.zero` is a genuine reading before the first shift and after a reset (`:19267`), which costs nothing because `origDist` failing to 0 beside a plausible datum already reads as a failed probe. `AnomalyLog` stays static: one log stream per process |
-| `scenario` | `ScenarioPlayer.cs` | `ScenarioPlayer` | test-card playback + card recording. **An instance class since v0.86, one per aircraft** (`For(ac)` / `Forget` / `Sweep` / `Player`), so N drones each fly their own card: every bit of playback state — queue, segment index, segment clock, heading frame, entry anchor, placement audit, card-recording buffers — is per-instance. Three things stay static and each says why in place: the **card library** (`_cards`/`_enable`/`_cf`, shared read-only config), the **on-screen notice** (one screen per process), and the **A/B arm schedule** (below). Hotkey doors stay static and resolve the local aircraft, then call the instance body, so a phase-2 drone runner drives the same code with no second copy to drift. `Tick` runs from the seam prefix for the player and from `TestDrone.OnPilotStep` **immediately before `Drone.Fly`** for a drone — the same zero-tick property at that aircraft's own seam. Each instance publishes `AimDemand`; the local one *also* writes `AimRig.SetAimForward` (that marker is the human's, one per process). **v0.87 gave `AimDemand` its consumer**: a drone's `Drone.Fly` passes it straight into `ChaseController.FlyUncrewed`, and `TestDrone.OnPilotStep` calls `StartSuite` on the drone's first pilot step and `OwnInputs` between the stick write and `FilterInputs` — the same three entry points the player's seam uses, driven from the drone's own seam. The **entry anchor is per aircraft**, which is the only reading that survives N of them: one shared anchor would stack every drone on one spot on the first replicate. Lateral separation stays the one `drone` already builds (`AbeamM + LaneM * slot`, on the launch stagger) rather than a second spacing constant fighting the first. Writes the aim demand from the seam prefix, tags rows via `ManeuverRecorder.SegmentTag`. **Owns the mod's only write of aircraft PHYSICS state** (`rb.position/rotation/velocity` + fuel, at card start only — see below) rather than only control inputs — and **since v0.95 that primitive has two callers**: `PlaceOnCondition` here, and `sandbox`'s hand-flight placement, which reuses `ResetGLoadTrackers` + `MoveAssembly` (`internal static` for exactly that) instead of copying them. Everything *around* the write stays card-only and stays here: the run anchor, the fuel write, the stale-demand write, the two-frame audit and the `# entry` header. That write has **two** mandatory pairings, both learned by destroying the aircraft: (1) zero `Pilot.velocityPrev` — the game derives G by differencing velocity across fixed steps, and past 20 g `Pilot.TakeGForceDamage` (`:85989`) applies `(sqrG − 400)·0.007` of damage, so an unpaired velocity step reads as ~870 g and four figures of damage. (**v0.96 correction:** that damage lands on the PILOT's own part index, not on the airframe — there is no structural-G path anywhere in the decompile. It still kills the run, which is why the pairing is mandatory, but "the law bent an airframe" is not a possible diagnosis. See CLAUDE.md Conventions and `LAW-LEDGER.md` K1-K5 §1–§2.); (2) move the WHOLE ASSEMBLY — an aircraft under complex physics is one rigidbody per part joined by FixedJoints, so moving only `Aircraft.rb` stretches every joint by the displacement and PhysX pays it back as ~`err/dt` of velocity (measured 19× err). Apply the same rigid transform to every `partLookup[].rb` and no joint sees a relative change. **v0.97.2 — the move is a RIGID TRANSFORM AND NOTHING ELSE, and this cell is a graveyard: two fixes have been tried in this spot and both are gone.** The problem is real and still OPEN (ledger #51): `AeroPart.CheckAttachment` (`:74349-74365`) detaches on **geometry alone** — 0.5 m between the part's transform and `attachInfo.localPosition`, the pose captured once in `UnitPart.Awake`→`CreateAttachInfo` (`:84155`), measured in the PARENT PART's frame, no force, no damage, no joint break — and for an aircraft it is the *only* detach route, since `UnitPart.TakeDamage`'s clause reads `&& !(this is AeroPart)` (`:84304`) and every `partLookup` entry is an `AeroPart` (`:74091`/`:81321`, `:61451`). It looks intermittent because `Aircraft.PartChecker` (`:60157-60180`, from `LocalSimFixedUpdate` `:61976`) samples **one part per fixed step, round-robin**. **Attempt 1, v0.96.1 — a mod-side audit that was a TAUTOLOGY and could never fire**: it iterated the same list with the same `pr == rb` skip as the move loop and rebuilt its target with the same expression — both call sites (`:1920` here, `PlayerSpawn.cs:69`) pass `pivot = rb.position` and `dRot = rot1 * Inverse(rb.rotation)`, so `pivot + dRot*(p0−pivot) + dPos` and `(pivot+dPos) + rot1*inv0*(p0−pivot)` are the same number and its `err` was float noise by construction. Its domain was exactly the set it had just assigned, so it skipped precisely the shared-body parts its own comment said it existed to check. R35's **zero `[place]` lines over 186 placements** is what a tautology returns, not evidence that nothing was left behind. **Attempt 2, v0.97.0 — calling the game's own `AeroPart.Repair` (`:74231`), which destroyed the aircraft on EVERY placement.** The reasoning about WHICH QUANTITY to write was right — `Repair` does write exactly what `CheckAttachment` compares — and that is as far as it goes; the approach was fatal anyway — `Repair` writes `xform.position = attachInfo.parentPart.xform.TransformPoint(attachInfo.localPosition)` plus the matching rotation, exactly the quantity `CheckAttachment` compares, in the frame it compares in. **R36 lost 32 of 32 placements, 100%, every airframe.** The signature is distinctive and worth recognising: replicate 1 always completes (it flies from the SPAWN and never places), then the FIRST `PlaceOnCondition` kills the aircraft at `segment arm at 0.0s` with speed going ~150 m/s → **40,000–68,000 m/s in one 0.02 s fixed step**, logged as `ABORT (aircraft gone)` / `despawned (pilot killed)`. Cause: `Rigidbody.position` writes the PhysX pose and leaves the `Transform` stale until the next simulation step, and `Physics.SyncTransforms()` copies Transform → PhysX and never the reverse — so `Repair` read a **pre-teleport** parent (`attachInfo.parentPart.xform`) and wrote a **pre-teleport** pose into `xform`, which for a bodied part (a scene root since `CreateRB` `:74418` unparents it) is a teleport back to the old lane position on the next sync. `Aircraft.rb` was untouched (root part has `attachInfo == null`), so `Physics.Simulate` ran with the root **13.8–41 km from its own parts** and every `FixedJoint` stretched by the full snapback; `Pilot.TakeGForceDamage` (`:85989`) finished it. Deleting only the second `SyncTransforms` would not have helped — the physics step syncs dirty transforms before simulating regardless, so **the lethal act is writing a `Transform` inside `MoveAssembly` at all**. Proven by a natural experiment in the same log: R36's 32 `snapped back 0 m` placements (still a full `MoveAssembly` call, the call is unconditional) were **32/32 clean**, its 32 placements of 13.8–41 km **32/32 fatal** — the fault scales with the **move**, and every rival explanation (stale baseline, `partLookup` order, negative gear scale, parts that had genuinely swung since `Awake`) is capped at `CheckAttachment`'s own 0.5 m, ~475 m/s, three orders under the recorded 10,602–172,586 m/s. That spread is **saturated, not `err/dt`** — 20,415 m at the rig's measured 19× predicts 388,000 m/s and read 60,147, because `breakForce` and solver clamps cap the impulse. The `try`/`catch` around it **never fired** — `Repair` completes cleanly and kills the aircraft anyway, so a green build, a green checker and a silent log proved nothing. The 0.34.1 game update in the same window is **refuted at byte level, not by its changelog**: `ilspycmd` on the installed `Assembly-CSharp.dll` against the 0.34 decompile leaves `AeroPart`, `UnitPart`, `Pilot`, `FloatingOrigin` and `PartJoint` **byte-identical**, with `Aircraft` differing by exactly one line (`NetworkunitName`, `GetCensoredName()` → `GetDisplayName(PlayerNameContext.Other)`). **So: rigid move, one `Physics.SyncTransforms` as the last statement, and #51 stays instrumented rather than fixed** — `dmgFrac` (column 65) records it per row and the v0.96 damage abort ends the run. A 1-in-35 intermittent shed is enormously cheaper than a 100% kill, and that is the bar a third attempt must clear. `check-architecture.py` enforces it as an **ANTI-invariant**, and the rule is broader than `Repair`: **no `Transform` write of any kind inside `MoveAssembly`** — any `.position`/`.rotation`/`.localPosition`/`.localRotation`/`SetPositionAndRotation` on a `Transform`, `.Repair()`, or more than one `Physics.SyncTransforms` — is a checker FAILURE carrying the R36 numbers. `Repair` was one instance of the class; the class is "mixing transform writes into a function that moves bodies". That gate is the only thing standing between the next agent and attempt three. If you do try again, fix the **displacement**, not the detection, and pick one of exactly two shapes. **(i) All-transform move:** write `xform.position/rotation` for every part **and the root**, applying the same rigid formula, then one `Physics.SyncTransforms()` as the last statement — and write **no** `Rigidbody.position` at all. This is safe for the exact reason the `Repair` loop was not: transform reads are uniformly stale, so the rigid formula is applied to a self-consistent pre-move pose and the single sync commits one coherent new pose. It is what `FloatingOrigin.OriginShift` (`:19380-19384`) does. **Mixing the two schemes is what killed R36.** **(ii) Re-capture, not restore:** `UnitPart.CreateAttachInfo(attachInfo.parentPart)` (`:84151`) rebaselines to the *current* pose, writes no transform, and reads only relative geometry — correct even with stale transforms. Its costs are an `onParentDetached` subscription leaked on every call (`:84156`, `+=` with no `-=`), replacing the game's own detach reference for the rest of the flight, and silently clearing `detachedFromParentPart`. Note also that `PartChecker` iterates `Aircraft.partsWithAero` (**private**, `:60559`), **not** `partLookup`, so any mod-side re-derivation is already looking at the wrong set without reflection. The revert also gives back the one thing v0.97.0 improved — `UnitPart.Repair`'s `hitPoints = 100f` (`:84262`, driving `wingEffectiveness` `:74628`) is gone with it, so airframe damage is once again **fully** unresettable between replicates. **Also refuted, so it is not re-proposed**: the “frame mismatch” theory (that preserving poses in the ROOT body's frame is weaker than the parent-part frame `CheckAttachment` tests in) is **wrong** — root-frame preservation is strictly STRONGER, since if every part keeps its pose in the root's frame then every pairwise relative pose is preserved, part-to-parent-part included; float grain at the 60–100 km world coordinates a lane flies is ~0.004 m per component, ~125× under 0.5 m. **Now settled, and it cuts the other way:** the v0.97 excursion happened at the placement (32/32 vs 32/32 on move size), but `MoveAssembly` itself is an exact rigid transform whose float32 grain at 60–100 km is ~0.004 m, ~125× under 0.5 m — so the *placement* cannot produce an attach failure at all, and #51's premise ("the reset sheds parts") is the next thing to doubt. The remaining suspects are ordinary flight loads and the post-placement 1 g catch, sampled by `PartChecker`'s round-robin. **Do not** merge via `SetSimplePhysics` instead: its `Destroy` is deferred to end-of-frame (so a FixedUpdate caller still simulates with live stretched joints) and destroying components invalidates whatever the game cached. **v0.84 — the placement is a full RESET, not just a speed/altitude write.** A batch of ten identical replicates was found non-exchangeable (`terminalOffDeg` vs run index r = −0.824; a first-half/second-half split of one unchanged arm beat its own detection threshold), and the three leaks were all *around* the placement, landing on the state the scored segment starts from: position was never reset (30 km of downrange walk), the aim demand was **stale for one tick** (the postfix `Apply` chased the previous card's marker from the freshly levelled attitude — measured `outP` −0.487 at the first sample of the late runs), and the per-*aircraft* `ChaseController` (v0.82) carried integrators/filters/`_pitchEff` across replicates flown by the same aircraft. So the placement now snaps back to an **anchor** (position + heading, captured on the first placement of a run, held in the datum-relative `GlobalPosition` frame so a floating-origin rebase cannot move it), writes the demand the card is about to ask for, and calls `ChaseController.Forget(ac)`. Engine spool is deliberately *not* reset (`OwnInputs` pins throttle across the card boundary, so it does not drift); session age and airframe damage are both unresettable — v0.97.0 briefly made damage HALF-resettable as a side effect of its `Repair` pass (`UnitPart.Repair` `:84262` sets `hitPoints = 100f`, driving `wingEffectiveness` `:74628`), but that pass was reverted in v0.97.2 for destroying the aircraft on every placement, so a bent-but-attached wing once again hands its degradation to the next replicate. Both are **recorded** in the new `# entry` CSV header line (`snapBackM`, pre-placement `v`/`alt`, fuel, `ctrlReset`) so an analysis can covary them out. Also owns the **A/B arm schedule**: `Cfg.ScenarioArmToggle` (or the first card's own `armToggle`) names a bool knob, alternated **ABBA** by queue index (`((i+1)>>1)&1`) so a monotonic session drift lands on both arms equally instead of loading onto the second block; each capture self-identifies via `arm=`/`armKnob=` on its `# config` line. **v0.94 — that schedule is PER AIRCRAFT and a fleet sweeps concurrently** (this supersedes the v0.86 "it stays static, and it is forced" note, which described a limitation that no longer exists). `ApplyArm` calls `ChaseController.SetArm(_acId, key, arm)` and the law reads the lever through `chase`'s `Arm()`, so the global knob is **never written**: `_armEntry`/`_armIdx` are per-instance and `_armSaved`, `_armOwner`, the save/restore dance, the "another aircraft owns the schedule" refusal, the concurrency stand-down and the `SettingChanged` re-entrancy guard around the arm write are all deleted — nothing to restore, nothing to own, nothing to fire the event. `ArmTag`/`ArmLabel` are per-instance too (`ArmTagFor(ac)`, non-creating, for the recorder header), so the run board's lines legitimately disagree: four drones mid-ABBA read A/B/B/A. Each aircraft's own ABBA keeps the drift-cancelling invariant **within every lane**, which is the right unit because `compare-runs.py` groups by (airframe, card, arm) and never pools across airframes; it deliberately does *not* balance arms across aircraft at one wall-clock instant, since a confound would have to hit the fleet at one instant AND correlate with lane, and both candidates are already handled (`frameMs` is a per-row column, airframes are never pooled). `ArmOf` sits between `ARM-SCHEDULE` markers for `debugtests/test-arm-schedule.py`. A card pinning the swept knob is still refused, for the mirror-image reason: the arm now *wins*, so the pin would change nothing about what flew while `# config` and `# override` both advertised it. **v0.88 trimmed the placement; v0.89 REVERTED it.** v0.88 wrote the velocity one measured trim-AoA below the level nose, on the theory that AoA = 0 is zero lift and the ~1 g catch was the entry thump. Gate B (R23) disproved it: run 01 is the run's first placement, so it was written **untrimmed** — the exact condition v0.88 blamed — and had the cleanest entry of the four (no AoA overshoot at all, `off` peak 0.59° against 1.72–1.97°). It also coupled each replicate's entry to a value measured during the previous replicate, in a rig built for replicate independence. The `# entry` line no longer carries `aoaTrim=`. **The measured, still-unfixed defect: `ChaseController.Forget(ac)` does not take effect on the placement tick** — at `tSeg=0.000` of every placed capture the controller holds pre-placement state (`rollRate` −58.99 vs −0.16 unplaced, `rollRateF` −12.83, `headingRateFilt` 10.4–19.3, `leadDeg` 6.8–12.5° of phantom lead). `rollRate = (t.up − _prevUp)/dt` reading −59 needs `_prevUp` at the *banked* attitude: the placement snaps ~79° of bank level in one step and the difference straddles it. Direct measurements on that row are all correctly post-placement; only derivatives are poisoned. Left unfixed on purpose — a guard on the finite difference would clean `rollRate` and hide the cause. **v0.90 — a card is the whole test, not just the stimulus.** `Card` gained `repeat`, `armToggle` and a `config` list of `{key, value}` knobs pinned for that card's duration, each falling back to its `Cfg` global when absent, so a card that declares nothing behaves exactly as it did in v0.89. One grammar for all three (`SplitSpec`: `"Key"` or `"Section/Key"`, bare ⇒ `Control`), values parsed by BepInEx's own `TomlTypeConverter` so one path covers every bindable type. **Order is load-bearing**: `ApplyOverrides` → `ApplyArm` → `StartCard`, and `RestoreOverrides` *after* `_rec.Stop` in both `Finish` and `NextCard` — because `SettingChanged` drives `NoteConfigChange`, which stamps a `# cfg` line into every open capture, so a card configuring itself after its own recorder opened would read as the law changing mid-run. Pinning the knob the A/B schedule sweeps is **refused loudly** (it flies every replicate on one arm while each capture still labels itself `arm=0`/`arm=1`); everything else is fail-soft, one warning per bad override. `Validate` **blanks a prose `airframe`** (whitespace ⇒ not a jsonKey) with a named warning, because the field was documentation in all 16 shipped cards until this release gave it behaviour. `Preview()` answers "what would a run fly?" with **no aircraft in hand** — its caller is choosing what metal to spawn — so it applies no `cls` filter and no replicate expansion, and never throws. Also publishes the read-only run-board accessors (field reads only; `IndexCard()` caches segment durations and must follow every write to `_card`/`_qi`/`_queue`) and keeps the two non-trivial ETA functions between `BOARD-MATH` markers in plain floats, because `debugtests/test-board-math.py` extracts and compiles that region verbatim. **v0.90.1 — cards are (de)serialised with `Newtonsoft.Json`, not `UnityEngine.JsonUtility`.** JsonUtility silently dropped the `Seg[] segments` field in *both* directions, so every card written to disk had no `segments` key and every card read back was rejected by `Validate` as "no segments" — **no disk card loaded at all from v0.71 to v0.90**, invisible because the built-in cards are constructed in C# and never touch a serializer, which is the one path every gate and batch happened to use. Newtonsoft ships in the game's `Managed` folder, so this is still no library of our own; unknown keys are still ignored (`note` relies on it) and a malformed file still throws where `Load` catches it. The model classes now sit between `CARD-MODEL` markers so `debugtests/test-card-model.py` can compile them and round-trip every file in `cards/` offline. **v0.91 — the card also names the FLEET.** `airframe` became a comma list (one jsonKey per lane, wrapping, read by the same `AirframeList` splitter as the `Cfg` knob) and `Card.count` says how many lanes to launch, so `Validate`'s prose detector is now per **token** — split, trim, then look for whitespace *inside* a token, which a jsonKey never contains — and a fleet is distinguishable from a sentence. `ResolveCount` answers in three steps and the middle one is why the field exists: the card's `count`; else the number of keys `airframe` names (`CountKeys`), because a card whose list *is* the fleet has already said how many drones it needs and twelve keys against `DroneCount` 4 would fly four lanes and answer a different question without refusing; else `DroneCount`. One clamp (1..16) for the value wherever it came from. `Preflight` gained `Count`/`CountSrc`, keeping the rule that every resolved value is paired with who decided it. `scorecard.py`'s `card_setup_problems` mirrors the per-token airframe rule and the `count` range offline — it is the only check on a card's setup, and a copy *stricter* than the mod would flag cards that fly perfectly well. **v0.93 — `Card.startSpeedCorner`, the airframe-relative entry condition.** The entry speed may be declared as a multiple of *the lane airframe's own* corner speed and wins over `startSpeed` when set, so one card is flyable by a roster whose Vmax spans 141–479 m/s and every airframe enters at the same aerodynamic state rather than the same number. `ResolveStartSpeed(startSpeed, startSpeedCorner, jsonKey)` is the single definition — unset ⇒ `startSpeed` (byte-identical to v0.92); else `TestDrone.TryEnvelope`'s `Corner` × the multiple; else **fail-soft to `startSpeed` with a named warning**, the probe contract, since a zero here would be a placement velocity of zero. It takes primitives because the other caller (`TestDrone.SpeedOfLane`, pre-spawn) has a `Preflight` and no aircraft; `EffectiveStartSpeed(Card, jsonKey)` is the wrapper and the instance `EntrySpeed(Card)` caches it on a reference compare, because `OwnInputs` asks on every fixed step. **Every** playback read routes through it — the placement, `EntryConditionError` (now an instance method for exactly this), `ForceEntry`'s card scan and the `Tick` placement gate — since converting only the spawn would place the aircraft at 180 m/s while the gate still demanded 250 and refused forever. The card RECORDING path still writes an absolute `startSpeed`: a human flight has one real speed, not a multiple. No CSV column — the `# entry` header already carries the resolved speed and the sidecar this airframe's `cornerSpeed`. **v0.96 — `Tick` gained a SECOND safety abort beside the altitude floor: airframe damage.** One clause, same `_frameSet` gate, threshold `> 0f` — *any* detachment, deliberately not the game AI's `> 0.12` (`:12206`/`:13466`), which asks whether the aircraft can still fight; this is a measurement rig, and an aircraft with a part missing is not the same airframe the previous replicate flew. The reason names the ratio and reaches the CSV's `# stop` line via the existing `Abort`→`Finish` path; one placement covers drones and the player. The read is fail-soft the OPPOSITE way from the recorder's `dmgFrac`: unreadable ⇒ *not* damaged, so a failed probe can never kill a good run, while the −1 in the column is what says the probe failed. Do not unify them. Two more extract-and-compile marker regions were added the same release — `SPEC-GRAMMAR` (`SplitSpec`, checked by `debugtests/test-spec-grammar.py`, which runs the same 16 cases against `scorecard.py`'s `split_spec` copy) and `FLEET-RESOLVE` (`ResolveCount`+`CountKeys`, checked by `debugtests/test-fleet-resolve.py`) |
-| `drone` | `TestDrone.cs` | `TestDrone`, `Drone` | uncrewed test aircraft: spawn / AI-disable / start a card / fly it with the mod's real law / despawn, so a card is flown by the harness instead of by a human (**v0.87, phase 2** — `Drone.Fly` is `ChaseCard`, which chases this aircraft's `ScenarioPlayer.AimDemand` through `ChaseController.FlyUncrewed`; the built-in level-hold flies only a drone with no card, and is not the control law). Holds **N drones at once**, keyed by `Aircraft.GetInstanceID()` — the player's aircraft is never in that dictionary, which is the failure this subsystem is built to make impossible. Launches on a **stagger** (`DroneCount` × `DroneStaggerSec`): replicates that fly the same segment at the same instant are not independent samples, so one frame hitch would corrupt all of them identically and read as a *tighter* noise floor. Inert unless `DroneEnabled`. Also owns `FrameDt` — but it is sampled from **`plugin.Update`, per RENDERED frame**, never from the fixed step: `Time.unscaledDeltaTime` read inside `FixedUpdate` returns `fixedUnscaledDeltaTime`, a **constant**, which is exactly what v0.86–v0.92 shipped (R27: `frameMs` read 16.70 ms on all 223,899 rows of a 352-capture batch and missed a logged 119 ms hitch). Fixed in v0.92.1; `SampleFrameTime` must stay called from `Update`. `TestDrone` is the manager (live list + dictionary + launch countdown + `FrameDt`); `Drone` is one aircraft — its id, its **cached** instance id (the dict key must outlive the aircraft), its spawn altitude, its idle clock, and its **own** `Fly` delegate, per drone rather than one static because N drones need N independent controllers. **The second place the mod writes aircraft state that is not the player's stick**, and the only one that *destroys* units (v0.95's `sandbox` also creates one, but never removes anything — swapping airframes is the game's own ejection): it spawns with `player=null, HQ=null`, which is what turns the AI off *by construction* (`SetStartingAiState` bails to `parkedState` when `NetworkHQ == null`), and refuses cleanly with no active server — SP is a host, an MP client is not. **v0.86**: `Cfg.DroneAirframe` is a **comma list** indexed by lane and wrapping, so a batch can be heterogeneous while a single value behaves exactly as before; an unknown `jsonKey` refuses that lane with its log line (with one key it cancels the launch, because the next lane would fail identically). Loadout is still `null` — the game's parameter is a `Loadout` object, not a name; the lane index is the hook when that API is known. Both removal paths call one `ForgetState(id)` dropping **every** per-aircraft registry (`scenario`, `telem`, `chase`), so the next one added cannot be forgotten on one of the two. **v0.90 — the card configures the batch and the batch cleans up after itself.** `RequestLaunch` resolves one `ScenarioPlayer.Preflight` per batch (not per lane — a checkbox ticked mid-stagger would change the airframe half way through) and `AirframeOf`/`AltOf`/`SpeedOf` prefer the card's `airframe`/`startAlt`/`startSpeed` over the `Drone*` knobs, with the launch log naming which source won for each; those three take the `Preflight` as an **argument** so the run board can ask them of a fresh preview and be unable to promise something the spawn will not do. A card's `airframe` overrides the **whole** lane list, because one test on a mix of airframes is not replicates of anything (`compare-runs.py` refuses to pool across `jsonKey`s). `PruneDead` also despawns any drone with no card running for `IdleDespawnSec` (5 s) — one rule for suite-complete / aborted / refused / never-started, windowed by the `NextCard`→`StartCard` gap so a drone is never dropped between its own replicates, and motivated by the aero job and three registries a circling drone keeps alive. A **dead or ejected pilot** is caught in `OnPilotStep` instead, ahead of every write: the game never self-disables an `Aircraft` on damage, so `PruneDead` structurally cannot see a shot-down drone (R25 — one stayed registered until the mission quit). Lane geometry falls back to `Camera.main` rather than the scene origin, and `_slot` starts at `_live.Count`. **v0.90.1 — `OnPilotStep` runs once per FIXED STEP, not once per pilot.** `Aircraft.pilots` is an array and `JobManager.PilotAeroInputs` calls the patched method on each element, so a **two-seat airframe ran the whole per-aircraft step twice per physics step** — 2× card clock (R26: `trainer`/`FastBomber1` flew a 6 s segment in 2.97 s and a 30 s one in 14.95 s, against 5.97/29.95 single-seat) and, worse, `chase` double-stepped inside one `dt`, where every finite difference against a cached previous attitude read **zero** on the second call. The guard is a `Drone.LastStep` = `Time.fixedTime` stamp placed *after* the dead/ejected despawn so any seat's death still despawns, and it is deliberately **not** the game's `pilots[0] == p` idiom: a dead pilot is dropped from `JobManager`'s list, which would silently stop ticking a drone whose front-seater was killed. The spawn line reports `pilots.Length`, since seat count is prefab data with no code-side definition. `LaneM` also went 2 km → 6 km: a 360 at the 72° clamp and 250 m/s has radius `v²/(g·tan φ)` = 2.07 km, so neighbouring lanes flying the sustained-turn family swept overlapping ground tracks. **v0.91 — the card picks how many drones and which.** `CountOf(Preflight)` joins `AirframeOf`/`AltOf`/`SpeedOf` and the launch log names its source too; `RequestLaunch` now resolves `_plan` **before** `_pending`, which is load-bearing rather than tidy, since `_pending` *is* the fleet size and reading `Cfg.DroneCount` first would pin every batch to the global and undo the card's `count`. `CountOf`'s `Cfg` fallback deliberately lives in `ScenarioPlayer.ResolveCount`, not here — the "as many as the airframe list names" rule needs the CARD, and a `Preflight` with no card already carries `Count` 0 — so this is a clamp and a no-card guard, not a second copy of the policy. A card's `airframe` still replaces the WHOLE lane list, but since it is itself a list the heterogeneous batch now lives *in the card* instead of being the reason to leave the field empty; `compare-runs.py` refuses to pool across `jsonKey`s, so a fleet card reads back as one row per airframe. Keys come from `AIRFRAMES.md` — 14 real ones, and an invented key costs a refused lane. **v0.92 — an IMPOSSIBLE entry condition is refused too, before the spawn.** An invented key already refused; an airframe that simply cannot reach the card's `startSpeed` did not, and that is the worse of the two, because it produces an artifact: the lane spawns, the placement writes a speed the aircraft cannot hold, and the capture measures the decay back to what it *can* hold — segmenting cleanly, scoring fine, and pooled by `compare-runs.py` with the airframes that flew the real condition. The shipped grid contains three by construction (every `oblique-*`/`sweep-*`/`e1`–`e3` card asks 250 m/s; `CAS1` tops out at 205.6, `COIN` at 141.7, the rotorcraft lower). `TryEnvelope(jsonKey, out Envelope)` answers it off `Encyclopedia.Lookup` with **no aircraft instance** — refusing post-spawn would already have created the unit — reusing `Spawn`'s own `Encyclopedia.i == null` readiness test rather than a second one, and taking Vstall/Vmax from `aircraftInfo` (**km/h, ÷3.6**) because `aircraftParameters.maxSpeed` is a *normalizer* reading a flat 600 for every fast jet, on which the 141 m/s Cricket clears 250. Fail-soft on the probe contract: `false` is "could not read it", never "the bounds are zero" (the out-value is left untouched, so no zero can be mistaken for a bound), and an unknown envelope never refuses — a probe that cancels a batch over a missing field is worse than no probe. The band is `1.10 x Vstall` … `0.95 x Vmax`; the floor is deliberately **not** the round 1.20, since the grid's tightest legitimate pairing (`stol-*` at 90 m/s on `SmallFighter1`, Vstall exactly 75.0) sits at exactly 1.200 and would then be decided by the float rounding of `stallSpeed / 3.6`. `EntrySpeedFlyable` logs the one refusal line (airframe, requested speed, violated bound and its value, plus corner and g-limit so the operator can pick a workable number) and returns `null` into the **same** skip-or-cancel branch a bad `jsonKey` takes. Speed only — there is no service ceiling anywhere in the decompile, so altitude has no per-airframe bound to check. **v0.93 — the entry speed became a PER-LANE question, so the gate now asks it per lane.** `SpeedOfLane(Preflight, jsonKey)` calls `ScenarioPlayer.ResolveStartSpeed` and is the real answer; the batch-wide `SpeedOf` stays for callers with no lane in hand and deliberately handles the absolute form only. `LaunchDue` resolves the lane's speed ONCE into a local and hands the same value to `EntrySpeedFlyable` and to the spawn velocity — asking twice, or gating on `SpeedOf`, is exactly how a lane gets checked at one speed and placed at another — and the no-argument `SpawnSpeed()` twin was deleted for that reason (`SpawnAlt()` remains; altitude has no per-airframe form). `SpeedText`/`SpeedFromCard` keep the operator-facing text honest: with a corner-relative card there is no single number, so the launch log prints `1.00x corner (per airframe)` and the per-drone spawn line carries each lane's actual m/s. **v0.96 — `TryEnvelope`'s `Corner` is the FLIGHT MODEL's corner speed, not the AI's** (backlog #41). `ControlsFilter.FlyByWire.cornerSpeed` (`:64877`) is the pitch-rate demand's saturation speed (`:65032`) and the G-limit knee (`:64845`); `aircraftParameters.cornerSpeed` (`:63097`) is read only by AI throttle/glideslope/effort code and never by the flight model. Over 1604 archived sidecars they differ by 0.556× (Darkreach 100 vs 180) to 1.417× (AttackHelo1 170 vs 120), so a `startSpeedCorner` card — whose entire claim is a *uniform aerodynamic* entry state — was entering the roster across a 2.2× spread. `FbwCornerSpeed(jsonKey)` reads it off the PREFAB with no aircraft instance and **no reflection**: `Encyclopedia.i.TryGetPrefab` → `GetComponentInChildren<ControlsFilter>(true)` (also catching `HeloControlsFilter : ControlsFilter`) → the public `GetFlyByWireParameters()[2]`, the same accessor `chase`'s v0.55 in-flight probe already uses. Fail-soft on a **NaN sentinel** — 0 is a real speed and would silently become an entry condition — falling back to the encyclopedia value with one named warning per airframe, cached per key (the cache IS the once-only mechanism). Consequence: at `1.0x` all ten fixed-wing keys now pass (`CAS1`'s FBW corner is 160, under its 195.3 ceiling — it used to refuse on the AI's 200), and every corner-relative capture from R29 and earlier is NOT comparable with later ones. Both numbers were already in the sidecar (`cornerSpeed`, `fbwCornerSpeed`), so archived captures are self-describing about which corner they flew. `StallMargin`/`VMaxMargin` moved between `ENTRY-MARGINS` markers and `AirframeList`+`AirframeForLane` between `FLEET-RESOLVE` markers, both compiled verbatim by `debugtests/test-fleet-resolve.py`. **v0.97.1 — lane geometry is captured in the DATUM frame.** `_laneBase` is a `GlobalPosition` converted back with `.ToLocalPosition()` per lane in `LaunchDue`, never a `Vector3` cached at the keypress: the stagger is long enough for `FloatingOrigin.OriginShift` (`:19365`) to re-centre the world on the operator's camera, which translates every root and the datum with them and leaves a cached world coordinate pointing at a different place. R33's own spawn log caught it (datum `local y` 2400 → −32 between lane 6 and lane 7) and R35's `origDist` measured the cost: lanes 1–6 carried by the shift (24.0/18.5/12.8/6.2/0.6/7.4 km, running backwards through the new origin), lanes 7–16 re-laid from the stale base (44.0…98.5 km) — one fleet on two noise floors, invisible per-lane because each reads a clean `7.709 + 6.000k` at its own spawn instant. `_laneRight`/`_laneRot` are unaffected (a shift is a pure translation). Pinned by `debugtests/test-lane-frame.py` |
-| `drone_seam` | `TestDrone.cs` | `TestDronePatch` | Harmony postfix on `Pilot.Pilot_OnAeroInputsApplied`. This fires for **every** pilot's fixed step, player included, so it resolves `aircraft.GetInstanceID()` against the drone dictionary and returns immediately for anything else — the mod writing the player's stick from the drone path is the worst failure this file can have, so the guard is a dictionary miss rather than a heuristic. Chosen over a `MonoBehaviour.FixedUpdate` because `JobManager.FixedUpdateEarly` schedules the aero jobs *before* `PilotAeroInputs()`, so this is the seam where an input write still reaches the current tick — and it is the same seam the player path writes from (`PilotPlayerState.FixedUpdateState` is called from inside it), which is why a drone capture is comparable to a human one. Then calls `Aircraft.FilterInputs()` by hand: the FBW and `RelaxedStabilityController` are only ever run *from a pilot state*, and an uncrewed aircraft has none. It fires once per **pilot**, not per aircraft — `Aircraft.pilots` is an array and `JobManager.PilotAeroInputs` walks it — so since v0.90.1 the per-aircraft body it calls (`TestDrone.OnPilotStep`) de-dupes on a `Time.fixedTime` stamp; the patch itself stays a plain forwarder, because the state that decides "already run" is the drone's, not the patch's |
-| `sandbox` | `PlayerSpawn.cs` | `PlayerSpawn` | **v0.95 — one key (`Cfg.SandboxKey`, default F4) puts the OPERATOR airborne at `SandboxAlt`/`SandboxSpeed`, so a law change can be hand-flown at the shipped grid's entry condition without building a mission, taking off and climbing to it.** Static, stateless, one entry point (`Trigger`), and **read outside the `DroneEnabled` gate** — this is hand-flying, not the harness, and needing to arm the drone subsystem for it would be a lie about what it does. **Two cases and the split is the design. (A) Already in an aircraft ⇒ PLACE it**, wings level, **current position and heading KEPT**; nothing spawns and nothing is lost. That is `scenario`'s `PlaceOnCondition` minus the card: no run anchor (a card needs every replicate in the *same* place; a pilot wants to be where he was pointing, higher and faster), no fuel write, no `# entry` note and no two-frame audit, because none of those is a measurement here. It does call `ChaseController.Forget(ac)`, for the reason the card placement does — every filter and finite difference in the controller straddles a teleport. **(B) Not in one ⇒ SPAWN one**, 500 m ahead of `Camera.main` on its flattened heading (the camera is the only thing that reliably exists when the operator is spectating or dead — the same fallback `drone` lanes take), and the game seats him. **THE LOAD-BEARING PART: case A reuses `ScenarioPlayer.ResetGLoadTrackers` + `MoveAssembly`** (`private static` → `internal static` in this release) rather than copying them. That pair *is* the safe-teleport primitive and **both halves were learned by destroying the airframe** — zero `Pilot.velocityPrev` before the velocity write or the G path reads ~870 g (v0.73), and move every `partLookup[].rb` or PhysX repays the stretched `FixedJoint`s at ~19× the displacement (R15). Anything that moves an aircraft must call both, so a second copy is a second chance to ship one half. **Case B is `TestDrone.Spawn` with `player` and `HQ` filled in** where the drone call passes `null` for both, and everything downstream is deliberately the game's: `Player.SetAircraft`, the pilot's player state (`SetStartingAiState` is skipped precisely *because* `player != null` — the exact mirror of what turns the drone AI off), the cockpit camera, HUD, map icon, throttle and gear. Swapping airframes while alive needs no despawn-first dance; the game ejects the old one. The HQ passed is **the player's own faction**, never `null`: `SetFaction(null)` would drop him out of his faction entirely, a far more confusing outcome than the refusal. **Why this is its own file and not in `TestDrone.cs`**: that file's load-bearing invariant is that an aircraft only enters its dictionary through `Spawn`, which asserts `ac.Player == null`, and a `player != null` spawn path beside that assertion is a trap for the next reader — nothing here touches the drone registry. Server-gated exactly like `drone` and asked of the same object (`Spawner.IsServer`, since `SpawnAircraft` carries no `[Server]` attribute but ends in `ServerObjectManager.Spawn`), so a refusal cannot disagree with reality. `SandboxSpeed` is **not** envelope-checked the way a lane is (v0.92): a pilot is not a batch, an out-of-envelope number visibly decays or overspeeds in seconds, and refusing to place him would be more annoying than the acceleration. Every refusal is one `[sandbox]` log line — no server, no `Spawner`, `Encyclopedia` not loaded, no local player, no faction HQ, an unresolvable `SandboxAirframe`, `SpawnAircraft` returning nothing — and `Trigger` catches everything else, because it runs straight off a keypress in `Update` and must never throw into the game loop. It writes **no artifact**: this is a way to reach a state, not an instrument |
+| `telem` | `Recording.cs` | `ManeuverRecorder`, `AnomalyLog` | the instrumentation sinks: the CSV recorder and the anomaly log — full detail: [L1.5](#telem--the-csv-contract-column-by-column) |
+| `scenario` | `ScenarioPlayer.cs` | `ScenarioPlayer` | test-card playback + card recording. **One instance per aircraft since v0.86**; owns the safe-teleport primitive, card config, and the A/B arm schedule — full detail: [L1.6](#scenario--playback-placement-cards-and-arms) |
+| `drone` | `TestDrone.cs` | `TestDrone`, `Drone` | uncrewed aircraft: spawn · fly · despawn, N at once on a staggered launch and a lane ring — full detail: [L1.6](#drone--spawn-lanes-and-the-entry-gates) |
+| `drone_seam` | `TestDrone.cs` | `TestDronePatch` | writes a DRONE's `ControlInputs`; a no-op for every other aircraft — full detail: [L1.6](#drone_seam--the-per-pilot-write-seam) |
+| `sandbox` | `PlayerSpawn.cs` | `PlayerSpawn` | puts the OPERATOR airborne on one key, to hand-fly the law with no mission built — full detail: [L1.6](#sandbox--hand-flying-the-law) |
 
 ### Game types we patch or read
 
