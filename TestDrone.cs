@@ -1331,7 +1331,13 @@ namespace NuclearOptionMouseAim
                 // card at whatever ControlInputs.throttle happened to hold — and 0 is the game's
                 // airbrake trigger (Airbrake.Update), which is how R18 read a bad throttle as a
                 // control-law energy failure. No-op when this drone is not flying a card.
-                sp.OwnInputs(ac);
+                // ...and when the card DECLINES it — a declared-hover card, where a pinned throttle
+                // would be a commanded climb rather than an entry condition — the harness holds the
+                // altitude itself on rotorcraft lanes. Without this the axis simply kept the
+                // level-hold's last write, which is one fixed collective for every airframe and is
+                // why two of three rotorcraft never hovered in R41. No-op for fixed-wing and for every
+                // card that owns its throttle; see HoldCollective.
+                if (!sp.OwnInputs(ac)) HoldCollective(d, sp);
 
                 // FBW IS NOT AUTOMATIC. `Aircraft.FilterInputs()` — which runs the
                 // RelaxedStabilityController and then ControlsFilter/FlyByWire — is called ONLY from
@@ -1365,11 +1371,110 @@ namespace NuclearOptionMouseAim
         // aircraft nobody is flying falls into the sea. Never tune it, and never compare a level-hold
         // capture against a card capture: they are not the same controller.
         // =========================================================================================
-        private const float HoldThrottle = 0.6f;   // fixed position, not a speed hold — one loop, not two
-        private const float VsPerAltErr  = 0.05f;  // m/s of commanded climb per metre of altitude error
-        private const float VsMax        = 25f;    // m/s cap on that command
+        // `internal` so Drone can seed its collective integrator from it — the harness's one neutral
+        // throttle, named once.
+        internal const float HoldThrottle = 0.6f;  // fixed position, not a speed hold — one loop, not two
         private const float PitchPerVs   = 0.03f;  // stick per m/s of climb-rate error
         private const float RollGain     = 2.0f;   // stick per unit of t.right.y
+        // VsPerAltErr / VsMax — the OUTER half of the cascade — live in the COLLECTIVE-HOLD region
+        // below, because both loops share them and that region is what test-collective-hold.py compiles.
+
+        // -----------------------------------------------------------------------------------------
+        // THE COLLECTIVE — the harness owns the throttle on a rotorcraft HOVER card.
+        //
+        // WHY IT HAS TO EXIST. `ScenarioPlayer.OwnInputs` deliberately DECLINES the throttle when the
+        // card declares a zero entry speed (its `declared-zero-ok:` note), and that is right: on a
+        // rotorcraft the throttle IS the collective, so pinning one number at a hover commands a climb
+        // or a descent rather than an entry condition. But declining left the axis at whatever the
+        // level-hold last wrote — `HoldThrottle`, 0.60 — and one fixed collective is not a hover for
+        // more than one airframe. R41 measured the three-way split at exactly that value: `QuadVTOL1`
+        // and `AttackHelo1` CLIMBED at +2.2…+5.7 m/s while `UtilityHelo1` SANK at −25, lost 1.9 km in
+        // 78 s and aborted 16 of 16 replicates on the 500 m floor, leaving the whole `rotor-hover`
+        // verdict resting on the one airframe that happened to hover (debugtests/R41-rotor.md §5a,
+        // §6.2). A card cannot fix it — the throttle pin is read after that early return.
+        //
+        // WHY IT IS A PI AND NOT A P. The collective that holds a given rotorcraft level is a different
+        // number for every airframe, and the ONE-LAW rule forbids writing those numbers down. So the
+        // loop MEASURES it instead: `Drone.Collective` is an integrator whose steady state IS this
+        // airframe's hover collective, learned from live vertical speed and re-learned as fuel burns
+        // off. Nothing here keys off a jsonKey, a mass or a rotor count. A P-only loop structurally
+        // cannot do this — it holds altitude only where its fixed trim happens to BE the hover value,
+        // and everywhere else it droops by (hoverTrim − trim)/(CollP · VsPerAltErr), i.e. ~250 m for a
+        // 0.25 trim error: most of the way back to the floor that started this.
+        //
+        // WHAT GATES IT, and why the gate is the CARD rather than `_heliBlend` (see HoldCollective).
+        // -----------------------------------------------------------------------------------------
+        // The gains. SHARED constants, not per-airframe ones — the standing rule bans per-PLANE
+        // constants, not shared ones (ScenarioPlayer.EntryThrottle argues the same for its 0.7), and
+        // the airframe-specific quantity here is the integrator's steady state, which is measured.
+        //
+        // Sized off the cascade rather than tuned on a plane. CollP sets the INNER climb-rate loop's
+        // time constant, 1/(K·CollP) for the airframe's throttle→vertical-accel gain K — a few seconds
+        // across any plausible K. VsPerAltErr sets the OUTER altitude loop's, 20 s, so the two are
+        // separated by the usual 4:1. CollI is slower again than the inner loop, which is what stops
+        // the trim walk chasing it into a phugoid: the P term arrests the sink, the I term only has to
+        // remove the residual droop.
+        //
+        // ponytail: three consts, no Cfg binds. They are harness-internal and their siblings above are
+        // consts too. If a flight shows the trim converging too slowly, CollI is the one to raise —
+        // the `thr` and `alt` columns of any rotor capture are already the evidence for it.
+        // --- COLLECTIVE-HOLD BEGIN ---
+        private const float VsPerAltErr = 0.05f;   // m/s of commanded climb per metre of altitude error
+        private const float VsMax       = 25f;     // m/s cap on that command
+        private const float CollP       = 0.02f;   // throttle per m/s of climb-rate error (the damping)
+        private const float CollI       = 0.002f;  // throttle per m/s per second (the trim it learns)
+        private const float MinColl     = 0.05f;   // never write exact 0 — that is the game's airbrake trigger
+
+        // One PI step on the throttle axis. Plain numbers and Mathf only, because
+        // debugtests/test-collective-hold.py compiles this region VERBATIM and runs a case table over
+        // it — the sign of a collective loop is not a thing to establish by flying it.
+        //
+        // `trim` is the learned hover collective, carried across ticks by the caller. Clamping it (and
+        // not just the return) is the anti-windup: an underpowered airframe pinned at 1.0 stops
+        // integrating instead of banking authority it will have to unwind on the way back down.
+        internal static float CollectiveStep(ref float trim, float altErr, float velY, float dt)
+        {
+            // altErr > 0 = BELOW target = climb. velY is the achieved climb rate, so vsErr > 0 means
+            // "not climbing as fast as asked" and more collective is the answer on both terms.
+            float vsWant = Mathf.Clamp(altErr * VsPerAltErr, -VsMax, VsMax);
+            float vsErr  = vsWant - velY;
+            trim = Mathf.Clamp(trim + CollI * vsErr * dt, MinColl, 1f);
+            return Mathf.Clamp(trim + CollP * vsErr, MinColl, 1f);
+        }
+        // --- COLLECTIVE-HOLD END ---
+
+        // Called from OnPilotStep when — and only when — the card DECLINED the throttle. Three gates,
+        // all necessary:
+        //   1. a card is running. With no card the level-hold above already owns the axis.
+        //   2. the card did not take the throttle itself. That is the caller's `!OwnInputs(ac)`, and it
+        //      is what confines this to DECLARED-HOVER cards: any card with a forward entry speed —
+        //      `rotor-transition` included — keeps its pinned throttle and is byte-identical.
+        //   3. the airframe is collective-classed (`ChaseController._collective`, the same latch the
+        //      hover blend keys off). Fixed-wing lanes never reach the write.
+        // Gating on the LIVE `_heliBlend` instead was considered and rejected: it falls as forward
+        // speed builds, and a forward-speed runaway is exactly the failure R41 §2 measured — the hold
+        // would cut out precisely when the aircraft is diverging. A card's declared hover does not move.
+        //
+        // Crewed flight is unreachable from here by construction: the only caller is the drone seam.
+        internal static void HoldCollective(Drone d, ScenarioPlayer sp)
+        {
+            if (sp == null || !sp.Playing) return;
+            var ac = d.Aircraft;
+            var rb = ac != null ? ac.rb : null;
+            var ci = ac != null ? ac.GetInputs() : null;
+            if (rb == null || ci == null) return;
+            if (!ChaseController.For(ac)._collective) return;
+
+            // The altitude the card's placement WROTE, else this drone's spawn altitude — the same
+            // reference its level-hold flies. Fail-soft in the same direction as everything else here:
+            // a card that never placed holds where the drone was put, rather than not holding at all.
+            float tgt = sp.CardAltM;
+            if (float.IsNaN(tgt)) tgt = d.HoldAlt;
+
+            ci.throttle = CollectiveStep(ref d.Collective, tgt - ac.GlobalPosition().y,
+                                         rb.velocity.y, Time.fixedDeltaTime);
+            ci.brake    = 0f;
+        }
 
         internal static bool LevelHold(Drone d)
         {
@@ -1461,6 +1566,16 @@ namespace NuclearOptionMouseAim
         // flying one. PruneDead's auto-despawn clock. Per drone and not a shared timer, because the
         // launch stagger means N drones finish at N different instants — which is the point.
         public float IdleSince = -1f;
+
+        // THE LEARNED HOVER COLLECTIVE (see TestDrone.CollectiveStep). Per drone because it is a
+        // property of the airframe in that lane — the whole point is that N lanes flying N different
+        // rotorcraft each converge on their OWN number, which a shared static could not represent.
+        // Seeded at the harness's neutral throttle, so the first tick of a hover card commands exactly
+        // what the pre-v1.0.x harness commanded for the whole card, and the loop walks off from there.
+        // Not reset between replicates on purpose: the airframe does not change, so the trim learned on
+        // replicate 1 is a free head start for replicate 2 — and a placement is a position write, not a
+        // new aircraft.
+        public float Collective = TestDrone.HoldThrottle;
 
         // `Time.fixedTime` of the last step this drone was actually flown. The de-duplicator for a
         // MULTI-CREW airframe, whose every seat fires the pilot postfix independently — see the long

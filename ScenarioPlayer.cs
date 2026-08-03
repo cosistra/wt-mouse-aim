@@ -207,6 +207,7 @@ namespace NuclearOptionMouseAim
         private int        _auditFrame = -1;
         private float      _auditSpeed;     // what the placement commanded, to audit against
         private bool       _placed;         // this card has had its placement applied
+        private float      _cardAltM = float.NaN;   // altitude the last placement WROTE — see CardAltM
 
         // --- damage abort: hold it open for ONE recorded row (v1.0.0) ---
         // `dmgFrac` (column 65) is written by the RECORDER, from ChaseController's Apply — which runs in
@@ -309,6 +310,17 @@ namespace NuclearOptionMouseAim
         // does, and a drone must not go on chasing a dead card's final direction; with no card it
         // falls back to the harness's level-hold instead.
         public Vector3 AimDemand { get; private set; }
+
+        // THE ALTITUDE THIS CARD IS BEING FLOWN AT — what PlaceOnCondition actually WROTE, which is not
+        // the same as what the card declares: `startAlt` is optional, and an absent one leaves the
+        // placement holding wherever the aircraft already was (`altTgt = alt0`). Publishing the written
+        // value rather than `_card.startAlt` is what keeps the two from disagreeing.
+        //
+        // NaN until a placement lands — ScenarioForceEntry off, or a card that declares no entry — and
+        // that is a real state, not a failure: the caller falls back to its own reference. Consumed by
+        // TestDrone.HoldCollective, the harness's rotorcraft altitude hold, which needs the target the
+        // replicate was actually put on rather than the one it was spawned on.
+        public float CardAltM => _cardAltM;
 
         private void SetDemand(Vector3 dir)
         {
@@ -2284,6 +2296,10 @@ namespace NuclearOptionMouseAim
                 Quaternion rot1 = Quaternion.LookRotation(fwd, Vector3.up);
                 MoveAssembly(ac, rb, rot1 * Quaternion.Inverse(rb.rotation), rb.position, dPos,
                              rot1, fwd * vTgt);
+
+                // Published only now, after the write landed: an Infeasible or Failed placement must
+                // not leave a hover hold chasing an altitude nothing ever flew the aircraft to.
+                _cardAltM = altTgt;
 
                 // NO STALE DEMAND. Apply runs from this same call's POSTfix, so without this the tick
                 // that teleports the aircraft is also a tick chasing the previous card's last marker

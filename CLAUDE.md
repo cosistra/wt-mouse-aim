@@ -701,6 +701,25 @@ Machine-specific paths are written as placeholders:
     stagger exists to prevent) — and calls `ScenarioPlayer.OwnInputs` for the throttle between the
     stick write and `FilterInputs`, mirroring the player's seam postfix (a card at `throttle == 0` is
     the game's airbrake trigger; that was R18's false "energy failure").
+    **The COLLECTIVE — when `OwnInputs` DECLINES the throttle, the harness holds altitude itself.**
+    `OwnInputs` returns false on a card declaring a **zero entry speed**, deliberately: on a rotorcraft
+    the throttle *is* the collective, so pinning one number at a hover commands a climb or a descent.
+    But that left the axis at whatever the level-hold last wrote (`HoldThrottle`, 0.60), and one fixed
+    collective is not a hover for more than one airframe — R41 flew all three rotorcraft at 0.60 and
+    got a three-way split, `UtilityHelo1` sinking at **−25 m/s** into **16 of 16** altitude-floor
+    aborts (`debugtests/R41-rotor.md` §5a). So `OnPilotStep` now reads that return:
+    `if (!sp.OwnInputs(ac)) HoldCollective(d, sp)`. `HoldCollective` is a **PI on the throttle axis**
+    (altitude error → commanded climb rate through the level-hold's own `VsPerAltErr`/`VsMax`, then
+    P for damping + I for trim), gated on *card running* **and** *card declined the throttle* **and**
+    `ChaseController._collective`. **The integrator is the design, not an embellishment:** it *learns*
+    that lane's hover collective from live vertical speed, which is how the loop obeys the one-law rule
+    — a P-only version droops ~244 m on the `UtilityHelo1` shape. Deliberately **not** gated on the
+    live `_heliBlend`: that falls as forward speed builds, so the hold would cut out exactly during the
+    speed runaway R41 §2 measured. Target altitude is `ScenarioPlayer.CardAltM` (what the placement
+    *wrote*), falling back to the drone's spawn altitude. Fixed-wing lanes and crewed flight are
+    bit-for-bit unaffected. No new CSV column — `thr` already records commanded throttle. The loop's
+    arithmetic lives between the `COLLECTIVE-HOLD` markers and is checked by
+    `python debugtests/test-collective-hold.py`; keep it inside them.
     Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
     clock that exists before any drone does. **Both** removal paths (`Despawn` and `PruneDead`) call
     one `ForgetState(aircraftId)` that drops **every** per-aircraft registry — `ScenarioPlayer`,
@@ -1421,6 +1440,16 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   field the round-trip stops covering the moment the grid stops using it. The airframe string is
   asserted byte-for-byte: `AirframeList` splits it per lane and `CountKeys` counts the same tokens, so
   a serializer that reformatted it would change both the fleet size and which lane flies what.
+- **The rotorcraft collective hold.** `python debugtests/test-collective-hold.py` does the same
+  extract-and-compile trick to the `COLLECTIVE-HOLD` region of `TestDrone.cs` — the PI altitude hold
+  that owns the throttle on a drone-flown rotorcraft *hover* card. Two halves. (1) **Eleven one-step
+  cases** pin the **sign** and the shipped gains: an inverted collective term does not wobble, it flies
+  the aircraft into the ground at full deflection and the capture reads as a control-law failure. They
+  also pin the `VsMax` cap, both clamps and the fact that `dt` scales the integrator *and nothing else*.
+  (2) **Six closed-loop cases** fly a first-order rotorcraft for 120 s whose hover collective the loop
+  is **never told**, spanning 0.35–0.90 — that is the generality rule asserted rather than argued, and
+  it is the check that fails if anyone replaces the integrator with a constant. Run it after touching
+  the loop or its gains. Needs the .NET SDK, like the other extract-and-compile checks.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
   (hidden by default). Use it to watch the control law react in real time while flying.
 - **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**
