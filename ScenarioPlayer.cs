@@ -201,6 +201,17 @@ namespace NuclearOptionMouseAim
         // `# stop … reason=abort:` line), and before v0.99.1 there was no such half, because the
         // first abort ended the lane and the missing replicates left no artifact at all.
         private int        _aborted;
+        // WHAT THIS LANE STILL OWES AFTER ITS SUITE ENDED SHORT (v1.0.2) — the queue index a
+        // replacement aircraft would resume at, or -1 for "nothing". Written by Finish and read back
+        // by OwedBy seconds later, which is the whole reason it is a field rather than a derivation:
+        // a FATAL abort nulls `_queue` on its way out, and `_queue` is the only record of how many
+        // replicates the lane was supposed to fly. The damage abort ends the suite the instant the
+        // part comes off; the drone then level-holds for IdleDespawnSec before anything despawns it
+        // and asks the question, and by then the queue is long gone.
+        private int        _owed = -1;
+        // WHICH RESPAWN GENERATION IS FLYING THIS SUITE (0 = the lane's original aircraft). Per RUN,
+        // set once by StartSuite, and its only consumer is the `# entry` header — see PlaceOnCondition.
+        private int        _respawn;
 
         // --- entry placement audit (see AuditEntry) ---
         private Aircraft   _auditAc;
@@ -1004,6 +1015,70 @@ namespace NuclearOptionMouseAim
         // --- ARM-SCHEDULE END ---
 
         // =========================================================================================
+        // LANE CONTINUITY (v1.0.2) — A DEAD LANE IS A SILENTLY UNBALANCED A/B, NOT JUST LOST DATA.
+        //
+        // v0.99.1 made an abort end the REPLICATE rather than the lane, but only for the one reason
+        // where the airframe survives (the altitude floor). Every reason where it does NOT — a part
+        // fell off, the pilot was killed, the game took the aircraft — still ends the lane, because
+        // there is nothing left to fly the rest of the queue with. R41 lost 6 captures that way (5
+        // Darkreach + 1 EW1, ledger #51).
+        //
+        // THE DATA LOSS IS THE SMALLER HALF. Replicates are armed ABBA and indexed by the lane's own
+        // position in its own queue (`ApplyArm`: `ArmOf(_qi / _block)`), and that sequence is balanced
+        // only when the lane flies ALL of it. A lane of 8 replicates that dies during replicate 3 has
+        // completed A,B,B and stops there: 1 A against 2 B, and a mean position that leans — exactly
+        // the R21 confound ABBA exists to remove. Nothing warns, because `SetUpArmSchedule` prints the
+        // schedule the lane INTENDED to fly and `compare-runs.py` pools whatever arrived. Respawning
+        // restores the invariant the schedule already assumes: every lane flies its whole sequence.
+        //
+        // WHERE THIS IS ASKED, AND WHY IT IS ASKED HERE. `TestDrone` owns lanes and is the only thing
+        // that can spawn one, but only the card player knows what a lane still owes — so the harness
+        // PULLS the answer at the instant a drone leaves its registry (`TestDrone.LaneLost`, ahead of
+        // `ForgetState`), rather than the player pushing a notification into the harness. Pulling is
+        // what makes the two despawn orders irrelevant: this reads the live cursor when the suite is
+        // still nominally running (the game took the aircraft and nothing has aborted it yet) and the
+        // stashed `_owed` when a fatal abort already tore the queue down.
+        //
+        // AT THE REPLICATE BOUNDARY, NEVER MID-REPLICATE. The replicate that died is still an abort
+        // and its capture is still truncated and marked on its own `# stop` line — that is unchanged.
+        // The resume index is the one AFTER it, so no replicate is ever flown twice and none is skipped.
+        //
+        // The two functions live between markers because debugtests/test-lane-respawn.py extracts them
+        // with ARM-SCHEDULE and asserts the composed property — that a lane which dies and respawns
+        // flies the same complete, balanced arm sequence an undamaged one would have.
+        // --- LANE-CONTINUITY BEGIN ---
+        // How many times ONE lane may be re-flown on fresh metal in a run. A lane that cannot stay
+        // airborne must not burn the batch relaunching itself: R41's UtilityHelo1 sank on 16 of 16
+        // replicates, and an uncapped rule would have spawned it sixteen times and still produced
+        // nothing. Two is one retry plus one — enough for the R41 damage pattern (one loss per lane,
+        // spread over six lanes) and short of "this airframe cannot fly this card", which is a card
+        // problem and wants an operator, not another aircraft.
+        // ponytail: a const, not a Cfg knob — same judgment as IdleDespawnSec/StartGraceSec in
+        // TestDrone. Nothing about a run wants a different number, and the despawn key already means
+        // "stop".
+        internal const int MaxLaneRespawns = 2;
+
+        // The queue index a lane still owes when its suite ended at `qi` of `queueLen`, or -1 when it
+        // owes nothing — it finished (NextCard leaves `_qi == queueLen`), or it never had a queue.
+        internal static int OwedFrom(int qi, int queueLen) => qi + 1 < queueLen ? qi + 1 : -1;
+
+        // ...and the cap, kept separate so the caller can tell "this lane owed nothing" from "this
+        // lane owed something and the cap refused it" — the second is the line an unattended batch
+        // has to be able to find in the log the next morning.
+        internal static int RespawnAt(int owed, int used) =>
+            owed >= 0 && used < MaxLaneRespawns ? owed : -1;
+        // --- LANE-CONTINUITY END ---
+
+        // The harness's read of the two states above, keyed the way every despawn path already keys
+        // its bookkeeping: the CACHED instance id, because the aircraft may already be destroyed.
+        // Never throws and never registers anything — an id with no player owes nothing.
+        internal static int OwedBy(int aircraftId)
+        {
+            if (!_byAc.TryGetValue(aircraftId, out var s)) return -1;
+            return s._queue != null ? OwedFrom(s._qi, s._queue.Count) : s._owed;
+        }
+
+        // =========================================================================================
         // NAMING A CONFIG ENTRY FROM TEXT. One grammar — "Key" or "Section/Key", bare keys defaulting
         // to Control, which is where every control-law lever lives, both halves non-empty and at most
         // one slash — shared by ScenarioArmToggle, a card's `armToggle` and every `config[].key`. One
@@ -1331,7 +1406,12 @@ namespace NuclearOptionMouseAim
 
         // Start (or stop) a suite on ONE aircraft. Public-by-instance so phase 2 can run a card on a
         // drone through exactly this path.
-        internal void StartSuite(Aircraft ac)
+        //
+        // `startAt`/`respawn` (v1.0.2) are the RESUME, and they default to a fresh lane so the player's
+        // run key and every existing caller are byte-identical. See the LANE-CONTINUITY note: a
+        // replacement aircraft picks its lane's queue up where the lost one left off instead of
+        // restarting it, which is what keeps the lane's ABBA sequence complete and balanced.
+        internal void StartSuite(Aircraft ac, int startAt = 0, int respawn = 0)
         {
             if (_card != null) { Abort("run key pressed again"); return; }
             if (_recording)   { StopRecord("run key pressed"); }
@@ -1372,16 +1452,40 @@ namespace NuclearOptionMouseAim
             // at something else look identical in the run count, and the operator has to be able to see
             // which one he is actually flying before three minutes a run go by.
             int rep = ResolveRepeat(sel[0], out string repSrc);
-            WTMouseAimPlugin.Log.LogInfo(
-                $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
-                + $"replicates from {repSrc}.");
+            // THE RESUME, CLAMPED RATHER THAN TRUSTED. The selection is re-resolved on the NEW
+            // aircraft, so a card set edited (or a batch entry advanced) between the loss and the
+            // relaunch would index past the queue. Falling back to a full run is the safe direction —
+            // it over-flies rather than crashing — but it is never silent, because a lane that
+            // restarts has re-flown replicates that already have captures.
+            if (startAt < 0 || startAt >= sel.Count)
+            {
+                if (startAt != 0)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[card] RESUME REFUSED: replicate index {startAt} is outside this lane's "
+                        + $"{sel.Count}-entry queue — the card selection must have changed under the "
+                        + "respawn. Flying the whole queue from 0; this lane's A/B is NOT balanced "
+                        + "against its earlier captures, so treat them as two batches.");
+                startAt = 0;
+            }
             // The block the queue was built from — cards per replicate, i.e. the post-class-filter card
             // count, recovered from the expansion rather than re-counted so the two cannot disagree.
             // ApplyArm indexes the A/B by `_qi / _block`; see there for what queue-indexing cost.
+            // Resolved before the log line since v1.0.2, which needs it to name the resume REPLICATE
+            // (the unit the operator and the arm schedule both count in) rather than a queue index.
             _block = Mathf.Max(1, sel.Count / Mathf.Max(1, rep));
-            _queue = sel; _qi = 0; _card = sel[0]; _si = 0; _tSeg = 0f;
+            string resumeMsg = startAt > 0
+                             ? $", RESUMING at replicate {startAt / _block + 1} (queue index {startAt}) "
+                               + $"after respawn {respawn} — the earlier replicates flew on this lane's "
+                               + "previous airframe"
+                             : "";
+            WTMouseAimPlugin.Log.LogInfo(
+                $"[card] suite start: {sel.Count} card(s), {total:0}s total, class '{ClassOf(ac)}', "
+                + $"replicates from {repSrc}{resumeMsg}.");
+            _queue = sel; _qi = startAt; _card = sel[startAt]; _si = 0; _tSeg = 0f;
             _frameSet = false; _placed = false; _lastLogSeg = -1; _acId = ac.GetInstanceID();
             _aborted = 0;
+            _owed = -1;              // a fresh run owes nothing until it ends short — see Finish
+            _respawn = respawn;      // stamped into every '# entry' this suite writes
             IndexCard();             // run-board caches; must follow every write to _card/_qi/_queue
             _anchorSet = false;      // this run anchors HERE; the replicates after it come back to it
             _rec.EntryNote = "";     // an UNGATED card (one that DECLARES nothing) must not inherit the last one's note
@@ -1839,6 +1943,13 @@ namespace NuclearOptionMouseAim
                     + "'# stop' line, so a short count for this lane is those aborts and not a dropped "
                     + "recording — which is the distinction the analysis side could not make before.");
             _aborted = 0;
+            // WHAT THIS LANE STILL OWED, CAPTURED WHILE `_queue` IS STILL HERE TO COUNT AGAINST — the
+            // one line that survives the teardown below. A clean end leaves `_qi == _queue.Count`
+            // (NextCard walked it off the end), so this is -1 and no lane is ever respawned for
+            // finishing. See the LANE-CONTINUITY note; `TestDrone.LaneLost` reads it back through
+            // OwedBy when the drone is actually removed, which for a damage abort is IdleDespawnSec
+            // after this runs.
+            _owed = OwedFrom(_qi, _queue != null ? _queue.Count : 0);
             _dmgSeenAt = -1;         // re-arm the damage hold; it is per-card state like _placed
             _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
             IndexCard();             // drops the caches with the card, so a stale ETA cannot outlive it
@@ -2309,10 +2420,23 @@ namespace NuclearOptionMouseAim
                 // the reset actually wrote, and the multiple is recoverable anyway (the card is named
                 // in the header and the sidecar records this airframe's `cornerSpeed`). No new column
                 // and no new key for a number two existing artifacts already pin down between them.
+                // THE RESPAWN FLAG LIVES HERE AND NOWHERE ELSE (v1.0.2). `# entry` is the per-replicate
+                // record of what the reset had to undo, and "this replicate was flown by a REPLACEMENT
+                // airframe" is exactly that kind of provenance — not a law setting (`# config`) and not
+                // an airframe capability (the `.airframe.json` sidecar, which is identical: a respawn is
+                // a fresh spawn of the same jsonKey, so every number in it would repeat and none of them
+                // would say so). Emitted only when it is non-zero, so an undamaged lane's captures stay
+                // byte-identical and `index-captures.py`'s generic `key=value` scan simply gains an
+                // `entry_respawn` column on the ones that need it.
+                // The other half of the tell is already free: this is the lane's FIRST placement on new
+                // metal, so `_anchorSet` is false and `snapBackM` reads ~0 exactly as a warm-up
+                // replicate does — a respawned lane's resumed replicate is anchor-CAPTURING, not
+                // snapping back, and that is a real (documented) difference in its entry condition.
                 _rec.EntryNote =
                     $"v={v0:0.0}->{vTgt:0.0} alt={alt0:0.0}->{altTgt:0.0} "
                     + $"snapBackM={snapBack:0.0} fuel={(fuel0 >= 0f ? fuel0.ToString("0.000") : "-")}->"
-                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1";
+                    + $"{(fuelTgt > 0f ? fuelTgt.ToString("0.000") : "-")} ctrlReset=1"
+                    + (_respawn > 0 ? $" respawn={_respawn}" : "");
                 // The log line DOES name the multiple: it is the operator-facing confirmation that the
                 // card drove the number, and "180 m/s" alone reads identically whether it came from a
                 // corner multiple, an absolute startSpeed or a fallback.

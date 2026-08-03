@@ -670,6 +670,13 @@ Machine-specific paths are written as placeholders:
       *with* the code: **`SPEC-GRAMMAR`** (`SplitSpec`, checked by `debugtests/test-spec-grammar.py`)
       and **`FLEET-RESOLVE`** (`ResolveCount` + `CountKeys`, checked by
       `debugtests/test-fleet-resolve.py`).
+    - **`LANE-CONTINUITY` (v1.0.2)** — a fourth such region: `MaxLaneRespawns` + `OwedFrom` +
+      `RespawnAt`, the arithmetic behind respawning a drone lane whose aircraft died, checked by
+      `debugtests/test-lane-respawn.py` (which compiles it **together with** `ARM-SCHEDULE`, because
+      the property is compositional). `OwedBy(aircraftId)` beside it is the harness's read of it, and
+      `_owed` is the field that survives `Finish` nulling `_queue` — it is in
+      `check-architecture.py`'s per-run allowlist for that reason. `StartSuite` gained
+      `(startAt, respawn)`, both defaulting to a fresh lane. See `ARCHITECTURE.md` L1.6 v1.0.2.
   - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81 harness, **v0.87 phase 2**).
     Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger, and since **v0.98** N *fleets* one after another, unattended
@@ -736,6 +743,18 @@ Machine-specific paths are written as placeholders:
       drone keeps a full complex-physics aero job and all three per-aircraft registries alive — the
       same frame budget the stagger protects and `frameMs` measures. `Despawn` now takes a reason and
       logs it.
+    - **A lane that loses its AIRCRAFT is respawned (v1.0.2).** `LaneLost(d, reason)` sits on **both**
+      removal paths and in both **before `ForgetState`** — that is what aborts the card and nulls
+      `_queue`, and `_queue` is the only record of what the lane still owed. It asks the card player
+      (`ScenarioPlayer.OwedBy`), and if the lane owes replicates the dead `Drone` is queued on
+      `_relaunch`; `FixedTick` drains it through **`LaunchLane(slot, resumeAt, respawns)`** — the same
+      shared lane path a first launch takes, so the replacement returns on its own azimuth, deck,
+      airframe and per-lane entry speed. It is **not** just about lost data: replicates are armed ABBA
+      and indexed by the lane's own queue position, so a lane that dies mid-sequence leaves *its own*
+      A/B truncated and leaning, and nothing warns. Bounded by `MaxLaneRespawns` (2, a `const`) with a
+      loud warning at the cap; `DespawnAll` sets `_cancelling` because the panic key is an abort, not a
+      pause; anything reporting a `Player` is refused outright. Captures say so via `respawn=N` on the
+      `# entry` line. Checked by `debugtests/test-lane-respawn.py`.
     - **A shot-down drone is caught in `OnPilotStep`, not `PruneDead`.** `PruneDead`'s predicate is
       `Aircraft == null || Aircraft.disabled`, and the game **never self-disables an `Aircraft` on
       damage**: `Unit.disabled` is written only by `ServerDisableUnit`/`ReturnToInventory`/`OnDestroy`,
@@ -1407,6 +1426,18 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   asserted balanced. Stdlib only, no
   SDK. Run it after touching the lane geometry — reverting to a `Vector3` compiles fine and writes a
   batch that scores fine.
+- **Dead-lane respawn (v1.0.2).** `python debugtests/test-lane-respawn.py` compiles the
+  `LANE-CONTINUITY` **and** `ARM-SCHEDULE` regions of `ScenarioPlayer.cs` together, because the
+  property is compositional and neither piece can state it alone: **a lane that loses its aircraft at
+  any replicate and resumes where it left off flies the same complete, balanced arm sequence an
+  undamaged lane would have** — same queue indices, same per-card A/B counts *and* mean positions,
+  nothing re-flown, nothing skipped. Plus the **hard cap**: a lane that dies on every replicate must
+  relaunch exactly `MaxLaneRespawns` times, not sixteen (R41's `UtilityHelo1`). Plus five source
+  asserts the arithmetic cannot make about itself — `TestDrone.LaneLost` still asks the card player,
+  **both** removal paths ask it *before* `ForgetState` (which nulls the queue that holds the answer),
+  the respawn reuses `LaunchLane` rather than a second spawn site, `DespawnAll` guards with
+  `_cancelling`, and the resume actually reaches `StartSuite`. Run it after touching the despawn
+  paths, the lane spawn path, or the arm schedule.
 - **Card (de)serialisation (v0.90.1).** `python debugtests/test-card-model.py` does the same trick to
   the `CARD-MODEL` region of `ScenarioPlayer.cs`: extracts the three model classes verbatim, compiles
   them against the game's `Newtonsoft.Json.dll`, and round-trips **every file in `cards/`**. It exists

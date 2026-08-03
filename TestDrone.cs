@@ -597,6 +597,13 @@ namespace NuclearOptionMouseAim
         // =========================================================================================
         public static void FixedTick()
         {
+            // BEFORE the interlock below, and that is deliberate: a lane relaunched here is in `_live`
+            // by the time the `else` arm is evaluated, so the batch queue cannot step to the next fleet
+            // while a lane of THIS one still owes replicates. Drained here rather than spawned at the
+            // despawn because both callers of LaneLost are mid-walk over `_live` (PruneDead walks it
+            // backwards; Despawn removes from it), and adding an entry underneath an index walk is how
+            // one gets skipped.
+            if (_relaunch.Count > 0) RelaunchOwedLanes();
             if (_pending > 0) LaunchDue();
             if (_live.Count > 0) PruneDead();
             // Sky completely empty — nothing alive, nothing still staggering in. That is the ONLY
@@ -647,8 +654,22 @@ namespace NuclearOptionMouseAim
             if (Time.time < _nextAt) return;
             _nextAt = Time.time + Mathf.Max(0f, Cfg.DroneStaggerSec.Value);
             _pending--;
+            LaunchLane(_slot++, 0, 0);
+        }
 
-            string key = AirframeForLane(_slot);
+        // ONE LANE: LAID OUT, GATED AND SPAWNED. Split out of LaunchDue in v1.0.2 so the respawn path
+        // reuses the WHOLE thing — ring geometry, deck assignment, per-lane airframe, per-lane entry
+        // speed, the envelope gate and the skip-or-cancel refusal policy — rather than growing a second
+        // spawn site beside it. A parallel implementation here is the one thing that would make a
+        // respawned lane's capture non-comparable with its own earlier ones, since every one of those
+        // steps is part of the entry condition.
+        //
+        // `slot` is a PARAMETER and not `_slot` for exactly that reason: a respawn re-flies the lane it
+        // lost (same azimuth, same deck, same airframe), not the next one in line. `_slot` stays the
+        // stagger's own cursor and is advanced by the caller above.
+        private static void LaunchLane(int slot, int resumeAt, int respawns)
+        {
+            string key = AirframeForLane(slot);
 
             // THIS LANE'S OUTWARD RADIAL. `u` is the unit ray at azimuth 2*pi*k/N in the ring basis;
             // it is both where the drone is placed and where it is pointed, which is the property the
@@ -664,8 +685,8 @@ namespace NuclearOptionMouseAim
             // in the case that measures: `AdvanceBatch` only ever launches into an empty sky, so a
             // batch's own fleet always has turn == 0 and sits on one exact ring. A hand-pressed
             // relaunch over a live fleet is not a measurement, and it is still not a mid-air.
-            int turn = _slot / _laneN;
-            int k    = _slot % _laneN;
+            int turn = slot / _laneN;
+            int k    = slot % _laneN;
             // DECK BY LATIN-SQUARE DIAGONAL over (roster pass, airframe) — see DeckOf. Plain
             // alternation (`k % 2`) looks right and is wrong: the airframe of lane k is `k % A`
             // (AirframeForLane wraps), so for an EVEN-length airframe list the parity of k is
@@ -696,7 +717,6 @@ namespace NuclearOptionMouseAim
             // ToLocalPosition converts it without this file needing to know whether the floating
             // origin shifts y at all (ScenarioPlayer's placement dodges the same question).
             pos.y = new GlobalPosition(0f, SpawnAlt() + deckOff, 0f).ToLocalPosition().y;
-            _slot++;
 
             // THE LANE'S OWN ENTRY SPEED (v0.93). Resolved once, here, and used by the gate and the
             // spawn velocity both — with a corner-relative card these differ per lane, and asking
@@ -719,6 +739,10 @@ namespace NuclearOptionMouseAim
             var d = EntrySpeedFlyable(key, laneSpeed)
                   ? Spawn(key, pos, laneRot, laneRot * Vector3.forward * laneSpeed)
                   : null;
+            // THE LANE IDENTITY, stamped on the way out. Same fixed step as the spawn and ahead of any
+            // pilot postfix, so `OnPilotStep` cannot read a half-identified drone: `Pilot_OnAeroInputsApplied`
+            // fires from JobManager's own pass later in the step, never re-entrantly from SpawnAircraft.
+            if (d != null) { d.Slot = slot; d.ResumeAt = resumeAt; d.Respawns = respawns; }
             if (d == null)
             {
                 // With ONE airframe the next lane fails identically (no server, bad jsonKey, no
@@ -729,11 +753,17 @@ namespace NuclearOptionMouseAim
                 if (AirframeList().Length > 1)
                 {
                     WTMouseAimPlugin.Log.LogWarning(
-                        $"[drone] lane {_slot - 1} ('{key}') was refused — skipping it; {_pending} lane(s) still to launch.");
+                        $"[drone] lane {slot} ('{key}') was refused — skipping it; {_pending} lane(s) still to launch.");
                     return;
                 }
                 _pending = 0;
-                WTMouseAimPlugin.Log.LogWarning("[drone] launch aborted — the remaining drones in this request were cancelled.");
+                // A RESPAWN carries no pending launches with it, so the fleet-wide wording would be a
+                // lie there — and the operator needs the other sentence anyway: this lane is out, and
+                // its remaining replicates are the shortfall a short capture count will show.
+                WTMouseAimPlugin.Log.LogWarning(respawns > 0
+                    ? $"[drone] lane {slot} ('{key}') was refused on respawn {respawns} — the lane is out; "
+                      + "its remaining replicates will not fly."
+                    : "[drone] launch aborted — the remaining drones in this request were cancelled.");
             }
         }
 
@@ -985,6 +1015,7 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogInfo($"[drone] #{d.Id} is gone (destroyed or disabled by the game) — deregistered.");
                     _live.RemoveAt(i);
                     _byAircraftId.Remove(d.AircraftId);
+                    LaneLost(d, "destroyed or disabled by the game");   // BEFORE ForgetState — it drops the queue
                     ForgetState(d.AircraftId);
                     continue;
                 }
@@ -1032,6 +1063,89 @@ namespace NuclearOptionMouseAim
                 if (Time.time - d.IdleSince < IdleDespawnSec) continue;
                 Despawn(d, "card finished");
             }
+        }
+
+        // =========================================================================================
+        // RESPAWNING A LANE THAT LOST ITS AIRCRAFT (v1.0.2)
+        //
+        // v0.99.1 made an abort end the REPLICATE, but only where the airframe survives (the altitude
+        // floor). Where it does not — a part fell off, the pilot was killed, the game removed the
+        // aircraft — the lane still ends, because there was nothing left to fly the rest of the queue.
+        // R41 lost 6 captures exactly that way (5 Darkreach + 1 EW1, ledger #51).
+        //
+        // The lost DATA is the smaller half: replicates are armed ABBA and indexed by the lane's own
+        // position in its own queue, so a lane that dies at replicate 3 of 9 leaves its OWN sequence
+        // truncated and unbalanced, and nothing warns — `SetUpArmSchedule` prints the schedule the lane
+        // intended to fly. See ScenarioPlayer's LANE-CONTINUITY note for the full argument.
+        //
+        // TWO CALLERS, ONE RULE, and both call it BEFORE `ForgetState`: that is what tears the card
+        // state down, and the card state is the only record of what the lane still owed.
+        // ==========================================================================================
+        // LANES OWED A REPLACEMENT. The DEAD drone is the ticket — its Slot/ResumeAt/Respawns are
+        // exactly the lane identity a replacement needs, so there is no second type for three ints and
+        // no way for a ticket to name the wrong lane. Its `Aircraft` is already gone and is never read.
+        private static readonly List<Drone> _relaunch = new List<Drone>();
+
+        // The despawn key is an ABORT, not a mishap. Without this, DespawnAll's teardown loop would
+        // route every live lane through LaneLost and queue a full fleet's worth of respawns for the
+        // panic key to be followed by — the same surprise the pending-launch cancel exists to prevent.
+        private static bool _cancelling;
+
+        private static void LaneLost(Drone d, string reason)
+        {
+            if (d == null || _cancelling || !Cfg.DroneEnabled.Value) return;
+            // YOU CANNOT RESPAWN A HUMAN. Unreachable by construction — an aircraft only enters
+            // `_byAircraftId` through `Spawn`, which destroys anything reporting a Player — but the
+            // whole crewed/uncrewed separation rests on that one assert, and this is the one place that
+            // would otherwise put NEW metal under a card run. Restated rather than assumed.
+            if (d.Aircraft != null && d.Aircraft.Player != null)
+            {
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[drone] #{d.Id} reports a Player — REFUSING to respawn its lane. A crewed card run "
+                    + "is the operator's own aircraft and the harness never replaces it.");
+                return;
+            }
+
+            int owed   = ScenarioPlayer.OwedBy(d.AircraftId);            // -1 = the lane finished its queue
+            int resume = ScenarioPlayer.RespawnAt(owed, d.Respawns);     // -1 = that, or the cap said no
+            if (resume < 0)
+            {
+                // THE CAP, SAID OUT LOUD. A lane that cannot stay airborne must not burn the batch:
+                // R41's UtilityHelo1 sank on 16 of 16 replicates, and an uncapped rule would have
+                // relaunched it sixteen times for nothing. This is the line an unattended batch has to
+                // be able to find the next morning, so it is a warning and it names the shortfall.
+                if (owed >= 0)
+                    WTMouseAimPlugin.Log.LogWarning(
+                        $"[drone] LANE {d.Slot} IS OUT — #{d.Id} ('{AirframeForLane(d.Slot)}') was lost "
+                        + $"({reason}) still owing queue index {owed} onwards, and "
+                        + $"this lane has already used its {ScenarioPlayer.MaxLaneRespawns} respawn(s). "
+                        + "Not respawning it again — the remaining replicates will NOT fly and this lane's "
+                        + "A/B is short. An airframe that dies this often is a card problem, not bad luck.");
+                return;
+            }
+
+            d.ResumeAt = resume;
+            d.Respawns++;
+            _relaunch.Add(d);
+            WTMouseAimPlugin.Log.LogWarning(
+                $"[drone] lane {d.Slot} lost #{d.Id} ({reason}) — RESPAWNING it (respawn {d.Respawns} of "
+                + $"{ScenarioPlayer.MaxLaneRespawns}) to resume at queue index {resume}. The replicate that "
+                + "died is still an abort and its capture still says so; the rest of the lane's queue flies "
+                + "on fresh metal, which is what keeps its ABBA sequence complete.");
+        }
+
+        // Drained once per fixed step, ahead of everything else — see FixedTick. LaunchLane, not a
+        // second spawn path: the lane comes back on its own azimuth, its own deck, its own airframe and
+        // its own entry speed, which is the whole reason its capture is comparable with the ones the
+        // lost aircraft already wrote.
+        private static void RelaunchOwedLanes()
+        {
+            for (int i = 0; i < _relaunch.Count; i++)
+            {
+                var d = _relaunch[i];
+                LaunchLane(d.Slot, d.ResumeAt, d.Respawns);
+            }
+            _relaunch.Clear();
         }
 
         // EVERY per-aircraft subsystem the mod keeps, dropped in one place. Called from BOTH removal
@@ -1200,6 +1314,10 @@ namespace NuclearOptionMouseAim
             if (d == null) return;
             _live.Remove(d);
             _byAircraftId.Remove(d.AircraftId);
+            // BEFORE ForgetState, which aborts the card and drops the queue — and the queue is the only
+            // record of what this lane still owed. A lane that finished its queue owes nothing and this
+            // is a no-op, which is why the ordinary "card finished" despawn is unaffected.
+            LaneLost(d, reason);
             ForgetState(d.AircraftId);
             var ac = d.Aircraft;
             if (ac == null) return;
@@ -1231,7 +1349,14 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogInfo($"[drone] cancelling {_pending} pending launch(es).");
                 _pending = 0;
             }
-            for (int i = _live.Count - 1; i >= 0; i--) Despawn(_live[i]);
+            // THE PANIC KEY IS AN ABORT, NOT A MISHAP (v1.0.2). Without this every lane torn down below
+            // would route through LaneLost still owing replicates, and the key that clears the sky would
+            // be followed one fixed step later by a fleet respawning itself — the same surprise the
+            // pending-launch cancel above exists to prevent. Cleared in a finally so a throwing Despawn
+            // cannot leave the harness permanently unable to respawn anything.
+            _cancelling = true;
+            try { for (int i = _live.Count - 1; i >= 0; i--) Despawn(_live[i]); }
+            finally { _cancelling = false; _relaunch.Clear(); }
             // AFTER the despawn loop, and that order is the whole reason it is not one line higher.
             // Restoring writes a ConfigEntry, which fires SettingChanged, which stamps a '# cfg' line
             // into every capture still OPEN — and until the loop above has run, every live drone still
@@ -1308,10 +1433,13 @@ namespace NuclearOptionMouseAim
                 // ponytail: fire-and-forget, one attempt. A drone whose suite finishes despawns itself
                 // `IdleDespawnSec` later — see PruneDead, which owns that clock because it is the one
                 // thing that runs every fixed step regardless of which `Fly` delegate is installed.
+                // v1.0.2: `ResumeAt`/`Respawns` are 0 for a fresh lane, so this is the same call it
+                // always was; on a REPLACEMENT they carry the lane's queue position forward, which is
+                // what makes the respawned aircraft finish the lane's sequence rather than restart it.
                 if (!d.CardStarted)
                 {
                     d.CardStarted = true;
-                    sp.StartSuite(ac);
+                    sp.StartSuite(ac, d.ResumeAt, d.Respawns);
                 }
 
                 // TEST-CARD DEMAND (v0.86) — THIS drone's card, ticked HERE so it gets the same
@@ -1467,6 +1595,14 @@ namespace NuclearOptionMouseAim
         // note at the guard in TestDrone.OnPilotStep. Per drone because the seats of one aircraft are
         // what collide, and -1 rather than 0 so the very first fixed step of a session is not eaten.
         public float LastStep = -1f;
+
+        // --- LANE IDENTITY (v1.0.2). What a replacement aircraft needs to BE this lane again; see
+        // TestDrone.LaneLost. Written by LaunchLane immediately after the spawn (same fixed step,
+        // before any pilot postfix can read them) rather than taken as ctor arguments, because Spawn
+        // is the crewed/uncrewed gate and its shape is asserted by check-architecture.py.
+        public int Slot;        // the ring slot this lane was laid out on — same azimuth, same airframe
+        public int ResumeAt;    // queue index the suite starts at: 0 for a fresh lane, the lost aircraft's next replicate otherwise
+        public int Respawns;    // how many times THIS LANE has been replaced; the cap counts the lane, not the aircraft
 
         // WHAT FLIES THIS DRONE. Return true if inputs were written (the caller then runs the game's
         // FBW over them), false to leave this tick alone. It lives HERE, per drone, rather than as one
