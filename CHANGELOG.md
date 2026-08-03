@@ -5,7 +5,9 @@ All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMous
 
 ## 1.0.3 — the test card is the single source of truth for every run parameter
 
-> Harness only. **No control-law change, no recorder columns added, moved or removed.**
+> Harness only. **No control-law change, no recorder columns added, moved or removed.** Builds on
+> v1.0.2's collective hold and dead-lane respawn; the run board fix matters more with respawn,
+> since the row that shows a lane coming back is the row that was not drawn.
 
 
 **A card whose meaning depends on unstated F1 state is not a repeatable experiment.** Two failures in
@@ -36,14 +38,51 @@ same rule `AirframeOf`/`AltOf`/`SpeedOf` have followed since v0.90.
 string, so a card that is simply not an A/B inherited whatever `ScenarioArmToggle` was left holding.
 That is the R41 failure one field over.
 
-### All 39 shipped cards migrated
+### All 39 shipped cards migrated — to what they FLEW, not to the shipped default
 
-Each now declares what it used to inherit, **at the shipped `Cfg` defaults**, so they fly exactly what
-they flew before: roster (the four `sweep-*` cards were falling through to `DroneAirframe`), `repeat`,
-`armToggle`, and `config[]` pins for `ScenarioThrottle`, `ScenarioEntryFuel`, `ScenarioForceEntry`,
-`DroneAltDeckM` and `DroneStaggerSec` — plus the `HeliForwardSpeed`/`HeliHoverSpeed` pair on the four
-rotorcraft cards. `check-card.py` gained **CHECK 6**, which **FAILS** (not warns) a card that leaves
-any of them undeclared; its lane/cost model reads the card's declared deck and stagger rather than the
+Each now declares what it used to inherit: roster (the four `sweep-*` cards were falling through to
+`DroneAirframe`), `repeat`, `armToggle`, and `config[]` pins for `ScenarioThrottle`,
+`ScenarioEntryFuel`, `ScenarioForceEntry`, `DroneAltDeckM` and `DroneStaggerSec` — plus the
+`HeliForwardSpeed`/`HeliHoverSpeed` pair on the four rotorcraft cards.
+
+**The value is the one the corpus shows the card flew.** Declaring the shipped default everywhere was
+the first attempt and it was wrong in exactly the way this release exists to prevent: the shipped
+`DroneAltDeckM` is 3000, the live config held **0**, and a uniform 3000 would have split 35 fleets
+over two decks and broken comparability with their own archived captures — silently, scoring fine.
+`captures.db` (3083 captures, 33 batches) answers it directly: `entry_alt_from` on a run's **first**
+placement is the spawn altitude, `SpawnAlt() + deckOff`. (`entry_alt_to` cannot answer it —
+`PlaceOnCondition` snaps every lane to the card's own `startAlt`, so it is the declared number by
+construction.) One altitude across lanes = deck 0; a symmetric ±N/2 split = deck N; and the knob did
+not exist before v0.99, so any batch at v0.98.1 or earlier flew one deck whatever it reads today.
+
+| declared | cards | evidence |
+|---|---|---|
+| **3000** | `alpha-pullup`, `place-noop`, `place-deflect` | corpus — R40 (v0.99.1): 10 lanes 6500…9500 about 8000 m; 2500…5500 about 4000 m; and `place-deflect`'s single lane at 2500 against `startAlt` 4000, the lower deck of a 3000 spread, pinned by its same-batch sibling |
+| **3000** | `hs-hold` | design — never flown, and its own note requires the spread for its q-contrast factor (2500/5500 m, 59.5 vs 43.5 kPa, crossed with airframe) |
+| **0** | the other 35 | corpus — R41/R42 flew every lane at exactly `startAlt` (spread 0); everything else last flew at v0.98.1 or earlier. `oblique-above-c` has never flown and takes 0 by design: it exists to match `oblique-below-c`'s **mean** altitude for a comparable mean q. `rotor-hover`'s and both `stol-*` notes already said *"SET `Drone/DroneAltDeckM` = 0"* — the corpus agrees with the card authors, and the shipped default disagreed with both |
+
+The same test on the other knobs, from the `thr` recorder column over every capture of each card's
+newest batch, `entry_fuel_to`, and the `# override` header:
+
+* **throttle** — `alpha-sweep` flew `thr` 1.000 on every row of R39, not the 0.70 default:
+  **corrected to 1.00**. Every other card matches what it already declared. The three declared hovers
+  read 0.600, which is `TestDrone.HoldThrottle` and **not** evidence about `ScenarioThrottle` — a
+  declared hover never applies it (`OwnInputs` bails at `EntrySpeed <= 0`). They keep 0.70 and their
+  notes now say it is inert.
+* **fuel** — all 2872 captures carrying an `# entry` line flew 1.0. Corpus-confirmed, not assumed.
+* **ForceEntry** — every drone capture has an `# entry` line (so the placement ran) except the two
+  R39 declared-hover captures, which skip placement by design. `true` stands.
+* **stagger** — no header records it. The shipped 3 s stands; it is the one value in the inventory
+  with no corpus evidence behind it, and this line is the record of that.
+* **`HeliForwardSpeed`/`HeliHoverSpeed`** — the corpus flew **150/40**, the stale v0.43 pair, on every
+  batch through R41, and 60/20 only in R42, after R41's verdict was withdrawn. The rotor cards keep
+  **60/20**: declaring what the corpus shows would re-enshrine the configuration that killed the batch.
+
+Every card whose declared value differs from the shipped default carries one sentence in its `note`
+naming the value and the evidence, so nobody has to re-derive it from a 563 MB database.
+
+`check-card.py` gained **CHECK 6**, which **FAILS** (not warns) a card that leaves any inventory
+parameter undeclared; its lane/cost model reads the card's declared deck and stagger rather than the
 globals, and the run-level "`DroneAltDeckM` applies to every card below" banner is gone, because it is
 no longer true of a card that declares its own.
 
