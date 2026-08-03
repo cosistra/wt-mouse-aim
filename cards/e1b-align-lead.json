@@ -3,7 +3,7 @@
   "cls": "Plane",
   "step": 0.02,
   "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, EW1, FastBomber1, Darkreach",
-  "note": "E1b: oblique-below's geometry, unchanged, with Control/AlignRateLead swept ABBA. Its own card and not an extra arm on e1-below-suppress because GENERALITY-REVIEW finding 17 shows the lead is also a roll-DAMPING change (effective roll-rate feedback x1.00 at blendWeight 0 rising to x1.64 at 1, measured mean x1.39 on elDn) - armed together with the below-suppression the two are unattributable. PASS: the on arm lowers the roll-axis transient - overshootAzDeg and stickFlipRateR on the below-nose segments - without paying for it in terminalOffDeg. FAIL: the on arm raises stickFlipRateR or wobbleEpisodes, i.e. the damping side effect is what the knob actually does, in the one segment where blendWeight is modulated at the frequency of the cycle it damps. FLEET since v0.94: per-aircraft arm state, so every lane runs its own independent ABBA (8 lanes x repeat 8 = 64 runs, same wall clock as one lane) - and a roll-damping knob is exactly the kind whose answer should not be one airframe's inertia. AIRFRAME: the eight fixed-wing keys that clear the v0.92 envelope gate (1.10x Vstall .. 0.95x Vmax) at this card's 250 m/s. CAS1 (0.95x Vmax = 195.3), COIN (134.6) and all three rotorcraft would be refused pre-spawn and are left out rather than shipped as guaranteed refusal lines.",
+  "note": "E1b: oblique-below's geometry, unchanged, with Control/AlignRateLead swept ABBA. Its own card and not an extra arm on e1-below-suppress because GENERALITY-REVIEW finding 17 shows the lead is also a roll-DAMPING change (effective roll-rate feedback x1.00 at blendWeight 0 rising to x1.64 at 1, measured mean x1.39 on elDn) - armed together with the below-suppression the two are unattributable. PASS: the on arm lowers the roll-axis transient - overshootAzDeg and stickFlipRateR on the below-nose segments - without paying for it in terminalOffDeg. FAIL: the on arm raises stickFlipRateR or wobbleEpisodes, i.e. the damping side effect is what the knob actually does, in the one segment where blendWeight is modulated at the frequency of the cycle it damps. FLEET since v0.94: per-aircraft arm state, so every lane runs its own independent ABBA (8 lanes x repeat 8 = 64 runs, same wall clock as one lane) - and a roll-damping knob is exactly the kind whose answer should not be one airframe's inertia. AIRFRAME: the eight fixed-wing keys that clear the v0.92 envelope gate (1.10x Vstall .. 0.95x Vmax) at this card's 250 m/s. CAS1 (0.95x Vmax = 195.3), COIN (134.6) and all three rotorcraft would be refused pre-spawn and are left out rather than shipped as guaranteed refusal lines. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: R41 (v1.0.0) flew this card's 8 lanes at ONE spawn altitude (6000 m, spread 0), not the 3000 m shipped default.",
   "startSpeed": 250,
   "startAlt": 6000,
   "repeat": 9,
@@ -12,7 +12,7 @@
     { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
     { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
     { "key": "Scenario/ScenarioForceEntry", "value": "true" },
-    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
     { "key": "Drone/DroneStaggerSec", "value": "3" }
   ],
   "segments": [

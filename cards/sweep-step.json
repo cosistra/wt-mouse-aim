@@ -3,7 +3,7 @@
  "cls": "Plane",
  "step": 0.02,
  "airframe": "Multirole1",
- "note": "Entry state = FROM AN ESTABLISHED TURN, on the 4.5 deg/s gap-band sweep. The +6 deg step pushes the standing ~3.5 deg lag ACROSS EvolvedAlignHoldDeg=5.0 into the latch; the -6 deg step pulls it back out. That regime asymmetry is the measurement, not a flaw in the pair - read blendRailPct per segment. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+ "note": "Entry state = FROM AN ESTABLISHED TURN, on the 4.5 deg/s gap-band sweep. The +6 deg step pushes the standing ~3.5 deg lag ACROSS EvolvedAlignHoldDeg=5.0 into the latch; the -6 deg step pulls it back out. That regime asymmetry is the measurement, not a flaw in the pair - read blendRailPct per segment. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: this card last flew in R27 (v0.90.1), before Drone/DroneAltDeckM existed (v0.99), so every lane flew one deck.",
  "startSpeed": 250,
  "startAlt": 4000,
  "repeat": 1,
@@ -12,7 +12,7 @@
   { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
   { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
   { "key": "Scenario/ScenarioForceEntry", "value": "true" },
-  { "key": "Drone/DroneAltDeckM", "value": "3000" },
+  { "key": "Drone/DroneAltDeckM", "value": "0" },
   { "key": "Drone/DroneStaggerSec", "value": "3" }
  ],
  "segments": [

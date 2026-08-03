@@ -3,7 +3,7 @@
   "cls": "Plane",
   "step": 0.02,
   "airframe": "Fighter1, Multirole1, FastBomber1",
-  "note": "ORDER CONTROL for the R28 down-step penalty (F1 in R28-FINDINGS.md): stepping the nose DOWN leaves 1.2-17.9x the terminal error of the mirrored UP step, universal on 7 of 8 airframes at 20-1000x the noise floor. Every oblique card in the grid traverses N->E->S->W->N, so the two DOWN legs are ALWAYS segments 2-3 and the two UP legs ALWAYS 4-5 -- direction is perfectly confounded with position in the card. R28 could exclude energy and elevation but NOT order. This pair breaks the confound by flying the identical diamond in both traversal directions in ONE batch, same session, same airframes. THIS IS THE FORWARD ARM: down legs first, identical to 'oblique-12' except for the 3-airframe fleet. Read against 'oblique-12-rev'.",
+  "note": "ORDER CONTROL for the R28 down-step penalty (F1 in R28-FINDINGS.md): stepping the nose DOWN leaves 1.2-17.9x the terminal error of the mirrored UP step, universal on 7 of 8 airframes at 20-1000x the noise floor. Every oblique card in the grid traverses N->E->S->W->N, so the two DOWN legs are ALWAYS segments 2-3 and the two UP legs ALWAYS 4-5 -- direction is perfectly confounded with position in the card. R28 could exclude energy and elevation but NOT order. This pair breaks the confound by flying the identical diamond in both traversal directions in ONE batch, same session, same airframes. THIS IS THE FORWARD ARM: down legs first, identical to 'oblique-12' except for the 3-airframe fleet. Read against 'oblique-12-rev'. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: this card last flew in R31 (v0.94.0), before Drone/DroneAltDeckM existed (v0.99), so every lane flew one deck.",
   "startSpeed": 250,
   "startAlt": 4000,
   "repeat": 8,
@@ -12,7 +12,7 @@
     { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
     { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
     { "key": "Scenario/ScenarioForceEntry", "value": "true" },
-    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
     { "key": "Drone/DroneStaggerSec", "value": "3" }
   ],
   "segments": [

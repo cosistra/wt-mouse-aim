@@ -3,7 +3,7 @@
  "cls": "Plane",
  "step": 0.02,
  "airframe": "Multirole1",
- "note": "THE MEASUREMENT-GAP CARD. Sustained demand at 4.5 deg/s: expected standing lag ~3.5 deg, i.e. ABOVE FineBankDeadzone=2.5 (roll fully live) and BELOW EvolvedAlignHoldDeg=5.0 (lateralHold not railed, so eFine and the whole fine bank pipeline still carry weight). Every sustained capture on file sits on the latched side of that rail; this is the band nobody has flown. Confirm with blendRailPct ~ 0 and mean |azErr| in 2.5..5 - if it strays outside, the run is a different regime, not a worse one. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition.",
+ "note": "THE MEASUREMENT-GAP CARD. Sustained demand at 4.5 deg/s: expected standing lag ~3.5 deg, i.e. ABOVE FineBankDeadzone=2.5 (roll fully live) and BELOW EvolvedAlignHoldDeg=5.0 (lateralHold not railed, so eFine and the whole fine bank pipeline still carry weight). Every sustained capture on file sits on the latched side of that rail; this is the band nobody has flown. Confirm with blendRailPct ~ 0 and mean |azErr| in 2.5..5 - if it strays outside, the run is a different regime, not a worse one. Generated - see cards/README.md. AIRFRAME: any jet at the fixedwing-v2 entry condition. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: this card last flew in R27 (v0.90.1), before Drone/DroneAltDeckM existed (v0.99), so every lane flew one deck.",
  "startSpeed": 250,
  "startAlt": 4000,
  "repeat": 1,
@@ -12,7 +12,7 @@
   { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
   { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
   { "key": "Scenario/ScenarioForceEntry", "value": "true" },
-  { "key": "Drone/DroneAltDeckM", "value": "3000" },
+  { "key": "Drone/DroneAltDeckM", "value": "0" },
   { "key": "Drone/DroneStaggerSec", "value": "3" }
  ],
  "segments": [
