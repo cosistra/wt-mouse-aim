@@ -44,6 +44,7 @@ Then, in order:
 | **W6** | `terminalOffDeg` + the whole g family are lane-distance artifacts and are still un-caveated | instrument gap | docstrings only, ~20 lines |
 | **W7** | FastBomber1 runs 4–10x hotter in steady-state pitch than the fleet, in every batch, for six mod versions | open, unexplained | re-measure on the t-cards |
 | **W8** | The `_pitchEff` estimator's noise gate is an absolute rad/s constant | ONE-LAW smell, measured inert | one line in `GENERALITY-REVIEW.md` |
+| **W9** | **NEW 2026-08-02** — `_iYaw`/`_iPitch` **leak**, so they have finite DC gain and cannot null a standing external bias; the game's rotorcraft weathervane supplies exactly such a bias above 40 m/s | structural, measured (R42, closed-form) | code, but **not yet** — the discriminating card is `LAW-CHARACTERIZATION.md` §7 rotorcraft (d); ledger **H7** |
 
 And the standing hole that dwarfs all of them: **two of the four airframe cases the ONE-LAW rule names
 — the low-limit STOL trainer and the hovering helo — have essentially no drone data on the current law.**
@@ -138,6 +139,16 @@ the roll, bank-target and settle path is a fixed number: `kSettle = 8f`, `settle
 - **Frequency is amplitude-invariant** across a 9x amplitude range, two cards and four mod versions —
   the signature of a lightly damped *linear* mode (plant + fixed-gain loop), which is exactly what an
   unscheduled loop against a heavy plant produces.
+- **NEW, R43 (v1.0.3): the unscheduled roll loop DOES scale with q, and it is measurable well before
+  it is dangerous.** 48 settled tails at **q 71.6–112.3 kPa** — four to five times the corpus's
+  previous peak of 25.6 — give Spearman(q, `outR` sd) = **+0.891** within `Multirole1` (sd 0.0012 →
+  0.0045 across 87.6 → 112.3 kPa, i.e. ~3.5× amplitude for 1.28× q, steeper than linear), **+0.638**
+  `Fighter1`, **+0.141** `SmallFighter1`, **+0.481** pooled. That is the fixed derivative gain acting
+  on a plant whose authority grew, exactly as this weakness predicts — **but the absolute amplitude is
+  ~1/1000 of a limit cycle** (`outR` sd 0.0007–0.0045 against a 0.05 fail threshold, 0 wobble episodes
+  on 48/48). So W2 is confirmed in *mechanism* and remains structural; it is not currently a
+  user-visible defect on any airframe the harness can fly. `LAW-LEDGER.md` **O11**,
+  `GENERALITY-REVIEW.md` finding 5.
 - Darkreach is also the only airframe with a 0% `settleTime95` rate (0/40 across R35/R36/R37; 0/16 in
   R37 alone) and the only one whose fitted terminal asymptote clears the recorder quantum
   (A = 0.065°, 2.8x the next-worst).
@@ -474,6 +485,34 @@ per-plane tuning gets in.
 
 ---
 
+## W9 — the yaw integrator LEAKS, so it cannot null a standing external bias — and the game supplies one
+
+**Claim.** `_iYaw` is a *leaky* integrator (`ChaseController.cs:1551`, `leak = 0.5`), which gives it
+finite DC gain: against a **constant** disturbance it settles at `input/leak` and leaves the error
+standing, where a pure integrator would walk until the error is zero. That is not a tuning question,
+it is the structure — and the game hands the rotorcraft branch exactly such a disturbance.
+`HeloFlyByWire`'s weathervane adds `0.1 · beta_deg · 0.4 · clamp01((speed − 40)/20)` to the yaw **rate
+error** (`:36028`/`:36031`/`:36034`, applied `:36047-36052`) behind a compensator that *is* a pure
+integrator (`:36053`). Two integrators, opposite properties, and the leaky one loses.
+
+**Evidence.** R42 `AttackHelo1 rotor-bistab`, settled window, n=8 per tag: on all five tags above
+40 m/s `_iYaw` sits at **0.032–0.040** — its leak equilibrium, **not** the 0.12 cap — while the
+pointing error parks at **1.5–2.5°**, achieved `|yawRate|` **0.001–0.002 °/s** and the nose holds
+**24–40° of sideslip**. The closed form predicts `beta` to 0.8–5.7% on 5 of 5 and `off` to 0.4% with no
+free parameters. `LAW-LEDGER.md` **H7**; the two candidate fixes and why R42 cannot choose between them
+are in `LAW-CHARACTERIZATION.md` §7 rotorcraft **(d)**.
+
+**Scope, honestly.** Measured on one airframe in one batch, and the *disturbance* is rotorcraft-only.
+The **structure** is not: `_iYaw` and `_iPitch` share the leak, so any standing bias the fixed-wing
+plant carries (trim asymmetry, an unmodelled store, a crosswind term) has the same fate and nothing in
+the corpus would separate it from "the law just does not close". **Do not raise `iCap` to chase this** —
+the cap is not what binds; it is 3× above where the term settles.
+
+**Status.** OPEN, structural, one batch. Rank: below W2, above W8 — it has a measured effect size and a
+closed form, but the fix touches an integrator every axis shares.
+
+---
+
 # REFUTED / DO NOT RE-PROPOSE
 
 Each of these was proposed with evidence, attacked by a dedicated agent, and did not survive. **The
@@ -687,6 +726,20 @@ a probed 9.0 limit) is inflated **1.42%** and flips nothing. The artifact is als
 multiplicative: subtracting `gJitterG` at a coefficient of 1.0 collapses the distance correlation from
 +0.767 to −0.004.
 
+### R24. "The rotorcraft standing residual is the MOD de-rating both turn channels at once" (`yawWeakFade` + `tBankE *= (1 − heliBlend)`)
+Proposed as `LAW-LEDGER.md` **L15**, the candidate mechanism for H7, and it is wrong on both halves.
+(a) **The yaw de-rater is not in the loop.** `yawWeakFade` and `HeliYawScale` are bypassed whenever
+`_collective && _heloOk` — `ChaseController.cs:1994-1996` takes the normalized rate-command branch
+instead — and `heloOk = 1.00` on **every R42 row**, so a saturated `_yawWeak` on a rotorcraft is pure
+readout with nothing downstream of it (L12's tautology, now with no consumer). (b) **The bank half is
+refuted by its own batch, in the wrong direction.** `hoverstep5` carries `heliBlend = 0.985` — 98.5% of
+`tBankE` removed, the most de-rated bank channel in the batch — and it is the tag that **converges, to
+0.025°**. Maximum de-rating, best convergence. **What it actually is:** the game's `yawWeathervane`
+biasing the yaw rate error above 40 m/s, against a leaky mod integrator (**W9**, ledger **H7**), which
+predicts every tag closed-form with no free parameters. The general lesson is the one this file keeps
+re-learning: **a de-rater that correlates with a bad outcome is not thereby its cause — check first
+whether the branch you are blaming even executes.**
+
 ---
 
 # WHAT WE STILL CANNOT SEE
@@ -694,7 +747,13 @@ multiplicative: subtracting `gJitterG` at a coefficient of 1.0 collapses the dis
 Questions the current corpus and instrumentation **cannot answer at all**, in rough order of how much
 they matter. These are not open findings; they are blind spots.
 
-**1. Rotorcraft and STOL — half the ONE-LAW rule has no data.** The standing rule names four cases: a
+**1. Rotorcraft and STOL — half the ONE-LAW rule has no data.** ~~*(the paragraph below)*~~ **STALE —
+see the TL;DR correction block: all four cards flew (R39, R41, R42) and rotorcraft now has 3 batches,
+a working probe (`heloOk = 1`), a scoreable residual with a closed-form mechanism (ledger H7, W9) and
+an identified tiltwing bug (ledger O13). What is STILL true of this paragraph: two of three rotorcraft
+cannot hold altitude on the hover cards (ledger H5), so ONE-LAW case 4 — an airframe that genuinely
+hovers — still rests on `QuadVTOL1` alone, and STOL is still unmet (ledger X25).** The standing rule
+names four cases: a
 light jet at high q, a loaded jet mushing near its alpha limit above corner, **a low-limit STOL trainer**,
 and **a hovering helo**. The first two are covered. For the other two: `rotor-hover`, `rotor-bob`,
 `stol-steps` and `stol-sweep` have **zero captures each, ever**. `AttackHelo1` has **1 capture in 2,181**,

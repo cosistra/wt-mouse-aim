@@ -1,7 +1,7 @@
 # `captures.db` — the flight-capture index, for an agent who has never seen this repo
 
 `debugtests/captures.db` is a SQLite index over every recorder CSV the mod has ever written
-(**3083 captures / 13263 segments / ~2.59M recorder rows / 33 non-NULL run tags as of R42,
+(**3098 captures / 13326 segments / ~2.61M recorder rows / 34 non-NULL run tags as of R43,
 2026-08-02** — the older "2576 / 11015 / ~2.12M as of R40" and "1604 / 7081 / ~954k as of R32" figures
 are retired; re-derive with `--stats` rather than trusting any number written here). It exists so a
 question spanning
@@ -29,18 +29,18 @@ that section (`Read` with `offset`/`limit`, or grep the heading).
 | the two rules that stop wrong answers | [The two rules](#the-two-rules) | 51 |
 | just run something | [the three built-in commands](#start-here-the-three-built-in-commands) | 68 |
 | **what a run tag flew, where its findings went** | [The batch index](#the-batch-index--what-each-run-tag-flew-and-where-its-conclusions-live) | 95 |
-| where a new analysis should land | [The doc convention](#the-doc-convention--batch-analyses-update-standing-docs) | 140 |
-| **column reference** — one row per CSV | [`captures`](#captures--one-row-per-csv-86-columns-today-the-sc_entry_ov_-ones-are-dynamic) | 165 |
-| column reference — one row per segment | [`segments`](#segments--one-row-per-capture-segment-62-columns-12-fixed--50-dynamic-metrics) | 216 |
-| raw recorder rows (opt-in) | [`rows`](#rows--raw-recorder-rows-opt-in) | 243 |
-| the card grid tables | [`cards`, `card_airframes`](#cards-card_airframes--the-card-grid-opt-in) | 250 |
-| **which metric is valid for which segment** | [The metric × segment-type matrix](#the-metric--segment-type-matrix) | 261 |
-| why my query returned NULL | [The three NULL idioms](#the-three-null-idioms) | 317 |
-| why a small effect is not real | [The resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check) | 373 |
-| which `sc_` column to join on | [The six `sc_` twins](#the-six-sc_-twins--which-one-to-join-on) | 424 |
-| **a worked query to copy** | [Cookbook](#cookbook) | 444 |
-| `--query` semantics | [`--query` behaviour](#--query-behaviour) | 601 |
-| everything that bit someone once | [Gotchas, condensed](#gotchas-condensed) | 610 |
+| where a new analysis should land | [The doc convention](#the-doc-convention--batch-analyses-update-standing-docs) | 141 |
+| **column reference** — one row per CSV | [`captures`](#captures--one-row-per-csv-86-columns-today-the-sc_entry_ov_-ones-are-dynamic) | 166 |
+| column reference — one row per segment | [`segments`](#segments--one-row-per-capture-segment-62-columns-12-fixed--50-dynamic-metrics) | 217 |
+| raw recorder rows (opt-in) | [`rows`](#rows--raw-recorder-rows-opt-in) | 244 |
+| the card grid tables | [`cards`, `card_airframes`](#cards-card_airframes--the-card-grid-opt-in) | 252 |
+| **which metric is valid for which segment** | [The metric × segment-type matrix](#the-metric--segment-type-matrix) | 263 |
+| why my query returned NULL | [The three NULL idioms](#the-three-null-idioms) | 319 |
+| why a small effect is not real | [The resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check) | 375 |
+| which `sc_` column to join on | [The six `sc_` twins](#the-six-sc_-twins--which-one-to-join-on) | 426 |
+| **a worked query to copy** | [Cookbook](#cookbook) | 446 |
+| `--query` semantics | [`--query` behaviour](#--query-behaviour) | 606 |
+| everything that bit someone once | [Gotchas, condensed](#gotchas-condensed) | 615 |
 
 > **Every trap in this schema returns a plausible number instead of an error.** If you are about to
 > write SQL, read *The two rules* and the matrix row for your metric first — that is ~60 lines, and
@@ -130,7 +130,8 @@ those citations (`H7`, `§5a`, `1d`, `F2`) were document-local and are gone; the
 | **R40** | v0.99.1 | `alpha-pullup`, `place-noop`, `place-deflect`, 109 caps | `LAW-LEDGER.md` **N2** (the law never backs off — commanding into the ceiling on 100% of gate-biting samples), **X26** (the #51 phenomenon did not reproduce; 32 clean placements) |
 | **R40** · metric repair | v0.99.1 | corpus-wide re-score, no flying | The **two corpus-wide invalidations** at the head of `LAW-LEDGER.md`, and the metric definitions in this file. Cited from `ScenarioPlayer.cs` |
 | **R41** | v1.0.0 | seven fixed-wing cards + three rotor, 451 caps | `LAW-LEDGER.md` **A1** (feed-forward off the rail), **A2** (the `e1*` nulls), **H3–H5** (rotorcraft), **I11** (the ring geometry), **X27** (replicate 1 is a different flight condition). Cited from `compare-runs.py` |
-| **R42** | v1.0.1 | the **rotor re-fly**: `rotor-hover` + `rotor-bistab` + `rotor-transition`, 3 rotorcraft, 14 lanes, 56 caps — R41's three rotor cards at the **shipped** `HeliForwardSpeed`/`HeliHoverSpeed` 60/20 instead of the stale v0.43 150/40 | `LAW-LEDGER.md` **H6** (`AttackHelo1` converges — R41's divergence was the config), **H7** (the blend-band standing residual, the first above-floor rotorcraft pointing measurement), **H2**/**H4**/**H5** amended, **L15** (candidate mechanism), **X29** (the divergence retracted), **X30** (`tiltFrac` runs backwards — O12 answered, and it corrects H3), **X31** (the `heliBlend` 0.455 arithmetic), **O13**/**O14** (new); `GENERALITY-REVIEW.md` finding 6 (consequence withdrawn, structure stands); `LAW-CHARACTERIZATION.md` §7 Tier 1(f), Tier 2, Tier 3 and the rotorcraft re-fly list. **R41 vs R42 is a clean one-knob intervention on an identical card/roster — but only on `AttackHelo1` above 20 m/s and `QuadVTOL1`'s `rotor-transition`; everywhere else both configs clamp `speedRamp` to 1.0 and the two batches are the same expression.** |
+| **R42** | v1.0.1 | the **rotor re-fly**: `rotor-hover` + `rotor-bistab` + `rotor-transition`, 3 rotorcraft, 14 lanes, 56 caps — R41's three rotor cards at the **shipped** `HeliForwardSpeed`/`HeliHoverSpeed` 60/20 instead of the stale v0.43 150/40 | `LAW-LEDGER.md` **H6** (`AttackHelo1` converges — R41's divergence was the config), **H7** (the blend-band standing residual, the first above-floor rotorcraft pointing measurement), **H2**/**H4**/**H5** amended, **L15** (candidate mechanism), **X29** (the divergence retracted), **X30** (`tiltFrac` runs backwards — O12 answered, and it corrects H3), **X31** (the `heliBlend` 0.455 arithmetic), **O13**/**O14** (new); `GENERALITY-REVIEW.md` finding 6 (consequence withdrawn, structure stands); `LAW-CHARACTERIZATION.md` §7 Tier 1(f), Tier 2, Tier 3 and the rotorcraft re-fly list. **R41 vs R42 is a clean one-knob intervention on an identical card/roster — but only on `AttackHelo1` above 20 m/s and `QuadVTOL1`'s `rotor-transition`; everywhere else both configs clamp `speedRamp` to 1.0 and the two batches are the same expression.** **RE-ANALYSED 2026-08-02 against the decompile, no new flying:** H7's mechanism is now closed-form (the game's `yawWeathervane` above 40 m/s, 5/5 tags) and **L15's "both channels de-rated" is RETRACTED** — `yawWeakFade` is bypassed on every rotorcraft row; O13 resolved (`GetAngleLimits()` innocent, the tiltwing branch is missing the `1f −`, hover reference 0.18) and X30's "monotone fall" corrected to a spawn transient. New homes: `LAW-WEAKNESS-MAP.md` **W9** (the leaky integrator) and **R24** (do-not-re-propose), `GENERALITY-REVIEW.md` findings **3** and **6**, `LAW-CHARACTERIZATION.md` §7 rotorcraft (a)/(d). |
+| **R43** | v1.0.3 | `hs-hold`, the **250–400 m/s hole** — 15 captures, **12 valid** (`Fighter1`/`Multirole1`/`SmallFighter1` × 4); `FastBomber1` killed at placement on 3/3 and retired | `LAW-LEDGER.md` **O11** (narrowed, still OPEN — the prescribed high-q test was flown and came back clean: 48 settled tails at 407–505 m/s / q 71.6–112.3 kPa, `outR` sd 0.0007–0.0045 against a 0.05 threshold, `wobbleEpisodesOutR` 0 on 48/48; what is left is the human-on-the-mouse condition a card cannot script), **X32** (`DroneAltDeckM` sets SPAWN altitude only — placement teleports every lane to the card's `startAlt`, so the card's declared 2500/5500 m q-contrast factor never existed); `GENERALITY-REVIEW.md` finding 5 (structural violation stands; the q-scaling it predicts is CONFIRMED in direction — Spearman(q, `outR` sd) +0.891 within `Multirole1` — at ~1/1000 of limit-cycle amplitude); `LAW-CHARACTERIZATION.md` §7 Tier 1 **(g)** and **(h)**; `cards/hs-hold.json` note + `cards/README.md` (card VALID but it **accelerates** — 341/352 m/s entry, 428/506/438 m/s by 90 s — and its q factor is confounded with airframe). Gotcha 16 below |
 | **Discord v0.68 field bundle** | v0.68.0 | two users, six recordings, not a batch | `LAW-LEDGER.md` **X28** (the locale formatting bug, fixed v1.0.1) and **O11** (the high-q roll limit cycle); `GENERALITY-REVIEW.md` finding 5. Cited from `WTMouseAimPlugin.cs`, `Recording.cs` |
 
 **Raw evidence** for R28–R37 is in `debugtests/archive/R<n>-<date>/` (CSVs, sidecars, logs). Later
@@ -192,7 +193,7 @@ key stays meaningful.
 | `aborted` | INTEGER | scorecard's `provenance()` |
 | `config` | TEXT | the `# config` line verbatim — the law's knobs **as flown** |
 | `entry_note` | TEXT | the `# entry` line verbatim — the per-replicate reset provenance |
-| `ov_note` | TEXT | the `# override` line verbatim — knobs **the card** pinned for itself. **0 real captures today** (no shipped card uses `config`); covered by the selftest only |
+| `ov_note` | TEXT | the `# override` line verbatim — knobs **the card** pinned for itself. **340 captures across 9 cards today** (corrected 2026-08-02; this said "0 real captures" from before the card-owns-every-run-parameter change): `alpha-pullup` 73, `oblique-6-dwell-t040` 64, `oblique-6-dwell-t100` 64, `stol-steps` 36, `stol-sweep` 36, `place-noop` 24, `rotor-transition` 16, `hs-hold` 15, `place-deflect` 12 |
 | `parse_warn` | TEXT | scorecard's own stderr for this file. **NULL on every row today** — a non-NULL here means dropped rows |
 | `sc_*` (45) | mixed | **sidecar** `<capture>.airframe.json` scalars, key-for-key. Absent → NULL |
 | `entry_*` (9) | mixed | parsed out of `# entry`. `a->b` becomes `_from`/`_to` |
@@ -244,7 +245,8 @@ jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
 
 `--with-rows RUNTAG` materializes ONE batch. Columns: `capture_id`, `i` (row ordinal), then one
 column per CSV column (66 today). Everything else stays in CSV: all ~1.1M rows would be ~500 MB of
-mostly-unread steady state. **Today only R30 is materialized** (48 captures / 29,199 rows) — check
+mostly-unread steady state. **Today only R40 is materialized** (109 captures / 57,470 rows — corrected
+2026-08-02; this said R30, which has not been materialized since a `--rebuild`) — check
 `--stats`'s `--with-rows` column before writing a `rows` query, and materialize what you need.
 
 ### `cards`, `card_airframes` — the card grid, opt-in
@@ -568,9 +570,9 @@ SELECT ca.card, group_concat(ca.airframe) never_flown
 --  oblique-05    CAS1,COIN
 ```
 
-#### Q11. Frame hitches — *needs `--with-rows`; only R30 is materialized today*
+#### Q11. Frame hitches — *needs `--with-rows`; only R40 is materialized today*
 ```bash
-python debugtests/index-captures.py --with-rows R30
+python debugtests/index-captures.py --with-rows R40
 ```
 ```sql
 SELECT c.run_tag, c.airframe, r.segTag, count(*) rows_over_25ms, round(max(r.frameMs),1) worst
@@ -581,14 +583,17 @@ Only meaningful for `mod_version >= '0.92.1'` — before that `frameMs` recorded
 constant. The drone launch stagger exists precisely so a hitch does not land on the same segment in
 every lane; this is how you check it did not.
 
-#### Q12. What did a card pin for itself? — *works, but 0 rows today*
+#### Q12. What did a card pin for itself? — *works, and returns 340 captures over 9 cards*
 ```sql
 SELECT run_tag, card, count(*) n, ov_note FROM captures
  WHERE ov_note IS NOT NULL GROUP BY 1,2,4;
 ```
-Empty because no shipped card uses `config`. The parsing path is covered by
-`index-captures.py --selftest` only — if you write a card with `config` overrides, re-index and this
-becomes the record of which knobs the *card* (not the operator) chose.
+~~Empty because no shipped card uses `config`.~~ **Corrected 2026-08-02 — this is now the record of
+record for what a card actually pinned**, since THE TEST CARD OWNS EVERY RUN PARAMETER (`CLAUDE.md`
+conventions). `alpha-pullup` 73 captures, `oblique-6-dwell-t040`/`-t100` 64 each, `stol-steps` /
+`stol-sweep` 36 each, `place-noop` 24, `rotor-transition` 16, `hs-hold` 15, `place-deflect` 12. **Read
+it before believing any `# config` line**: `ov_*` is what the card pinned, `config` is what the law ran
+with, and where a card declares a knob the card wins.
 
 #### Q13. Which columns can I even select? — *works today*
 ```bash
@@ -666,3 +671,16 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
     (`AttackHelo1` diverges) which R42 retracted (`LAW-LEDGER.md` X29). The `config` column is the
     capture's own record of the levers **as flown**; a two-batch comparison must diff it first:
     `SELECT run_tag, count(*), config FROM captures WHERE run_tag IN (...) GROUP BY 1,3`.
+
+16. **Reading `entry_alt_from` as the altitude a capture FLEW.** It is where the drone was *before*
+    placement; `entry_alt_to` is where the card put it, and that is always the card's own `startAlt`.
+    `Drone/DroneAltDeckM` splits the fleet across two **spawn** decks, and placement then collapses
+    them: across R41 + R42 + R43 every card has **exactly one distinct `entry_alt_to`**, while
+    `entry_alt_from` spans thousands of metres. R43's `hs-hold` was designed around a 2500 m vs 5500 m
+    q contrast and all 12 valid captures flew **4000 m** (`LAW-LEDGER.md` **X32**). So there is no
+    altitude factor anywhere in the corpus, and `alt` is the column to group on if you want the one
+    that was flown:
+    `SELECT run_tag, card, count(DISTINCT CAST(entry_alt_to AS INT)) FROM captures GROUP BY 1,2`
+    returns 1 for every row in the table today. Corollary: **on a fixed-`startAlt` card the only q
+    lever is speed**, and speed is set per-airframe by `startSpeedCorner`, so q comes out confounded
+    with airframe unless the card crosses it some other way.

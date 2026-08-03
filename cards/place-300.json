@@ -1,0 +1,53 @@
+{
+  "name": "place-300",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, FastBomber1",
+  "note": "FAMILY A, THE PLACEMENT-SPEED LADDER (v1.0.3, written for the batch after R43). ONE RUNG. R43 established a bracket and nothing inside it: FastBomber1 was PLACED at 440 m/s three times and its pilot died at t=0 every time (abort 'aircraft gone', 1 sample, spd reading 7924 m/s on the death row - a departed assembly), while the same batch placed Fighter1/Multirole1/SmallFighter1 at 341-352 m/s and every one of them flew its full 90 s, Multirole1 accelerating to 506 m/s in flight without complaint. FastBomber1 itself has 362 clean captures at entry speeds <= 250 m/s with ZERO placement aborts, so neither the airframe nor its 2-crew cockpit is the fault: the failure is in the PLACEMENT TRANSIENT and is a function of PLACEMENT SPEED. Known bracket 352 survives / 440 does not; nothing between has ever been placed. WHY ABSOLUTE startSpeed AND NOT startSpeedCorner: hs-hold used 2.2x corner, which resolves to a DIFFERENT speed per lane (341/352/352/440), so its one death is 'FastBomber1' and 'the fastest lane' at the same time and cannot be told apart. An absolute pin puts every surviving lane on the same number and speed stops being confounded with airframe. GEOMETRY IS hs-hold's, MINUS ITS 0.5 deg PAIR: level, no elevation demand anywhere, a 2 deg mirrored azimuth step held either side of boresight - settled on-boresight cruise, not a maneuver - so a surviving lane deposits the same measurement R43 took, in a speed band the corpus does not have. 20 s legs rather than 30 keeps the R/L pair closer in speed (R43 finding: fineHS1L scored 25-47% worse than fineHS1R purely because it flew later and therefore faster) and keeps the rung inside 4 min. With no vertical demand at all, 46 s at 4000 m cannot reach the 500 m FloorAltM abort. THE DECK IS PINNED AT 3000 ON EVERY RUNG AND THAT IS DELIBERATE. Per LAW-LEDGER.md X32 a lane SPAWNS at startAlt +/- DroneAltDeckM/2 and is then teleported to startAlt, so DroneAltDeckM is not an altitude spread at all - it is the PLACEMENT DISPLACEMENT. 3000 with startAlt 4000 = a 1500 m teleport on every lane, which is exactly what R43 flew, so the ladder varies speed and nothing else and stays directly comparable to the death it is bisecting. 'place-440-noteleport' is the card that changes the other variable. PASS = the lane survives placement and writes a full capture (~2300 rows/replicate, a real '# entry' header, dur ~46 s). FAIL = 'abort: aircraft gone' at t=0, 1 sample, dur 0.0, and the harness shouts 'LANE n IS OUT' on the run board. A FAIL IS A RESULT, not a wasted rung - it is the measurement this family exists to take, and it costs almost no wall clock because the replicate ends immediately. THROTTLE IS AN ESTIMATE AND IS FLAGGED AS ONE. R43 REFUTED the claim (retracted from hs-hold's note) that a pinned 1.00 trims these jets at ~350: at 4000 m with no vertical demand 1.00 ran them to 428/506/438 m/s, mean ~460. Nobody has ever measured what throttle trims what speed. Every pin on this ladder is thrust ~ throttle against drag ~ V^2, i.e. throttle = (V/460)^2 off that single R43 datum, and it is a FIRST ESTIMATE TO BE CORRECTED FROM THE CAPTURE. Nothing holds the speed either way (ScenarioPlayer.AuditHold is an instrument, not a controller), so read the capture's own spd column before reading anything else, and grep 'ENTRY CONDITION NOT HELD'. If the rung drifted out of its band, re-cut the pin and re-fly; the placement verdict at t=0 is valid regardless of what the throttle did afterwards. THIS RUNG: 300 m/s, the empty 275-324 band (0 of 3098 captures in the corpus). Four airframes, all comfortably inside the 0.95x Vmax gate (381/396/395/455 m/s). Also the matched-speed midpoint of the Family B altitude pair (q-hi-300 at 2500 m, q-lo-300 at 8000 m) - same roster, same geometry, same 300 m/s; only the deck differs (3000 here, 0 there), so read it beside them as a THIRD altitude only if place-440-noteleport shows the teleport does not matter.",
+  "startSpeed": 300,
+  "startAlt": 4000,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.45"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "3000"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": -1.0,
+      "el": 0
+    },
+    {
+      "tag": "finePL300R",
+      "dur": 20,
+      "az": 1.0,
+      "el": 0
+    },
+    {
+      "tag": "finePL300L",
+      "dur": 20,
+      "az": -1.0,
+      "el": 0
+    }
+  ]
+}

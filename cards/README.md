@@ -17,9 +17,11 @@ Built-in cards (`fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) are **not** 
 `ScenarioPlayer.cs`. This grid is additive: 16 baseline cards, ~11 min of flying, sized against the
 law's own thresholds (below) to cover the regimes the built-ins leave open — plus **4 `e*`
 attribution cards**, each one A/B experiment wired into its own file (see
-[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-4-cards)), and **4 follow-up cards**
+[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-4-cards)), **4 follow-up cards**
 written against a specific finding rather than a regime (see
-[Follow-ups](#follow-ups--cards-written-against-a-finding-4-cards)).
+[Follow-ups](#follow-ups--cards-written-against-a-finding-4-cards)), and the **13 post-R43 cards** —
+a placement-speed ladder, a dynamic-pressure pair and four rotorcraft tie-breakers (see
+[The post-R43 batch](#the-post-r43-batch--placement-ceiling-q-contrast-rotorcraft-tie-breakers-13-cards)).
 
 ## The three thresholds every card is sized against
 
@@ -227,7 +229,7 @@ is the same ~28 min whether each flies one airframe or eight** (see the paragrap
 ### Follow-ups — cards written against a finding (4 cards)
 
 Unlike everything above, these are not regime coverage: each was written to settle one specific
-question a batch raised, and the first three have flown (`hs-hold` has not). They stay in the grid
+question a batch raised, and **all four have now flown** (`hs-hold` in R43). They stay in the grid
 because the question can be re-asked on a new build — that is the point of a card.
 
 | card | what it isolates | pass / fail |
@@ -245,12 +247,34 @@ and `EW1` at the gate outright, and `Darkreach` is left out by hand because 2.2 
 must not be lowered**: R39-stol measured these same jets running to 340–381 m/s on a pinned 1.00
 throttle, so full throttle *trims* them right here — this card asks for the speed the pin already
 holds, which is the inverse of the `stol-*` problem (declared 90, flew 381). At 0.70 the entry becomes
-a deceleration and the card slides back out of the band. And **`Drone/DroneAltDeckM` can be left at its
-3000 default here**, the opposite of the `stol-*` instruction: the decks put half the fleet at 2500 m
-and half at 5500 m — q 59.3 vs 43.2 kPa against the corpus's all-time high of 25.6 — crossed with
-airframe on the Latin-square diagonal, so the decks become a balanced dynamic-pressure factor inside
-one card, and q is exactly what finding 5 is about. There is no vertical demand anywhere, so unlike
-every other high-energy card this one has no altitude budget to blow and cannot reach the 500 m floor.
+a deceleration and the card slides back out of the band. ~~And **`Drone/DroneAltDeckM` can be left at its 3000 default here** … the decks become a balanced
+dynamic-pressure factor inside one card.~~ **FALSE, MEASURED IN R43 — `LAW-LEDGER.md` X32.** The deck
+sets the drone's **spawn** altitude; the card's placement then teleports every lane to `startAlt`, so
+all 12 valid captures flew **4000 m** (descending to ~3570) and `entry_alt_to` is a single value.
+There is no altitude factor and there never was one on any card. The 2500/5500 m spread survives only
+as `entry_alt_from` — where the drone loitered before it was placed. The harmless half of the original
+note stands: there is no vertical demand anywhere, so unlike every other high-energy card this one has
+no altitude budget to blow and cannot reach the 500 m floor.
+
+**FLOWN R43 (v1.0.3), and the card did its job — but read three corrections before re-flying it.**
+(1) **It does not hold speed; it accelerates.** Entry placed 352/352/341 m/s as designed, then full
+throttle with zero vertical demand ran the lanes to **428 (`Fighter1`) / 506 (`Multirole1`) / 438
+(`SmallFighter1`) m/s** by the 90 s mark — the settled tails sit at 407–505 m/s, not 341–352. It
+*over*-fills the hole: it covers 350–400 in the first hold and then 400–506, which the corpus also
+lacked. Nothing decelerated, so no lane fell out of band; the name is the misleading part.
+(2) **`FastBomber1` never flew** — its pilot was killed at the instant of placement on 3 of 3 attempts
+(`abort: aircraft gone`, 1 sample, `dur=0.0`) and the lane was retired. With it and the deck both
+gone, **q is confounded with airframe**: each of the three surviving keys contributes exactly one q
+band (71.6–81.5 / 87.6–112.3 / 72.3–84.9 kPa). Only *within*-airframe q trends are defensible.
+(3) **The R/L mirror check needs the 0.5° pair, not the 1° pair.** `fineHS1L` scores 25–47% worse than
+`fineHS1R` on `rmsPointingErrorDeg` and `fixedWindowOffDeg` on 12/12 captures — but it always flies
+later and therefore faster, so that gap is the speed ramp, not handedness. The adjacent `fineHS05R/L`
+pair is q-matched to within 5 m/s and shows **no asymmetry** (L equal or 4–9% better). Keep the 0.5°
+pair; it is the only mirrored comparison this card can actually make.
+
+**VERDICT: valid, and it answered its question in the negative** — no limit cycle at any q the fleet
+reaches. `outR` sd 0.0007–0.0045 (threshold 0.05), `wobbleEpisodesOutR` 0 on 48/48 tails,
+`stickFlipRateR` 0.033–0.084/s against the oblique family's own 0.055 mean. See `LAW-LEDGER.md` O11.
 
 Why `oblique-12-fwd`/`rev` are a pair and not one card with a flag: every other oblique card traverses
 N→E→S→W→N, so the two **down** legs are always slots 2–3 and the two **up** legs always 4–5 —
@@ -273,6 +297,137 @@ form** of the suppression rather than turning it off — the knob does not do wh
 condition R29 and R32 flew, and reproducing that departure is the whole card. `startSpeedCorner`
 resolves correctly since v0.96, but on this airframe `0.95x` is **95 m/s** (FBW corner 100, against
 the AI table's 180) — a different flight, not a more portable spelling of this one.
+
+### The post-R43 batch — placement ceiling, q contrast, rotorcraft tie-breakers (13 cards)
+
+Written together against R43's results (`LAW-LEDGER.md` O11 / X32) and one rotorcraft investigation.
+They are four families and each decides something; none of them re-runs what R43 already did.
+
+#### A — the placement-speed ladder (7 cards, ≤ 27.5 min)
+
+R43 left a bracket with nothing inside it: `FastBomber1` **placed** at 440 m/s died at `t=0` on 3 of 3
+attempts (`abort: aircraft gone`, 1 sample), while `Fighter1`/`Multirole1`/`SmallFighter1` placed at
+341–352 m/s all flew, and `Multirole1` reached **506 m/s in flight** without complaint. The same
+airframe has 362 clean captures at ≤ 250 m/s. So the failure is in the **placement transient** and is a
+function of **placement speed** — but `hs-hold` used `startSpeedCorner: 2.2`, which gives every lane a
+different speed, so "FastBomber1" and "the fastest lane" cannot be told apart.
+
+Every rung therefore uses an **absolute `startSpeed`**, `hs-hold`'s geometry minus its 0.5° pair
+(46 s: `arm` 6 s, mirrored ±1° holds of 20 s), `repeat: 5`, and `startAlt: 4000` with
+`DroneAltDeckM: 3000` — a **1500 m teleport on every lane**, matching what R43 flew, so the ladder
+varies speed and nothing else.
+
+| card | entry | roster | why this rung |
+|---|---|---|---|
+| `place-300` | 300 m/s | the four R43 keys | fills the empty **275–324** band (0 of 3098 captures); also the 4000 m midpoint of family B |
+| `place-375` | 375 m/s | the four R43 keys | fills the empty **375–424** band, and is **the highest speed the whole roster can be placed at** — `Fighter1`'s gate ceiling is 0.95 × Vmax = 381.3 |
+| `place-390` | 390 m/s | `Multirole1, SmallFighter1, FastBomber1` | the **only** card that puts a non-bomber above 381 m/s (their ceilings are 395.9 / 394.5). A death here says the ceiling is speed, not airframe |
+| `place-400` | 400 m/s | `FastBomber1` ×2 lanes | the bisection's first cut: alive ⇒ 400–440, dead ⇒ 352–400 |
+| `place-420` | 420 m/s | `FastBomber1` ×2 lanes | the upper cut. 400 alive + 420 dead brackets it to 20 m/s in one batch |
+| `place-440` | 440 m/s | `FastBomber1` ×2 lanes | R43's exact kill, re-flown at n=10 as the **with-teleport arm** of the isolator |
+| `place-440-noteleport` | 440 m/s | `FastBomber1` ×2 lanes | **the isolator** — same everything, `DroneAltDeckM: 0` |
+
+**PASS = the lane survives placement and writes a full capture; FAIL = `abort: aircraft gone`, 1
+sample, `dur=0.0`, and `LANE n IS OUT` on the run board.** A FAIL is the measurement, not a wasted
+rung, and it costs almost no wall clock because the replicate ends immediately.
+
+`place-440-noteleport` is the one card here whose outcome is genuinely unknown, and it **declares no
+PASS side on purpose**. A placement carries two things at once — the entry speed *and* a vertical
+teleport, because per X32 a lane spawns at `startAlt ± DroneAltDeckM/2` and is then moved to
+`startAlt`. `DroneAltDeckM` is a **spread about `startAlt`, not an offset** (`TestDrone.DeckSpreadM`),
+so `0` collapses the fleet onto one deck at exactly `startAlt` and the vertical displacement is zero;
+the ring radius does not move with it, because at 2 lanes both the one- and two-deck formulas are bound
+by the `AbeamM` 5000 m floor. Lanes **survive** ⇒ the teleport is a necessary co-factor and every rung
+above is measuring *speed × 1500 m*; lanes **die anyway** ⇒ speed alone is sufficient and the rungs mean
+what they say. Fly it with `place-440` or not at all.
+
+> **Every throttle pin on this ladder is an estimate.** R43 *refuted* the old `hs-hold` claim that a
+> pinned `1.00` trims these jets at ~350 — at 4000 m with no vertical demand it ran them to 428/506/438
+> m/s, mean ~460. Nobody has measured what throttle trims what speed, so each rung pins
+> `(V/460)²` off that single datum (0.45 / 0.70 / 0.75 / 0.80 / 0.85 / 0.92). **Read the capture's `spd`
+> column and re-cut them.** The `t=0` placement verdict is valid regardless of what the throttle did
+> afterwards.
+
+#### B — the dynamic-pressure pair (2 cards, 8 min)
+
+`GENERALITY-REVIEW.md` finding 5 (roll constants unnormalised by q) is confirmed in *direction*
+within an airframe — Spearman(q, `outR` sd) = +0.891 `Multirole1`, +0.638 `Fighter1`, +0.141
+`SmallFighter1` — but R43 could not test it **between** airframes, because with `FastBomber1` lost and
+the deck a no-op each key contributed exactly one q band. Since X32, **the only lever a card has on air
+density is its own `startAlt`, i.e. a separate card.** This pair is that, and it supersedes the deck
+mechanism outright.
+
+| card | entry | `startAlt` | q at 300 m/s |
+|---|---|---|---|
+| `q-hi-300` | 300 m/s, four R43 keys | 2500 m | ~43.1 kPa |
+| `q-lo-300` | 300 m/s, four R43 keys | 8000 m | ~23.7 kPa |
+
+Identical roster, geometry, entry speed, throttle pin and `DroneAltDeckM: 0`; **`startAlt` is the only
+difference**, so airframe is crossed with q instead of nested in it, and the 1.82× lever hits all four
+keys at once (against the 1.28× within-airframe range that already produced +0.891). **Score the pair,
+never one card**, and regress on **measured** q from the capture — the two cards will not drift
+identically and `captures.db` carries q per row. Confirmed = `outR` sd higher at 2500 m for *every*
+airframe with the four keys on one line; refuted = indistinguishable while the q distributions
+separate cleanly. Expect it small either way: R43's whole q-driven range was `outR` sd 0.0007–0.0045
+against a 0.05 threshold. A null here is a ledger line, not a failed run.
+
+#### C — the reproducibility control
+
+`oblique-6-c`, **unmodified**, is the designated deck-evidence control. Re-fly it in this batch and
+compare against its R41 captures: **a valid re-fly lands within 1–3%.** Outside that, every
+cross-batch comparison in the queue above (notably `place-440` against R43's 3 deaths) is on sand.
+
+#### D — the rotorcraft tie-breakers (4 cards)
+
+| card | entry | roster | what it decides |
+|---|---|---|---|
+| `rotor-weathervane-35` | 35 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | the control arm — **below** `yawWeathervaneMinSpeed` = 40. Both models predict 0.00–0.1° |
+| `rotor-weathervane-60` | 60 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | **the tie-break.** Weathervane ⇒ ~13× the R42 residual or a railed pedal; heliBlend ⇒ the residual vanishes |
+| `rotor-tilt-hold` | 120 m/s, 3000 m, thr **1.00** | `QuadVTOL1` ×2 lanes | the **O13 pre-fix baseline** |
+| `rotor-tilt-hold-lo` | 120 m/s, 3000 m, thr **0.25** | `QuadVTOL1` ×2 lanes | its control — separates the throttle input from the speed input |
+
+`rotor-weathervane-*` is the highest-value card in the batch because it **discriminates between two
+candidate fixes** rather than confirming one. `H7`'s deterministic 1.5–2.4° residual is now traced to
+the game's own `HeloFlyByWire` weathervane term (a sideslip bias into the yaw *rate error* above 40
+m/s), but the corpus cannot arbitrate: every converged R42 tag sits below 40 m/s and every parked one
+at 41.5–41.8, so the whole verdict rests on a 0.3 m/s window. At 60 m/s the two models predict opposite
+things and there is no third outcome that fits both. Two things make it work: **`startSpeed` is
+declared > 0**, because `ScenarioPlayer.OwnInputs` early-returns at `EntrySpeed ≤ 0` and that is why
+`rotor-bistab` could never own its throttle; and it carries an **`armToggle`**
+(`Control/IntegralStallGate` — the integrator winding on error *persistence* vs *magnitude* is exactly
+the mechanism that would or would not erase a standing residual), which also closes **`O14(c)`**: no
+R42 rotor card declared one, so `arm=-1` never appeared and the v1.0.1 warm-up fix is still
+code-reviewed rather than measured.
+
+`rotor-tilt-hold` **must be flown before the O13 fix ships** — the confirming test is a before/after on
+one condition and shipping first destroys the baseline. Pre-fix, `heliBlend` should read **≥ 0.8** in
+the most wing-borne condition the airframe has (120 m/s is double `HeliForwardSpeed`, so `speedRamp` is
+identically 0 and `heliBlend` *is* `tiltFrac` — a direct readout with no `max()` hiding anything); after
+the fix the same card must read **≤ 0.2**. Check `[helofbw] tiltwing=1` in the launch log first or every
+number below it is meaningless. The `-lo` twin exists because the game's tilt command is
+**throttle-driven**, so `rotor-transition` confounded speed with throttle at its pinned 0.25; the two
+arms hold the same 120 m/s and differ only in throttle, which separates them.
+
+> **Rotorcraft throttle is collective, not thrust.** It buys climb; forward speed comes from attitude.
+> R42 measured `AttackHelo1` parking at 41.5–41.8 m/s under `TestDrone`'s own `HoldThrottle` 0.60, i.e.
+> 0.60 converges just *above* the 40 m/s threshold. The 0.45 / 0.85 pins are cut from that one datum
+> and are first estimates. **If the 35 m/s arm spends its segments above 40, or the 60 m/s arm below
+> 40, the card measured nothing** — re-cut from the `spd` column and re-fly. Check this first.
+
+#### Flying the batch
+
+Each `;`-separated entry of `Scenario/ScenarioBatchQueue` is a **complete fleet with its own `sel[0]`**,
+so one card per entry is what gives each card its own `repeat`, `armToggle`, roster and entry
+condition:
+
+```
+oblique-6-c;place-440;place-440-noteleport;place-420;place-400;place-390;place-375;place-300;q-hi-300;q-lo-300;rotor-tilt-hold;rotor-tilt-hold-lo;rotor-weathervane-35;rotor-weathervane-60
+```
+
+~94 min worst case, ~82 min if the 440s and 420 die at placement as expected (a dead lane ends its
+replicate immediately). **Split it after `q-lo-300`** if you want two sittings — that is the fixed-wing
+half (41 min) against the rotorcraft half (52 min), and the `R<N>` session tag increments on a game
+restart, which the batch index wants anyway.
 
 ## What the measurements say about the "confused small movements" report
 
@@ -671,11 +826,18 @@ demand silently freezes — which is why the selftest asserts the length.
   at the `stol` entry condition is a copy-and-edit away, once the jet ladder has said something.
 - **A speed SWEEP, at any speed.** `startSpeedCorner` is one multiple for the whole card, resolved per
   lane against each airframe's own corner — so lane-by-lane speeds exist only as a side effect of the
-  roster, confounded with airframe. `hs-hold` gets 341–440 m/s across four keys that way, and 250–300
-  m/s and >450 m/s stay unsampled; a genuine sweep needs either four cards or a per-lane multiple the
-  grammar does not have. **`hs-hold` also ships no matched low-speed control** — a twin at `1.0x` would
+  roster, confounded with airframe. ~~`hs-hold` gets 341–440 m/s across four keys that way, and 250–300
+  m/s and >450 m/s stay unsampled~~ — **R43 measured otherwise: the lanes accelerate, so `hs-hold`
+  actually swept 341 → 506 m/s and >450 was sampled after all** (`Multirole1` ends at 506). What is
+  still unsampled is 250–300. A genuine sweep needs either four cards or a per-lane multiple the
+  grammar does not have — but note that with `FastBomber1` lost and the altitude deck a no-op
+  (`LAW-LEDGER.md` X32), q ended up confounded with airframe exactly as this bullet warns.
+  **The four-cards option is now built**: the `place-*` ladder is an absolute-`startSpeed` sweep at
+  300 / 375 / 390 / 400 / 420 / 440 m/s, and `q-hi-300`/`q-lo-300` un-confound q from airframe by
+  varying `startAlt` instead of the deck. Neither has flown. **`hs-hold` also ships no matched low-speed control** — a twin at `1.0x` would
   accelerate straight out of its own band on any throttle ≥ `MinThrottle`, which is the `stol-*`
   failure again, so the low-q arm is the existing corpus (R39-D's mean \|`outR`\| 0.0068–0.0109 in
   sustained tracking, and the `oblique-*-c` family's `stickFlipRateR` on the same four airframes)
-  rather than a card. That is a weaker comparison than a twin and is the first thing to fix if the
-  card comes back FAIL.
+  rather than a card. That is a weaker comparison than a twin — and R43 came back **PASS**, so it was
+  never exercised. It becomes the first thing to fix only if the hand-flown re-fly
+  (`LAW-CHARACTERIZATION.md` §7 Tier 1 (g)) comes back FAIL.

@@ -541,7 +541,18 @@ def check_card(card, K, AF):
         # the flat pitch-authority region (targetPitchAngVel's max(V, 0.75*Vc), decompile :65032) and
         # has large excess thrust at any throttle the mod will accept, so it accelerates out of the
         # band the card exists to measure.
-        if corner and not refused and v < 0.75 * corner:
+        #
+        # FIXED-WING ONLY, and the guard is load-bearing rather than defensive. `targetPitchAngVel`
+        # lives in the base `FlyByWire`, and a rotorcraft NEVER RUNS IT: `HeloControlsFilter`
+        # overrides `Filter` and flies a private `heloFlyByWire`, so the 0.75x breakpoint describes
+        # authority the aircraft does not have. AIRFRAMES.md's footnote on `AttackHelo1` says this
+        # outright -- its 170 is the base FBW's serialized field, above its whole Vmax (100), and
+        # "does not describe the aircraft that actually flies". Without this, EVERY rotorcraft card
+        # with a declared entry speed FAILS here (a declared HOVER escapes only because `v <= 0`
+        # skipped the whole block above), which would refuse `rotor-weathervane-*` outright.
+        # `UtilityHelo1`/`QuadVTOL1` have no measured corner at all, so the bug was invisible until
+        # a card flew `AttackHelo1` at a speed rather than at a hover.
+        if corner and not refused and r["cls"].startswith("fixed-wing") and v < 0.75 * corner:
             add(FAIL, "entry-hold",
                 "%s: entry %.1f m/s (%s) is %.2fx its FBW corner %g, i.e. under the 0.75x corner "
                 "breakpoint (%.1f m/s) where FBW pitch authority goes flat. The placement writes the "

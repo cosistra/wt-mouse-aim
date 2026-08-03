@@ -1,0 +1,53 @@
+{
+  "name": "q-hi-300",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, FastBomber1",
+  "note": "FAMILY B, THE DYNAMIC-PRESSURE CONTRAST DONE CORRECTLY - the between-airframe test GENERALITY-REVIEW.md finding 5 needs and that no card in this repo has ever actually run. FINDING 5 is that RollGain / RollDamping / RollRateSmoothing are global constants unnormalised by q. R43 confirmed it in DIRECTION but only WITHIN an airframe: Spearman(q, outR sd) = +0.891 on Multirole1, +0.638 Fighter1, +0.141 SmallFighter1. It could not test it BETWEEN airframes, because with FastBomber1 lost and the deck a no-op each surviving key contributed exactly one q band (71.6-81.5 / 87.6-112.3 / 72.3-84.9 kPa) - q was confounded with airframe outright. THIS PAIR SUPERSEDES THE DECK MECHANISM, AND THAT IS THE WHOLE REASON IT EXISTS. hs-hold was designed around 'DroneAltDeckM = 3000 puts half the fleet at 2500 m and half at 5500 m, q 59.5 vs 43.5 kPa, crossed with airframe on the Latin-square diagonal'. LAW-LEDGER.md X32 killed that: the deck sets the SPAWN altitude, placement then teleports every lane to the card's startAlt, and entry_alt_to has exactly ONE distinct value per card across R41, R42 and R43. There is no in-card altitude spread and there never was. The only lever a card has on air density is its own startAlt - i.e. a SEPARATE CARD - which is what this pair is. THE PAIR: identical roster, identical geometry (hs-hold's, minus its 0.5 deg pair), identical 300 m/s absolute entry, identical 0.45 throttle pin, identical DroneAltDeckM = 0 so neither card carries a placement teleport. THE ONLY DIFFERENCE IS startAlt. q at 300 m/s is 43.1 kPa at 2500 m and 23.7 kPa at 8000 m, a 1.82x lever applied to all four airframes AT ONCE - against the 1.28x within-airframe range that already produced Spearman +0.891 on Multirole1. Because both cards fly all four keys at one speed, airframe is now crossed with q instead of nested in it. 'place-300' is the same condition at 4000 m (q 36.9 kPa) with the ladder's 1500 m teleport; use it as a third point only if place-440-noteleport shows the teleport does not matter. READ MEASURED q, NEVER DECLARED q. Nothing holds the speed (AuditHold is an instrument), thrust lapse and drag both scale with density, and the two cards will NOT drift identically - the 8000 m lane is the more likely to decelerate. That is not a defect of the design: captures.db carries q per row, so the analysis regresses outR sd on MEASURED q and the declared altitudes only have to produce separation, not a specific number. If the two cards' q distributions overlap, the card failed and the fix is a wider altitude split, not a longer run. THROTTLE 0.45 IS AN ESTIMATE, MATCHED ACROSS THE PAIR ON PURPOSE. R43 REFUTED the old claim that 1.00 trims these jets at ~350 - it ran them to 428-506 m/s at 4000 m, mean ~460 - so 0.45 is (300/460)^2 off that one datum. Matched rather than per-altitude because a matched LEVER with a measured outcome is a cleaner contrast than two different levers chosen to force a number nobody has calibrated. Correct both pins from the capture. PASS/FAIL IS ON THE PAIR, NOT ON EITHER CARD. Finding 5 is CONFIRMED between airframes if outR sd (and stickFlipRateR) is higher on the 2500 m card than the 8000 m card for EVERY airframe, with the four airframes' per-q values falling on one line rather than four. It is REFUTED, and the constants are effectively q-independent at these amplitudes, if the two cards are indistinguishable while their measured q distributions are cleanly separated. Expect the effect to be small either way: R43's whole q-driven range was outR sd 0.0007-0.0045 against a ~0.05 wobble threshold, i.e. ~1/1000 of limit-cycle amplitude. This card measures a GRADIENT, not a defect, and a null here is a publishable line in the ledger. THIS ARM: 2500 m, the HIGH-q end (q ~43.1 kPa at 300 m/s). 2500 m is the grid's standard low altitude and is 2000 m above the 500 m FloorAltM with no vertical demand anywhere on the card, so there is no altitude budget to blow.",
+  "startSpeed": 300,
+  "startAlt": 2500,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.45"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "0"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": -1.0,
+      "el": 0
+    },
+    {
+      "tag": "fineQH300R",
+      "dur": 20,
+      "az": 1.0,
+      "el": 0
+    },
+    {
+      "tag": "fineQH300L",
+      "dur": 20,
+      "az": -1.0,
+      "el": 0
+    }
+  ]
+}

@@ -151,20 +151,20 @@ namespace** from `LAW-CHARACTERIZATION.md` §7's `#n`.
 | `1` | HIGH | the fixed-wing pitch error term is not achievability-normalized | PARTIAL (v0.65; was FIXED-by-Unified v0.60) | 173 |
 | `2` | HIGH | no measured pitch-effectiveness estimator (yaw has one, pitch doesn't) | PARTIAL (v0.65; the estimator itself is FIXED) | 191 |
 | `3` | MEDIUM | helo yaw carries the fixed-wing reactive damping term | — | 205 |
-| `4` | MEDIUM | `kHelo = 2.0` assumes a universal ~0.3 s helo inner-loop lag | — | 212 |
-| `5` | HIGH | the roll axis is the least normalized axis | OPEN, and FIELD-CONFIRMED (2026-08-02) | 218 |
-| `6` | MEDIUM | regime thresholds for plain helis are global speed constants | — | 258 |
-| `7` | LOW | fine boost is binary-off for collective airframes, not regime-blended | DEFERRED (v0.60) | 293 |
-| `8` | LOW | the two lockstep bank-target sites use different speed floors | FIXED (v0.60) | 302 |
-| `9` | LOW | pitch demand schedules only exist inside EvolvedLegacy | RESOLVED by construction (v0.60) | 307 |
-| `10` | WATCH | fixed "ponytail" time constants | — | 318 |
-| `11` | — | eAlign-slew stale-sign counter-roll (S1) | FIXED (v0.61, Track A.1) | 325 |
-| `12` | — | azErr noise-gate / predFloor interaction (S2) | PARTIAL (v0.61 Track A.2; the Unified "deeper cure" was… | 339 |
-| `14` | HIGH | `_pitchEff`'s v0.67 self-probe cannot clear its own threshold | OPEN (STRUCTURAL + MEASURED) | 351 |
-| `15` | HIGH | `_yawWeak` measures "the error did not close", not "the rudder is weak" | OPEN (STRUCTURAL + MEASURED) | 380 |
-| `16` | HIGH | `lateralHold` rails and disconnects the ENTIRE bank pipeline | SPLIT VERDICT (2026-08-02): the `blendWeight` hand-off… | 396 |
-| `17` | MEDIUM | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | STRUCTURAL, and FLOWN NULL on the 6° oblique (R41) | 442 |
-| `18` | HIGH | the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs | OPEN (MEASURED, R32) | 482 |
+| `4` | MEDIUM | `kHelo = 2.0` assumes a universal ~0.3 s helo inner-loop lag | — | 217 |
+| `5` | HIGH | the roll axis is the least normalized axis | OPEN (STRUCTURAL); field cycle NOT reproduced by R43 — q-scaling confirmed at 1/1000 the amplitude | 223 |
+| `6` | MEDIUM | regime thresholds for plain helis are global speed constants | OPEN — the 60 is anchored to the WRONG END of the weathervane ramp (the active threshold is 40); the fix is a probe, not a constant | 291 |
+| `7` | LOW | fine boost is binary-off for collective airframes, not regime-blended | DEFERRED (v0.60) | 349 |
+| `8` | LOW | the two lockstep bank-target sites use different speed floors | FIXED (v0.60) | 358 |
+| `9` | LOW | pitch demand schedules only exist inside EvolvedLegacy | RESOLVED by construction (v0.60) | 363 |
+| `10` | WATCH | fixed "ponytail" time constants | — | 374 |
+| `11` | — | eAlign-slew stale-sign counter-roll (S1) | FIXED (v0.61, Track A.1) | 381 |
+| `12` | — | azErr noise-gate / predFloor interaction (S2) | PARTIAL (v0.61 Track A.2; the Unified "deeper cure" was… | 395 |
+| `14` | HIGH | `_pitchEff`'s v0.67 self-probe cannot clear its own threshold | OPEN (STRUCTURAL + MEASURED) | 407 |
+| `15` | HIGH | `_yawWeak` measures "the error did not close", not "the rudder is weak" | OPEN (STRUCTURAL + MEASURED) | 436 |
+| `16` | HIGH | `lateralHold` rails and disconnects the ENTIRE bank pipeline | SPLIT VERDICT (2026-08-02): the `blendWeight` hand-off… | 452 |
+| `17` | MEDIUM | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | STRUCTURAL, and FLOWN NULL on the 6° oblique (R41) | 498 |
+| `18` | HIGH | the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs | OPEN (MEASURED, R32) | 538 |
 
 <!-- FINDING-INDEX:END -->
 
@@ -207,7 +207,12 @@ generically, and could drive the demand schedule instead of (or alongside) the A
 loop constant) on top of the helo's own rate-command PID. Reactive rate feedback around an inner
 loop with ~0.3 s lag adds phase lag, not damping — the prime suspect for the reported **Ifrit
 post-turn rudder oscillation** (no recording exists yet in the v58 batch; get one before fixing).
-Also stacked: the mod's `_iYaw` on top of the helo PID's own integral compensator.
+Also stacked: the mod's `_iYaw` on top of the helo PID's own integral compensator. **MEASURED
+2026-08-02 (`LAW-LEDGER.md` H7):** that stack is not symmetric — the game's compensator (`:36053`) is a
+**pure** integrator while the mod's `_iYaw` **leaks** (`ChaseController.cs:1551`, `leak = 0.5`), so
+against a standing disturbance the mod's term has finite DC gain and settles at 0.032–0.040 — its leak
+equilibrium, nowhere near the 0.12 cap — while the error stands at 1.5–2.5°. A leaky integrator
+structurally cannot null a constant bias; raising `iCap` does nothing.
 
 ### 4. MEDIUM — `kHelo = 2.0` assumes a universal ~0.3 s helo inner-loop lag
 The v0.58 normalization makes the *authority* per-airframe (probed `maxAngularVel`), but the
@@ -215,10 +220,11 @@ phase-margin arithmetic hardcodes the fitted UH-90/RAH-72 lag. A modded helo wit
 shifts the margin. Measuring the lag online (achieved vs commanded rate — the same machinery as
 finding 2, helo edition) would close it.
 
-### 5. HIGH — the roll axis is the least normalized axis — OPEN, and FIELD-CONFIRMED (2026-08-02)
+### 5. HIGH — the roll axis is the least normalized axis — OPEN (STRUCTURAL); the field cycle did NOT reproduce (R43, 2026-08-02)
 
-> **PROMOTED MEDIUM → HIGH, 2026-08-02. This is the only finding in this file confirmed by a user in
-> the wild, and the corpus structurally cannot see it.** Two v0.68.0 Discord captures on `FS-12` at
+> **PROMOTED MEDIUM → HIGH, 2026-08-02, on a field report — then the harness re-fly came back clean.
+> Read both blocks; the structural violation survives, the "the corpus cannot see it" argument does
+> not.** Two v0.68.0 Discord captures on `FS-12` at
 > 348–423 m/s show a **~2 Hz `outR` limit cycle while on target**: across a 22.7 s `HOLD`, `targetBank`
 > mean **−0.162°** and `off` 0.188° — the outer loop is commanding nothing — while the inner roll servo
 > swings **±0.5 stick and ±3° of bank**, 105 stick sign-flips in 29.6 s. `azErr` oscillates *in phase
@@ -229,14 +235,41 @@ finding 2, helo edition) would close it.
 > the disease named in the paragraph below, and the "unreported" 1.28 Hz `Multirole1` chatter at
 > ~450 m/s (rec 014141) is now **reported and reproduced on a second airframe**.
 >
-> **Why it survived to v1.0.0: `captures.db` has ZERO rows between 250 and 400 m/s.** Every real
-> airframe in the corpus tops out at **221 m/s** — cards enter at `startSpeedCorner 1.0×` and never
-> accelerate past it — so the entire evidence base sits at roughly *half* the speed where this lives.
-> R39-D's mean |`outR`| of 0.0068–0.0109 in sustained tracking is ~30× smaller than the 0.26 measured
-> here, which is a statement about the corpus's speed band and not about the law.
+> **~~Why it survived to v1.0.0: `captures.db` has ZERO rows between 250 and 400 m/s.~~ THE HOLE IS
+> CLOSED, AND THE DEFECT IS NOT IN IT (R43, 2026-08-02).** The corpus used to top out at **221 m/s**,
+> which is why R39-D's mean |`outR`| of 0.0068–0.0109 said nothing about this. R43 flew `hs-hold` —
+> 12 valid captures, `Fighter1` (= the field airframe FS-12), `Multirole1`, `SmallFighter1`, 4
+> replicates each — with settled tails at **407–505 m/s and q 71.6–112.3 kPa**, four to five times
+> the corpus's previous peak q of 25.6 kPa. Over 48 segment-tails in exactly the commanded-nothing
+> state the field report describes (`targetBank` ≡ 0.000, `tBankE` |mean| 0.09–0.56°, `off`
+> 0.01–0.06°): `outR` sd **0.0007–0.0045** against a 0.05 fail threshold, peak-to-peak **0.004–0.025**
+> against the field's ~1.15, `stickFlipRateR` **0.033–0.084 /s** against 3.55 /s, and
+> `wobbleEpisodesOutR` **0 on 48 of 48**. **The scripted-marker path does not limit-cycle at any q this
+> fleet can reach.**
 >
-> `RollGain` / `RollDamping` / `RollRateSmoothing` are still global constants at v1.0.0 and the
-> prescribed fix below is unbuilt. Test and full evidence: `LAW-LEDGER.md` **O11**.
+> **What R43 DID measure is the q-scaling itself, and it is real but three orders of magnitude too
+> small to matter.** Within `Multirole1`, Spearman(q, `outR` sd) = **+0.891** across 87.6 → 112.3 kPa,
+> the sd rising 0.0012 → 0.0045 — a ~3.5× amplitude growth for a 1.28× q increase, i.e. steeper than
+> linear, exactly the shape an unnormalized derivative gain predicts. `Fighter1` +0.638, `SmallFighter1`
+> +0.141, pooled +0.481 over 48 tails. **So the mechanism this finding names is visible and confirmed
+> in its direction; what is refuted is only that it reaches limit-cycle amplitude on the harness path.**
+> Extrapolating that slope, the servo would need roughly another decade of q to reach the field
+> amplitude — which this fleet cannot fly. **The remaining candidate excitation is the pilot**: a
+> scripted marker feeds `azErr` a smooth ramp, a hand on a mouse feeds it continuous micro-motion.
+> That is the untested half and it is one hand-flown capture (`LAW-LEDGER.md` **O11**,
+> `LAW-CHARACTERIZATION.md` §7 Tier 1 **(g)**).
+>
+> **The structural finding is UNCHANGED.** `RollGain` / `RollDamping` / `RollRateSmoothing` are still
+> global constants at v1.0.3, nothing in the roll channel reads the airframe's roll authority, and the
+> prescribed fix below is still unbuilt. R43 removes the *urgency* argument ("the corpus cannot see
+> it"), not the ONE-LAW violation. Full evidence: `LAW-LEDGER.md` **O11**.
+>
+> **Caveat on the q reading — R43's q contrast is confounded with airframe.** The card's declared
+> altitude-deck factor never existed (`LAW-LEDGER.md` **X32**: `DroneAltDeckM` sets spawn altitude,
+> placement teleports every lane to `startAlt`, so all 12 flew 4000 m), and `FastBomber1` — the
+> highest-q lane — was lost to a placement kill on 3 of 3 attempts. Every airframe therefore
+> contributes one q band and the between-airframe slope cannot be separated from the airframe. The
+> **within**-airframe Spearmans above are the defensible half.
 
 **Regressed to OPEN (v0.65).** The measured roll-effectiveness normalization lived ONLY in Unified's
 geodesic roll servo (`_rollEffFilt`, the roll twin of `_pitchEff`/`_yawEffFilt`), which was deleted
@@ -257,9 +290,27 @@ across speed/airframe. A probed roll-rate normalization is the principled fix.
 
 ### 6. MEDIUM — regime thresholds for plain helis are global speed constants
 `HeliForwardSpeed`/`HeliHoverSpeed` (60/20 m/s) drive `heliBlend` for any rotorcraft without a
-tilt/nozzle gauge. Semi-principled (the 60 matches the game's own weathervane fade, which is
-game-wide), but a heavy compound heli and a light scout blend identically.
+tilt/nozzle gauge. ~~Semi-principled (the 60 matches the game's own weathervane fade, which is
+game-wide)~~ — but a heavy compound heli and a light scout blend identically.
 `CompoundHeloController` is detected but log-only.
+
+> **CORRECTED 2026-08-02 — "semi-principled" was aimed at the WRONG END OF THE RAMP.** The 60 does
+> match a weathervane number, but it matches `yawWeathervaneMaxSpeed = 60` (`:36034`), where the fade
+> is already **fully** on. The threshold that decides anything is `yawWeathervaneMinSpeed = **40**`
+> (`:36031`) — below it the bias is off, above it the game starts adding sideslip to the yaw rate
+> error (`:36047-36052`) — and **40 m/s is where the law's measured behaviour actually changes**: in
+> R42 every converged `AttackHelo1` tag sits at 34.96 / 18.18 / 7.33 m/s and every tag that parks on a
+> standing 1.5–2.5° error sits at **41.50–41.80** (`LAW-LEDGER.md` **H7**). So the constant is not
+> semi-principled, it is anchored to the end of the ramp that carries no information.
+>
+> **And the fix is a probe, which makes this the cheapest ONE-LAW repair on the rotorcraft list.** All
+> three fields — `yawWeathervaneStrength` (0.4, `:36028`), `MinSpeed` (`:36031`), `MaxSpeed`
+> (`:36034`) — are on the same `heloFlyByWire` object `ResolveHelo` already Traverses
+> (`ChaseController.cs:673-682`), so `heliBlend` can key off **the airframe's own probed weathervane
+> band** instead of two absolute m/s literals, fail-soft to today's 60/20. That is candidate (ii) in
+> H7; candidate (i) cancels the bias in the helo yaw branch instead. **Do not ship either yet** — the
+> corpus cannot choose between them (every failing sample is inside a 0.3 m/s window at the bottom of
+> a 20 m/s ramp), and the discriminating card is `LAW-CHARACTERIZATION.md` §7 rotorcraft **(d)**.
 
 > **~~MEASURED CONSEQUENCE (R41)~~ — WITHDRAWN 2026-08-02 BY R42. Read `LAW-LEDGER.md` X29 and X31.**
 > This block said *"`AttackHelo1` can never leave the hover regime at any speed it is capable of
@@ -282,13 +333,18 @@ game-wide), but a heavy compound heli and a light scout blend identically.
 > that was an artifact. **A defaults-vs-live check belongs in the preflight**, and a capture's
 > `# config` line is the only thing that can be trusted about what flew.
 >
-> **NEW, and it is a real ONE-LAW violation in the same family (R42, ledger X30):** the tilt-driven
-> branch that is *supposed* to replace these speed constants on a tiltwing — `tiltFrac` at
-> `ChaseController.cs:1132` — is measured running **backwards**: 0.620 at 108 m/s falling to 0.182 at
-> 60 m/s, where a correct hover blend must rise as the aircraft slows. So on the one airframe that has
-> a real tilt gauge, the principled term is not merely unused but adds 18–62% of hover blend in
-> wing-borne cruise. The sign flip is the leading candidate and is **not** a confirmed fix — the
-> measured range spans neither endpoint. Ledger **O13** is the measurement that decides it.
+> **NEW, and it is a real ONE-LAW violation in the same family (R42, ledger X30) — now RESOLVED as to
+> mechanism (ledger O13):** the tilt-driven branch that is *supposed* to replace these speed constants
+> on a tiltwing — `tiltFrac` at `ChaseController.cs:1131-1132` — reads the game's tilt **command**
+> back out of the joint angle and then treats it as a hover fraction. It is not a sign error and
+> `GetAngleLimits()` is innocent: the game pins the command's hover end at **0.18** (`:70352`) with
+> **1.0 = wing-borne** (`:70344`), and the nozzle archetype one line below is correct only because it
+> carries the `1f −` (`:69365-69366`) that the tiltwing branch is missing. Measured consequence stands
+> unchanged — the term adds **0.18** of hover blend in settled wing-borne cruise (R42, 80% of rows at
+> 68–78 m/s, `heliBlend` 0.181–0.184), i.e. it deletes that much of the bank-to-turn demand on the
+> only tiltwing in the game. The one-line repair is written in **O13** and is **deliberately not
+> shipped**: a card must record the pre-fix cruise-end value first, because the confirming test is a
+> before/after on the same condition.
 
 ### 7. LOW — fine boost is binary-off for collective airframes, not regime-blended — DEFERRED (v0.60)
 **Deferred:** the `if (_collective) fineGain = 1` line is in shared pre-compute that EvolvedLegacy
