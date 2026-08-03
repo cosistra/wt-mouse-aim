@@ -20,9 +20,23 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "1.0.0";
+        public const string PluginVersion = "1.0.1";
 
         internal static ManualLogSource Log;
+
+        // v1.0.1 — EVERY NUMBER THE MOD WRITES INTO AN ARTIFACT GOES THROUGH HERE (or through the
+        // scoped swap in ManeuverRecorder.Sample). String interpolation formats with the AMBIENT
+        // culture, and nothing in this mod ever set one, so on a comma-decimal locale (ro/de/fr/es/…)
+        // the recorder wrote "0,22" into a comma-DELIMITED CSV and destroyed its own file — a posted
+        // capture parsed as 0 rows, 1652/1652 dropped. The anomaly log, the '# config' header and the
+        // '# fbw' header had it too, so a locale user could not hand in a usable artifact at all.
+        // See debugtests/DISCORD-V68-TRIAGE.md §1 for the field bundle that surfaced it.
+        //
+        // Deliberately NOT CultureInfo.DefaultThreadCurrentCulture in Awake, which would be a one-line
+        // fix: that culture belongs to the whole Unity process, and flipping it would restyle the
+        // GAME's own HUD/menu numbers for every non-English player. A mod does not mutate process
+        // state it does not own. The cost of doing it honestly is this wrapper at each write site.
+        internal static string Inv(System.FormattableString fs) => System.FormattableString.Invariant(fs);
 
         // Session id (v0.44): one short wallclock-derived id per game session, stamped into the startup
         // log line, every recording CSV header and the anomaly file header — the human-visible join key

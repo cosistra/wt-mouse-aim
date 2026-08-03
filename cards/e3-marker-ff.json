@@ -6,7 +6,7 @@
  "note": "E3 of the ATTRIBUTION batch: sweep-slow's 4.5 deg/s sustained demand, unchanged, with Control/MarkerRateFeedForward swept ABBA. GENERALITY-REVIEW finding 16 measured the v0.78 feed-forward supplying 82.5% of the turn demand and arriving as 0.0000 of roll stick above the lateralHold rail, so it has never been A/B'd anywhere it can reach the roll channel at all. PASS: blendRailPct ~ 0 (the gate) and the on arm holds a smaller standing lag - mean |azErr| and terminalOffDeg - than the off arm, with aimRate recorded on both arms so a null cannot be confused with the feed-forward never firing. FAIL: the arms match while blendRailPct is ~ 0, which says the feed-forward is inert even off the rail and extends finding 16 rather than closing it. FLEET since v0.94: the arm is per-aircraft state read through ChaseController.Arm(), so the scheduler no longer stands down under concurrency and every lane runs its own independent ABBA - 8 lanes x repeat 8 = 64 runs, at the same wall clock as one lane (R28: 384 captures across 8 lanes in 30m14s). Generated - see cards/README.md. AIRFRAME: the eight fixed-wing keys that clear the v0.92 envelope gate (1.10x Vstall .. 0.95x Vmax) at this card's 250 m/s. CAS1 (0.95x Vmax = 195.3), COIN (134.6) and all three rotorcraft would be refused pre-spawn and are left out rather than shipped as guaranteed refusal lines.",
  "startSpeed": 250,
  "startAlt": 4000,
- "repeat": 8,
+ "repeat": 9,
  "armToggle": "Control/MarkerRateFeedForward",
  "segments": [
   {

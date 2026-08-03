@@ -6,7 +6,7 @@
   "note": "E1 of the ATTRIBUTION batch: oblique-below's geometry, unchanged, with Control/BelowAlignSuppress swept ABBA so one checkbox flies both arms. It asks whether the v0.85 roll-invariant below-nose suppression buys anything where the elDn defect lives - the regime that stands 6.92 deg of error at +-43 deg of bank while its LARGER upper mirror stands 0.03. PASS: with the suppression on, terminalOffDeg and rollYawOpposedPct on the below-nose segments come down against the off arm and the mirror pairs move closer together. FAIL: no separation between arms (the fix does nothing where it was aimed), or the on arm is worse. Read blendRailPct first - a railed segment is no signal, not a good score. FLEET since v0.94: the arm is per-aircraft state read through ChaseController.Arm(), so the scheduler no longer stands down under concurrency and every lane runs its own independent ABBA - 8 lanes x repeat 8 = 64 runs, at the same wall clock as one lane (R28: 384 captures across 8 lanes in 30m14s). compare-runs.py groups by (airframe, card, arm) and refuses to pool, so this comes back as eight A/Bs, which is the one-law question. Its control is e1-below-control, same knob on the above-nose diamond - fly the two in the same session. AIRFRAME: the eight fixed-wing keys that clear the v0.92 envelope gate (1.10x Vstall .. 0.95x Vmax) at this card's 250 m/s. CAS1 (0.95x Vmax = 195.3), COIN (134.6) and all three rotorcraft would be refused pre-spawn and are left out rather than shipped as guaranteed refusal lines.",
   "startSpeed": 250,
   "startAlt": 6000,
-  "repeat": 8,
+  "repeat": 9,
   "armToggle": "Control/BelowAlignSuppress",
   "segments": [
     { "tag": "arm",     "dur": 6, "az": 0,     "el": -15.76 },

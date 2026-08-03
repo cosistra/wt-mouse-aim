@@ -429,7 +429,7 @@ namespace NuclearOptionMouseAim
                 catch { /* aircraft not resolvable right now — leave <unknown> */ }
                 _w.WriteLine($"# mouseaim recording  v{WTMouseAimPlugin.PluginVersion}  run=R{WTMouseAimPlugin.RunIndex}"
                            + $"  rec={_recIndex}  session={WTMouseAimPlugin.SessionId}");
-                _w.WriteLine($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
+                _w.WriteLine(WTMouseAimPlugin.Inv($"# started {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}"));
                 _w.WriteLine($"# aircraft '{acName}'");
                 // Own line, not appended to '# aircraft': scorecard.py matches that one with a greedy
                 // `'(.*)'` and a header line is a contract. Absent entirely for a crewed capture.
@@ -469,10 +469,20 @@ namespace NuclearOptionMouseAim
             // floor or by a stick touch is otherwise indistinguishable from a clean completion to
             // anything reading the CSV — it just has fewer rows — so a batch would silently average
             // truncated runs in with whole ones. The scorer keys off this line to exclude them.
-            try { _w.WriteLine($"# stop t={Time.time:0.000} dur={dur:0.0} samples={n} reason={reason}"); }
+            try { _w.WriteLine(WTMouseAimPlugin.Inv($"# stop t={Time.time:0.000} dur={dur:0.0} samples={n} reason={reason}")); }
             catch { /* the summary is a bonus; never let it break the close path */ }
             CloseQuietly();
-            WTMouseAimPlugin.Log.LogInfo($"[rec] done ({reason}) dur={dur:0.0}s samples={n} -> {path}");
+            WTMouseAimPlugin.Log.LogInfo(WTMouseAimPlugin.Inv($"[rec] done ({reason}) dur={dur:0.0}s samples={n} -> {path}"));
+            // v1.0.1 — a header-only capture is the ONE outcome the line above reads as success: it names a
+            // file that exists and has a size. Four such files arrived in the v0.68 Discord bundle
+            // (debugtests/DISCORD-V68-TRIAGE.md §4) — three stamped the SAME Time.time three wall-clock
+            // seconds apart, i.e. the clock was frozen (paused / menu), so Sample's `now - _lastSample <
+            // minDt` rate limiter never passed and the recorder wrote a header and nothing else, silently,
+            // three times in four seconds. The user only found out when the analyzer said "no data rows".
+            if (n == 0)
+                WTMouseAimPlugin.Log.LogWarning(
+                    $"[rec] NO DATA ROWS — header only. The clock did not advance while recording "
+                  + $"(game paused, a menu open, or no aircraft): {path}");
         }
 
         private void CloseQuietly()
@@ -493,7 +503,7 @@ namespace NuclearOptionMouseAim
         private void NoteConfigChangeInst(string section, string key, object value)
         {
             if (_w == null) return;
-            try { _w.WriteLine($"# cfg t={Time.time:0.000} {section}/{key} = {value}"); }
+            try { _w.WriteLine(WTMouseAimPlugin.Inv($"# cfg t={Time.time:0.000} {section}/{key} = {value}")); }
             catch (System.Exception e)
             {
                 WTMouseAimPlugin.Log.LogWarning($"[rec] config-note write failed, stopping: {e.Message}");
@@ -564,6 +574,15 @@ namespace NuclearOptionMouseAim
             Vector3 datum = Vector3.zero;
             try { datum = Datum.originPosition; }
             catch { /* leave zero */ }
+            // v1.0.1 — SCOPED culture swap rather than 12 WTMouseAimPlugin.Inv() wraps, and the choice is
+            // load-bearing: this row is the artifact the comma-decimal bug actually DESTROYS (a comma
+            // decimal inside a comma-delimited file), and the column list has grown 45 -> 72 and will grow
+            // again. A wrap-per-piece leaves every future column one forgotten `Inv(` away from silently
+            // re-breaking the file; enclosing the write covers the columns that exist and the ones that do
+            // not yet. Restored in `finally`, so an IO throw cannot leak the invariant culture into the
+            // game's own formatting. Main thread, synchronous, no awaits — the swap cannot escape.
+            var _prevCulture = System.Globalization.CultureInfo.CurrentCulture;
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
             try
             {
                 _w.WriteLine(
@@ -588,6 +607,7 @@ namespace NuclearOptionMouseAim
                 WTMouseAimPlugin.Log.LogWarning($"[rec] write failed, stopping: {e.Message}");
                 CloseQuietly();
             }
+            finally { System.Globalization.CultureInfo.CurrentCulture = _prevCulture; }
         }
 
         // -----------------------------------------------------------------------------------------
@@ -895,7 +915,7 @@ namespace NuclearOptionMouseAim
                 _w = new System.IO.StreamWriter(_path, true) { AutoFlush = true }; // append: one file per session
                 _w.WriteLine($"# mouseaim anomalies  v{WTMouseAimPlugin.PluginVersion}  run=R{WTMouseAimPlugin.RunIndex}"
                            + $"  session={WTMouseAimPlugin.SessionId}");
-                _w.WriteLine($"# opened {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}");
+                _w.WriteLine(WTMouseAimPlugin.Inv($"# opened {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}  t={Time.time:0.000}"));
                 WTMouseAimPlugin.Log.LogInfo($"[anomaly] file -> {_path}");
             }
             catch (System.Exception e)

@@ -532,6 +532,15 @@ namespace NuclearOptionMouseAim
             bool iStall    = arm != null ? arm.Arm(IntegralStallGate)     : IntegralStallGate.Value;
             bool belowSup  = arm != null ? arm.Arm(BelowAlignSuppress)    : BelowAlignSuppress.Value;
             bool alignLead = arm != null ? arm.Arm(AlignRateLead)         : AlignRateLead.Value;
+            // v1.0.1 — scoped culture swap, same reasoning as ManeuverRecorder.Sample: this builds the
+            // '# config' header EVERY offline tool parses (scorecard.py's cfg_params() regex reads the
+            // numbers straight out of it), and it is one return expression of a dozen concatenated
+            // interpolated pieces. Wrapping each piece would be a dozen chances to forget one on the next
+            // knob added; enclosing the whole build cannot be forgotten. Restored in `finally`.
+            var prevCulture = System.Globalization.CultureInfo.CurrentCulture;
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+            try
+            {
             return
                 $"law=EvolvedLegacy sens={PitchYawSensitivity.Value:0.0} chaseDamp={ChaseDamping.Value:0.00} " +
                 $"pitchG={PitchGain.Value:0.0} yawG={YawGain.Value:0.0} rollG={RollGain.Value:0.00} rollDamp={RollDamping.Value:0.00} rollSm={RollRateSmoothing.Value:0.00} " +
@@ -555,6 +564,8 @@ namespace NuclearOptionMouseAim
                 // v0.94: passed IN (per aircraft) rather than read from a static — see ArmTagFor.
                 armTag +
                 $"heliFwd={HeliForwardSpeed.Value:0} heliHover={HeliHoverSpeed.Value:0} heliYawSc={HeliYawScale.Value:0.00}";
+            }
+            finally { System.Globalization.CultureInfo.CurrentCulture = prevCulture; }
         }
 
         // Emit the gain dump to the BepInEx log at startup/reset so the log is self-describing for tuning.

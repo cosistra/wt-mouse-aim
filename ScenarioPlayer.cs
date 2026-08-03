@@ -431,7 +431,8 @@ namespace NuclearOptionMouseAim
         // WHICH ARM THIS AIRCRAFT IS FLYING. Per aircraft since v0.94, so the board's lines can now
         // legitimately disagree — a batch of four drones mid-ABBA reads A/B/B/A, and that is the
         // release working rather than a display bug. "-" = nothing is being interleaved.
-        public string ArmLabel => _armEntry == null ? "-" : (_armIdx == 1 ? "B" : "A");
+        public string ArmLabel =>
+            _armEntry == null ? "-" : _armIdx < 0 ? "warm" : (_armIdx == 1 ? "B" : "A");
 
         public float SegSecondsLeft =>
             _durs != null && _si < _durs.Length ? Mathf.Max(0f, _durs[_si] - _tSeg) : 0f;
@@ -1000,7 +1001,15 @@ namespace NuclearOptionMouseAim
         // it verbatim — a Python copy of the sequence would agree with itself forever.
         // --- ARM-SCHEDULE BEGIN ---
         // `replicateIndex`, not the queue index — the caller divides by _block first (v0.99.1).
-        internal static int ArmOf(int replicateIndex) => ((replicateIndex + 1) >> 1) & 1;
+        // v1.0.1 — REPLICATE 0 IS A WARM-UP AND RETURNS -1 (backlog #55b). It is the replicate whose
+        // placement CAPTURES the run anchor, so it cannot snap back to it: it flies from the spawn
+        // state while every later replicate arrives teleported, decelerated and one card lighter on
+        // fuel. That is a permanently distinct flight condition, and the old `((i+1)>>1)&1` put it on
+        // arm A every single time — 12.5% of one arm, 0% of the other, on every ABBA card ever flown.
+        // The ABBA now runs over replicates 1..N, so it is BALANCED WHEN THE SCORED COUNT (repeat − 1)
+        // IS A MULTIPLE OF 4 — i.e. cards want repeat 5, 9, 13, not 4, 8, 12. SetUpArmSchedule warns.
+        internal static int ArmOf(int replicateIndex) =>
+            replicateIndex == 0 ? -1 : (replicateIndex >> 1) & 1;
         // --- ARM-SCHEDULE END ---
 
         // =========================================================================================
@@ -1274,7 +1283,13 @@ namespace NuclearOptionMouseAim
         {
             if (_armEntry == null) { _armIdx = -1; return; }
             _armIdx = ArmOf(_qi / _block);
-            ChaseController.SetArm(_acId, _armEntry.Definition.Key, _armIdx == 1);
+            // _armIdx < 0 is replicate 0, the anchor-defining warm-up (ArmOf, #55b): it is on NEITHER
+            // arm, so leave the knob at its live value and assign nothing. The capture still prints
+            // `arm=-1`, which is what keeps it out of a pooled A/B — compare-runs.py groups by arm and
+            // only ever diffs 0 against 1, so -1 is a third group nothing compares. Silence here would
+            // be worse than a wrong value: it would look like an unswept card.
+            if (_armIdx >= 0)
+                ChaseController.SetArm(_acId, _armEntry.Definition.Key, _armIdx == 1);
         }
 
         // Standalone entry-condition key. Puts the aircraft exactly where a run would start it WITHOUT
@@ -1419,19 +1434,30 @@ namespace NuclearOptionMouseAim
             // the queue-wide sums matched exactly and nothing warned. Balanced exactly when the
             // REPLICATE count is a multiple of 4; the display below is still the whole queue, because
             // that is the sequence the operator will watch fly.
+            //
+            // v1.0.1 — REPLICATE 0 IS SCORED BY NEITHER ARM (#55b), so it is tallied by neither. It
+            // prints as '.' and the balance question is asked of replicates 1..N only: the invariant
+            // now needs (repeat − 1) to be a multiple of 4, not repeat. Counting the warm-up as an A
+            // is exactly the defect being removed, so this loop must start at 1 and skip ArmOf < 0.
             int reps = Mathf.Max(1, runs / Mathf.Max(1, _block));
             var sb = new System.Text.StringBuilder(runs);
-            for (int i = 0; i < runs; i++) sb.Append(ArmOf(i / _block) == 1 ? 'B' : 'A');
-            int nA = 0, sumA = 0, sumB = 0;
+            for (int i = 0; i < runs; i++)
+            {
+                int a = ArmOf(i / _block);
+                sb.Append(a < 0 ? '.' : a == 1 ? 'B' : 'A');
+            }
+            int nA = 0, nB = 0, sumA = 0, sumB = 0;
             for (int r = 0; r < reps; r++)
             {
-                if (ArmOf(r) == 1) sumB += r; else { nA++; sumA += r; }
+                int a = ArmOf(r);
+                if (a < 0) continue;                       // the warm-up is on neither arm
+                if (a == 1) { nB++; sumB += r; } else { nA++; sumA += r; }
             }
-            int nB = reps - nA;
             string key = _armEntry.Definition.Key;
             WTMouseAimPlugin.Log.LogInfo(
                 $"[card] A/B arms on '{key}' (from {armSrc}; A = {key} OFF, B = ON): {sb} — "
-                + $"{reps} replicate(s) x {_block} card(s), {nA} A / {nB} B per card. "
+                + $"{reps} replicate(s) x {_block} card(s), {nA} A / {nB} B per card "
+                + $"('.' = replicate 0, the anchor-defining WARM-UP: on neither arm, scored by neither). "
                 + $"Each capture names its own arm on the '# config' line (arm=/armKnob=). "
                 + $"THIS AIRCRAFT only (v0.94): the arm is per-aircraft state read through the controller, "
                 + $"so other aircraft sweep their own schedules and the F1 value of '{key}' is never written.");
@@ -1440,9 +1466,11 @@ namespace NuclearOptionMouseAim
                     $"[card] arm schedule is UNBALANCED WITHIN EACH CARD over {reps} replicate(s): {nA}/{nB}, "
                     + $"mean replicate index {(nA > 0 ? (float)sumA / nA : 0f):0.0} vs "
                     + $"{(nB > 0 ? (float)sumB / nB : 0f):0.0}. One arm sits earlier in every card's own "
-                    + "sequence than the other, so a one-way session drift will still lean on it — use a "
-                    + "REPLICATE count that is a MULTIPLE OF 4 (card 'repeat' / ScenarioRepeat; the number "
-                    + "of cards selected does not enter into it).");
+                    + "sequence than the other, so a one-way session drift will still lean on it — set "
+                    + "'repeat' so the SCORED count is a MULTIPLE OF 4, i.e. repeat = 4k+1 (5, 9, 13). "
+                    + "v1.0.1: replicate 0 is the anchor-defining warm-up and is on neither arm (#55b), "
+                    + "so it is repeat MINUS ONE that has to divide by 4 — a repeat of 8 now scores 7 "
+                    + "and warns. The number of cards selected does not enter into it.");
             Notify($"ARMS {sb} on {key}");
         }
 

@@ -311,6 +311,43 @@ def arm_diff(runs_a, runs_b):
     return out
 
 
+def _anchor_replicate_filter(runs_a, runs_b):
+    """(runs_a, runs_b, warning) with the ANCHOR-DEFINING replicate removed from an A/B pool.
+
+    Backlog #55b. The first placement of a lane is the one that CAPTURES the run anchor, so it snaps
+    back 0 m by construction and writes back the speed/altitude the aircraft already had; every later
+    replicate is teleported to that anchor from wherever it drifted. Measured on R41
+    `e1-below-suppress`/`FastBomber1`: replicate 1 entered `v=250->250 alt=6000->6000 snapBackM=0`,
+    replicates 2-8 entered `v~352->250 alt~2180->6000 snapBackM~11000`. Those are two flight
+    conditions, and `ArmOf` is `((i+1)>>1)&1`, so index 0 is arm 0 on EVERY ABBA card ever flown --
+    the stratum is 12.5% of one arm and 0% of the other. On that lane it turned a null into an
+    apparent 30% win (see debugtests/R41-fixedwing.md 2).
+
+    Only drops when the stratum is UNBALANCED between the arms, which is the confound. Equal counts
+    on both sides carry no arm bias, so a card whose placements are legitimately no-ops (place-noop)
+    keeps every run and stays comparable. Absent `snapBackM` (no `# entry` line -- an ungated card)
+    is never treated as 0; it is unknown, and unknown is not evidence.
+
+    # ponytail: counts-equal is the balance test. A 2-vs-1 split is left alone and only warned
+    # about; fix ArmOf in ScenarioPlayer.cs if a card ever produces one.
+    """
+    def noop(runs):
+        return [(p, r) for p, r in runs if r["provenance"].get("snapBackM") == 0.0]
+    na, nb = noop(runs_a), noop(runs_b)
+    if len(na) == len(nb):
+        return runs_a, runs_b, None
+    keep_a = [x for x in runs_a if x not in na]
+    keep_b = [x for x in runs_b if x not in nb]
+    warning = (f"dropped {len(na) + len(nb)} anchor-defining replicate(s) (snapBackM=0) from this "
+               f"A/B: {len(na)} on arm 0, {len(nb)} on arm 1. That placement captures the run "
+               f"anchor so it cannot snap back to it -- it flies from the spawn state while every "
+               f"other replicate arrives teleported, and ArmOf puts index 0 on arm 0 every time. "
+               f"Backlog #55b.")
+    if not keep_a or not keep_b:
+        return runs_a, runs_b, warning + " NOT APPLIED -- it would empty an arm; compare by hand."
+    return keep_a, keep_b, warning
+
+
 def _arm_comparisons(raw_groups):
     """[{"airframe", "card", "armA", "armB", "armKnob", "nA", "nB", "armKnobWarning",
     "balanceWarning", "segments"}] -- one entry per (airframe, CARD) that has BOTH arm 0 and arm 1
@@ -331,14 +368,16 @@ def _arm_comparisons(raw_groups):
         arms = by_af[(af, card)]
         if 0 not in arms or 1 not in arms:
             continue
-        armed_runs = arms[0] + arms[1]
+        a0, a1, anchor_warning = _anchor_replicate_filter(arms[0], arms[1])
+        armed_runs = a0 + a1
         knob, knob_warning = _group_knob(armed_runs)
         bal_warning = _arm_balance_warning(armed_runs)
         out.append({
             "airframe": af, "card": card, "armA": 0, "armB": 1, "armKnob": knob,
-            "nA": len(arms[0]), "nB": len(arms[1]),
+            "nA": len(a0), "nB": len(a1),
             "armKnobWarning": knob_warning, "balanceWarning": bal_warning,
-            "segments": None if knob_warning else arm_diff(arms[0], arms[1]),
+            "anchorWarning": anchor_warning,
+            "segments": None if knob_warning else arm_diff(a0, a1),
         })
     return out
 
@@ -449,6 +488,8 @@ def print_table(groups, arm_comparisons=()):
             print(f"  WARNING: {ac['armKnobWarning']}")
         if ac["balanceWarning"]:
             print(f"  WARNING: {ac['balanceWarning']}")
+        if ac.get("anchorWarning"):
+            print(f"  WARNING: {ac['anchorWarning']}")
         if ac["segments"] is None:
             continue
         if not ac["segments"]:
@@ -716,6 +757,67 @@ def selftest():
     tc = _arm_comparisons(group_runs(two_cards))
     assert [x["card"] for x in tc] == ["cardA", "cardB"], tc
     assert _arm_comparisons(group_runs([_armed(1, 0, card="cardA"), _armed(2, 1, card="cardB")])) == []
+
+    # --- backlog #55b: the anchor-defining replicate must not re-enter a pooled A/B -------------
+    # The R41 shape, reproduced exactly: rec 1 is arm 0 AND is the placement that captured the
+    # anchor (snapBackM=0), so it flew from the spawn and reads far worse than its own siblings.
+    # Left in, it drags arm 0's mean and prints as a knob effect; that is what happened to
+    # e1-below-suppress/FastBomber1 (5.495 against 0.252-0.268 on every other capture in the lane).
+    def _anchored(rec, arm, val, snap):
+        path, result = _armed(rec, arm, val=val)
+        if snap is not None:
+            result["provenance"]["snapBackM"] = snap
+        return (path, result)
+
+    poisoned = [_anchored(1, 0, 5.5, 0.0),                                     # arm 0: the no-op one
+                _anchored(4, 0, 2.0, 11000.0), _anchored(5, 0, 2.0, 11000.0),
+                _anchored(2, 1, 2.0, 11000.0), _anchored(3, 1, 2.0, 11000.0)]  # arm 1: none
+    # unfiltered, arm 0's mean is (5.5+2+2)/3 = 3.167 and the knob reads as a -1.167 "effect".
+    ac = _arm_comparisons(group_runs(poisoned))[0]
+    assert ac["anchorWarning"] is not None and "#55b" in ac["anchorWarning"], ac
+    assert (ac["nA"], ac["nB"]) == (2, 2), ac         # the snapBackM=0 run is gone from arm 0
+    d = ac["segments"][0]["metrics"]["gPeak"]
+    assert d["meanA"] == 2.0 and d["diff"] == 0.0, d  # the 5.5 outlier no longer moves arm 0
+
+    # ...and it is a BALANCE test, not a blanket ban: a card whose placements are legitimately
+    # no-ops on both arms (place-noop) keeps every run, or the guard would delete the comparison.
+    balanced_noop = [_anchored(1, 0, 2.0, 0.0), _anchored(4, 0, 2.0, 0.0),
+                     _anchored(2, 1, 3.0, 0.0), _anchored(3, 1, 3.0, 0.0)]
+    ac2 = _arm_comparisons(group_runs(balanced_noop))[0]
+    assert ac2["anchorWarning"] is None and (ac2["nA"], ac2["nB"]) == (2, 2), ac2
+
+    # ...and ABSENT snapBackM (an ungated card with no `# entry` line -- every R39 rotorcraft
+    # capture) is unknown, never 0. Dropping those would silently halve a rotor A/B.
+    no_entry = [_anchored(1, 0, 2.0, None), _anchored(4, 0, 2.0, None),
+                _anchored(2, 1, 3.0, None), _anchored(3, 1, 3.0, None)]
+    ac3 = _arm_comparisons(group_runs(no_entry))[0]
+    assert ac3["anchorWarning"] is None and (ac3["nA"], ac3["nB"]) == (2, 2), ac3
+
+    # ...and it must refuse rather than empty an arm (every arm-0 run anchor-defining).
+    all_anchor_a = [_anchored(1, 0, 2.0, 0.0), _anchored(2, 1, 3.0, 11000.0)]
+    ac4 = _arm_comparisons(group_runs(all_anchor_a))[0]
+    assert "NOT APPLIED" in ac4["anchorWarning"] and (ac4["nA"], ac4["nB"]) == (1, 1), ac4
+
+    # ...and it COMPOSES with the v1.0.1 schedule fix rather than double-counting it. From v1.0.1
+    # ScenarioPlayer.ArmOf(0) returns -1, so the anchor replicate self-labels `arm=-1`: arm_key parses
+    # that to a third group and _arm_comparisons only ever diffs 0 against 1, so the capture cannot
+    # reach a pool in the first place. This filter must then find nothing and stay silent -- a warning
+    # here on a post-fix batch would be the two fixes fighting. Pre-fix data (R41) still fires above.
+    post_fix = [_anchored(1, -1, 5.5, 0.0),                                    # v1.0.1: warm-up
+                _anchored(4, 0, 2.0, 11000.0), _anchored(5, 0, 2.0, 11000.0),
+                _anchored(2, 1, 2.0, 11000.0), _anchored(3, 1, 2.0, 11000.0)]
+    acs_pf = _arm_comparisons(group_runs(post_fix))
+    assert len(acs_pf) == 1, acs_pf                    # the arm=-1 group is not an A/B side
+    assert acs_pf[0]["anchorWarning"] is None, acs_pf  # nothing left for the filter to do
+    assert (acs_pf[0]["nA"], acs_pf[0]["nB"]) == (2, 2), acs_pf
+
+    # the provenance parse this all rests on: scorecard must read snapBackM off the `# entry` line,
+    # and must not invent one when the line is absent.
+    _pv = sc.provenance("x.csv", {"headers": [
+        "# entry v=250.0->250.0 alt=6000.0->6000.0 snapBackM=0.0 fuel=1.000->1.000 ctrlReset=1"]})
+    assert _pv["snapBackM"] == 0.0, _pv
+    _pv2 = sc.provenance("x.csv", {"headers": ["# aircraft 'AttackHelo1'"]})
+    assert "snapBackM" not in _pv2, _pv2
 
     # spread(): known mean/stdev, and n=1/n=0 don't fake a number.
     sp = spread([2.0, 4.0, 6.0])

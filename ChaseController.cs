@@ -573,8 +573,8 @@ namespace NuclearOptionMouseAim
                         else { _fbwGLimit = 9f; _fbwAlphaLimit = 25f; _fbwAlphaLimStr = 0.05f; }
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[fbw] '{(ac.definition != null ? ac.definition.name : "<unknown>")}' enabled={_fbwEnabled} " +
-                            $"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} " +
-                            $"alphaLimiter={_fbwAlphaLimit:0.#} (strength {_fbwAlphaLimStr:0.###})");
+                            WTMouseAimPlugin.Inv($"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} ") +
+                            WTMouseAimPlugin.Inv($"alphaLimiter={_fbwAlphaLimit:0.#} (strength {_fbwAlphaLimStr:0.###})"));
                     }
                 }
                 catch (System.Exception e)
@@ -635,7 +635,7 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogInfo(
                         $"[canard] resolve '{(ac.definition != null ? ac.definition.name : "<unknown>")}' " +
                         $"field={_rsCtrl != null} childScan={ac.GetComponentInChildren<RelaxedStabilityController>(true) != null}" +
-                        (_rsCtrl != null ? $" canardRange={_rsCanardRange:0.#} eff={_rsEffRef(_rsCtrl):0.##} — pitch linearization active." : " — identity (matches the game)."));
+                        (_rsCtrl != null ? WTMouseAimPlugin.Inv($" canardRange={_rsCanardRange:0.#} eff={_rsEffRef(_rsCtrl):0.##} — pitch linearization active.") : " — identity (matches the game)."));
                 }
             }
             catch (System.Exception e)
@@ -682,8 +682,8 @@ namespace NuclearOptionMouseAim
                         if (_heloOk) { _heloGLimit = gLim; _heloMaxAngVel = mav; }
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[helofbw] '{(ac.definition != null ? ac.definition.name : "<unknown>")}' enabled={enabled} " +
-                            $"gLimit={gLim:0.#} maxAngularVel=({mav.x:0.##},{mav.y:0.##},{mav.z:0.##}) " +
-                            $"directControl=({dcf.x:0.##},{dcf.y:0.##},{dcf.z:0.##}) " +
+                            WTMouseAimPlugin.Inv($"gLimit={gLim:0.#} maxAngularVel=({mav.x:0.##},{mav.y:0.##},{mav.z:0.##}) ") +
+                            WTMouseAimPlugin.Inv($"directControl=({dcf.x:0.##},{dcf.y:0.##},{dcf.z:0.##}) ") +
                             $"tiltwing={(_twc != null ? 1 : 0)} swivelduct={(_sds != null ? 1 : 0)} compound={(_hasCompound ? 1 : 0)}");
                     }
                 }
@@ -725,9 +725,9 @@ namespace NuclearOptionMouseAim
             try
             {
                 if (ResolveFbw(ac))
-                    return $"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} " +
-                           $"alphaLimiter={_fbwAlphaLimit:0.#} alphaLimiterStrength={_fbwAlphaLimStr:0.###} assist={(ac.flightAssist ? 1 : 0)}" +
-                           (_rsCtrl != null ? $" canardRange={_rsCanardRange:0.#}" : "");
+                    return WTMouseAimPlugin.Inv($"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} ") +
+                           WTMouseAimPlugin.Inv($"alphaLimiter={_fbwAlphaLimit:0.#} alphaLimiterStrength={_fbwAlphaLimStr:0.###} assist={(ac.flightAssist ? 1 : 0)}") +
+                           (_rsCtrl != null ? WTMouseAimPlugin.Inv($" canardRange={_rsCanardRange:0.#}") : "");
             }
             catch { /* fall through to unavailable */ }
             return "<unavailable>";
@@ -1791,6 +1791,13 @@ namespace NuclearOptionMouseAim
                         float elevE = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f)) - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
                         float spd  = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
                         string f = fine ? "0.000" : "0.00";
+                        // v1.0.1 — scoped swap, not Inv(), because this line mixes interpolation holes with
+                        // a dozen bare `.ToString(f)` calls: those render to a string BEFORE interpolation,
+                        // so Inv() cannot reach them and would leave the trace half-converted. The swap
+                        // covers both kinds at once. (Verbose DebugLogging only — off by default.)
+                        var prevCulture = System.Globalization.CultureInfo.CurrentCulture;
+                        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+                        try {
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[chase] t={Time.time:0.000} off={off:0.000}deg phi={phi:0.0} bigTurn={bigTurn:0.00} elevE={elevE:0.00} azE={azErr:0.00} azPred={azErrPred:0.00} noseTurn={noseTurnDeg:0.000} " +
                             $"fineG={fineGain:0.00} pull={pullGate:0.00} yawSc={yawScale:0.00} phase={LastPhase} tgtBank={targetBank:0.0} yawWeak={_yawWeak:0.00} assist={assist:0.00} coordPull={coordPull:0.000} iP/iY=({_iPitch.ToString(f)},{_iYaw.ToString(f)}){(flyLevel ? " LVL" : "")} " +
@@ -1799,6 +1806,8 @@ namespace NuclearOptionMouseAim
                             $"out P/R/Y=({_outP.ToString(f)},{_outR.ToString(f)},{_outY.ToString(f)}) " +
                             $"fin=({ci.pitch:0.00},{ci.roll:0.00},{ci.yaw:0.00}) man=({_engP:0.0},{_engR:0.0},{_engY:0.0}) " +
                             $"spd={spd:0} bank={bank:0.0} g={aircraft.gForce:0.0}");
+                        }
+                        finally { System.Globalization.CultureInfo.CurrentCulture = prevCulture; }
                     }
                 }
             }
@@ -2311,7 +2320,14 @@ namespace NuclearOptionMouseAim
         // No per-anomaly gain snapshot: gains are logged once at startup + on every change ([config] lines)
         // and embedded in each recording's header, so repeating them here only burned log/context. Instead
         // we tag the active control law and, when a recording is running, the CSV it belongs to.
-        private void Anomaly(string type, string detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
+        // v1.0.1 — `detail` is a FormattableString, NOT a string, and that one word is the whole fix for
+        // the eight call sites below: an interpolated literal binds to whichever the parameter asks for,
+        // so every `Anomaly("over-roll", $"bank={bank:0.0} …")` now arrives UNFORMATTED and is rendered
+        // invariantly here instead of in the ambient (possibly comma-decimal) culture at the call site.
+        // Formatting at the caller is what put "bank=-40,4" in the field logs; a string parameter cannot
+        // be fixed here at all, because by then the damage is done. Zero call-site edits, and a ninth
+        // detector added later is invariant for free.
+        private void Anomaly(string type, System.FormattableString detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
         {
             if (now - lastStamp < 1f) return; // per-type cooldown
             lastStamp = now;
@@ -2320,10 +2336,15 @@ namespace NuclearOptionMouseAim
             LastAnomalyIndex = _anomalyIndex; LastAnomalyType = type; LastAnomalyTime = now;
             float spd = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
             string rec = ManeuverRecorder.For(ac).CurrentFile;   // v0.86: THIS aircraft's capture
+            // Inv() on each piece, and note `detail` is rendered explicitly rather than interpolated as
+            // {detail}: interpolating a FormattableString would call its plain ToString() and re-introduce
+            // the ambient culture inside an otherwise-invariant line.
             string line =
-                $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
-                $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
-                $"law=EvolvedLegacy{(rec.Length > 0 ? $" rec={rec}" : "")}";
+                WTMouseAimPlugin.Inv($"[anomaly #{_anomalyIndex}] {type} t={now:0.000} ")
+              + System.FormattableString.Invariant(detail)
+              + WTMouseAimPlugin.Inv($" off={off:0.0} bank={bank:0.0} phase={LastPhase} ")
+              + WTMouseAimPlugin.Inv($"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} ")
+              + $"law=EvolvedLegacy{(rec.Length > 0 ? $" rec={rec}" : "")}";
             WTMouseAimPlugin.Log.LogWarning(line);
             AnomalyLog.Write(line);
             if (Cfg.AnomalyContext.Value) DumpTrail(now);
@@ -2343,7 +2364,7 @@ namespace NuclearOptionMouseAim
             {
                 int idx = ((_ringHead - 1 - i) % _ring.Length + _ring.Length) % _ring.Length;
                 AnFrame f = _ring[idx];
-                sb.Append($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}");
+                sb.Append(WTMouseAimPlugin.Inv($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}"));
             }
             string line = sb.ToString();
             WTMouseAimPlugin.Log.LogWarning(line);
@@ -2400,12 +2421,12 @@ namespace NuclearOptionMouseAim
             if (_manvSettle >= 0.3f)
             {
                 float dur = now - _manvStartT;
-                string align   = _manvAlignT   >= 0f ? $"{_manvAlignT:0.00}s"   : "n/a";
-                string capture = _manvCaptureT >= 0f ? $"{_manvCaptureT:0.00}s" : "n/a";
+                string align   = _manvAlignT   >= 0f ? WTMouseAimPlugin.Inv($"{_manvAlignT:0.00}s")   : "n/a";
+                string capture = _manvCaptureT >= 0f ? WTMouseAimPlugin.Inv($"{_manvCaptureT:0.00}s") : "n/a";
                 WTMouseAimPlugin.Log.LogInfo(
-                    $"[maneuver] start={_manvStartOff:0}deg peak={_manvPeakOff:0}deg dur={dur:0.00}s " +
-                    $"toAlign={align} toCapture={capture} peakBank={_manvPeakBank:0}deg peakG={_manvPeakG:0.0} " +
-                    $"peakRollRate={_manvPeakRoll:0.00} overshoot={(_manvOvershot ? "Y" : "n")}");
+                    WTMouseAimPlugin.Inv($"[maneuver] start={_manvStartOff:0}deg peak={_manvPeakOff:0}deg dur={dur:0.00}s ") +
+                    WTMouseAimPlugin.Inv($"toAlign={align} toCapture={capture} peakBank={_manvPeakBank:0}deg peakG={_manvPeakG:0.0} ") +
+                    WTMouseAimPlugin.Inv($"peakRollRate={_manvPeakRoll:0.00} overshoot={(_manvOvershot ? "Y" : "n")}"));
                 _manvActive = false;
                 _manvSettle = 0f;
             }
@@ -2453,7 +2474,7 @@ namespace NuclearOptionMouseAim
                 catch { /* ignore — archetype info is best-effort */ }
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[seam] now flying '{name}' — fixedWing={fixedWing} collective={!fixedWing} hasAutoHover={hasHover}{arch} " +
-                    $"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only).");
+                    WTMouseAimPlugin.Inv($"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only)."));
             }
 
             // TEST-CARD DEMAND (M1). Runs HERE, in the prefix, so the scripted aim direction for this

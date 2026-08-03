@@ -233,32 +233,78 @@ internal static class P
 
     static int Main()
     {{
-        // --- 1. ABBA over 8 replicates -------------------------------------------------------
-        int[] want = {{ 0, 1, 1, 0, 0, 1, 1, 0 }};
+        // --- 1. Replicate 0 is the WARM-UP; ABBA runs over replicates 1..N (v1.0.1, #55b) ------
+        // Replicate 0's placement is the one that CAPTURES the run anchor, so it cannot snap back to
+        // it: it flies from the spawn state (R41 e1-below-suppress/FastBomber1: `v=250->250
+        // alt=6000->6000 snapBackM=0` against `v~352->250 alt~2180->6000 snapBackM~11000` for every
+        // later replicate) and scored 5.495 deg against its own siblings' 0.252-0.268. A permanently
+        // distinct flight condition cannot be balanced into an arm, so it is armed as NEITHER.
+        int[] want = {{ -1, 0, 1, 1, 0, 0, 1, 1, 0 }};
         for (int i = 0; i < want.Length; i++)
             Ok(Sched.ArmOf(i) == want[i], $"ArmOf({{i}}) = {{Sched.ArmOf(i)}}, want {{want[i]}}");
+
+        // --- 1b. THE ANCHOR-STRATUM PROPERTY, asserted rather than assumed -------------------
+        // The defect was not "the pattern is wrong" -- ABBAABBA was a correct ABBA. It was that the
+        // anchor stratum (exactly one replicate, index 0) landed on arm A in 100% of lanes. So the
+        // property to hold is about that STRATUM, not about the pattern: no scored arm may ever
+        // contain replicate 0. Stated as a property it survives someone rewriting the pattern.
+        Ok(Sched.ArmOf(0) < 0, $"ArmOf(0) = {{Sched.ArmOf(0)}} — the anchor replicate must be on "
+                               + "NEITHER arm; any value in {{0,1}} reintroduces #55b");
+        for (int i = 1; i < 64; i++)
+            Ok(Sched.ArmOf(i) == 0 || Sched.ArmOf(i) == 1,
+               $"ArmOf({{i}}) = {{Sched.ArmOf(i)}} — only replicate 0 may be unarmed");
+        // ...and the counterfactual: the shipped-until-v1.0.0 form armed it, which is the bug.
+        Ok((((0 + 1) >> 1) & 1) == 0,
+           "counterfactual: the pre-v1.0.1 ArmOf(0) = ((0+1)>>1)&1 = 0 put the anchor replicate on "
+           + "arm A on every ABBA card ever flown — 12.5% of one arm, 0% of the other");
 
         // --- 2. THE INVARIANT: equal counts AND equal mean position, at every multiple of 4 ---
         // Equal counts alone is not it: ABBAAB has 3/3 and still leans A early, which is why the
         // suite-start balance check compares sum(index) rather than n.
-        foreach (int runs in new[] {{ 4, 8, 12, 16, 40 }})
+        // v1.0.1: the subject is the SCORED replicates, 1..scored — replicate 0 is the warm-up and is
+        // tallied by neither arm (mirrors SetUpArmSchedule's own loop). So the invariant now holds at
+        // every multiple of 4 SCORED, i.e. at repeat = 4k+1.
+        foreach (int scored in new[] {{ 4, 8, 12, 16, 40 }})
         {{
             int nA = 0, nB = 0, sumA = 0, sumB = 0;
-            for (int i = 0; i < runs; i++)
-                if (Sched.ArmOf(i) == 1) {{ nB++; sumB += i; }} else {{ nA++; sumA += i; }}
-            Ok(nA == nB, $"n={{runs}}: {{nA}} A vs {{nB}} B — counts must match");
-            Ok(sumA == sumB, $"n={{runs}}: sum(index) {{sumA}} A vs {{sumB}} B — mean position must match");
+            for (int i = 1; i <= scored; i++)
+            {{
+                int a = Sched.ArmOf(i);
+                if (a < 0) continue;
+                if (a == 1) {{ nB++; sumB += i; }} else {{ nA++; sumA += i; }}
+            }}
+            Ok(nA == nB, $"scored={{scored}}: {{nA}} A vs {{nB}} B — counts must match");
+            Ok(sumA == sumB, $"scored={{scored}}: sum(index) {{sumA}} A vs {{sumB}} B — mean position must match");
         }}
-        // ...and the documented failure this pins in place: n=6 is ABBAAB, which has EQUAL COUNTS
-        // (3/3) and still leans A early. That is exactly why the suite-start check compares
+        // ...and the documented failure this pins in place: 6 SCORED is A,B,B,A,A,B, which has EQUAL
+        // COUNTS (3/3) and still leans A early. That is exactly why the suite-start check compares
         // sum(index) and why the UNBALANCED warning exists — not something to "fix" here.
         {{
             int nA = 0, nB = 0, sumA = 0, sumB = 0;
-            for (int i = 0; i < 6; i++)
-                if (Sched.ArmOf(i) == 1) {{ nB++; sumB += i; }} else {{ nA++; sumA += i; }}
+            for (int i = 1; i <= 6; i++)
+            {{
+                int a = Sched.ArmOf(i);
+                if (a < 0) continue;
+                if (a == 1) {{ nB++; sumB += i; }} else {{ nA++; sumA += i; }}
+            }}
             Ok(nA == nB && sumA != sumB,
-               $"n=6 must be equal-count ({{nA}}/{{nB}}) but UNEQUAL mean position ({{sumA}}/{{sumB}}) — "
+               $"6 scored must be equal-count ({{nA}}/{{nB}}) but UNEQUAL mean position ({{sumA}}/{{sumB}}) — "
                + "the case that proves counts alone do not detect an imbalance");
+        }}
+        // ...and the consequence a card author has to act on: a repeat of 8 now scores SEVEN, which
+        // cannot be balanced at all. This asserts the warning path is reachable, so the "use 4k+1"
+        // advice in SetUpArmSchedule is load-bearing rather than decorative.
+        {{
+            int nA = 0, nB = 0, sumA = 0, sumB = 0;
+            for (int r = 0; r < 8; r++)
+            {{
+                int a = Sched.ArmOf(r);
+                if (a < 0) continue;
+                if (a == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
+            }}
+            Ok(nA + nB == 7 && !(nA == nB && sumA == sumB),
+               $"repeat=8 scores {{nA + nB}} replicate(s) ({{nA}}A/{{nB}}B) and MUST read unbalanced — "
+               + "cards want repeat 4k+1 (5, 9, 13) now that replicate 0 is a warm-up");
         }}
 
         // --- 2b. THE SUBJECT OF THE BALANCE CHECK IS THE CARD, NOT THE QUEUE (v0.99.1) --------
@@ -267,8 +313,9 @@ internal static class P
         // SINGLE card flies. Indexing by replicate (_qi / _block) makes every card fly the same
         // ArmOf-over-replicates sequence; the counterfactual below is the shipped-until-v0.99.1
         // bare ArmOf(_qi), asserted UNBALANCED so nobody can quietly go back to it.
+        // reps are 4k+1 here (v1.0.1): replicate 0 is the warm-up, so 5 and 9 are what balance.
         foreach (int nCards in new[] {{ 1, 2, 3, 4 }})
-        foreach (int reps in new[] {{ 4, 8 }})
+        foreach (int reps in new[] {{ 5, 9 }})
         {{
             for (int k = 0; k < nCards; k++)
             {{
@@ -276,7 +323,9 @@ internal static class P
                 for (int r = 0; r < reps; r++)
                 {{
                     int qi = r * nCards + k;                 // card k's r-th run in the blocked queue
-                    if (Sched.ArmOf(qi / nCards) == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
+                    int a = Sched.ArmOf(qi / nCards);
+                    if (a < 0) continue;                     // the warm-up is on neither arm
+                    if (a == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
                 }}
                 Ok(nA == nB && sumA == sumB,
                    $"{{nCards}} card(s) x {{reps}} reps, card {{k}}: {{nA}}A/{{nB}}B, sum {{sumA}}/{{sumB}} — "
@@ -284,16 +333,21 @@ internal static class P
             }}
         }}
         {{
-            // 2 cards x repeat 4 under the OLD rule: equal counts, mean position 1 vs 2 within c1.
+            // 2 cards x repeat 5 under the OLD rule (bare ArmOf(_qi), no divide): card 0 samples the
+            // schedule at queue positions 0,2,4,6,8 and comes out UNBALANCED. Asserted as "not
+            // balanced" rather than as one specific shape, because the shape moved in v1.0.1 while
+            // the defect did not — pinning the shape is what would make this test rot.
             int nA = 0, nB = 0, sumA = 0, sumB = 0;
-            for (int r = 0; r < 4; r++)
+            for (int r = 0; r < 5; r++)
             {{
                 int qi = r * 2 + 0;
-                if (Sched.ArmOf(qi) == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
+                int a = Sched.ArmOf(qi);
+                if (a < 0) continue;
+                if (a == 1) {{ nB++; sumB += r; }} else {{ nA++; sumA += r; }}
             }}
-            Ok(nA == nB && sumA != sumB,
-               $"counterfactual: bare ArmOf(_qi) must leave card 0 equal-count ({{nA}}/{{nB}}) but "
-               + $"UNBALANCED in mean position ({{sumA}}/{{sumB}}) — the defect this indexing fixed");
+            Ok(!(nA == nB && sumA == sumB),
+               $"counterfactual: bare ArmOf(_qi) must leave card 0 UNBALANCED ({{nA}}A/{{nB}}B, "
+               + $"sum {{sumA}}/{{sumB}}) — the defect that indexing by replicate fixed");
         }}
 
         // --- 3. No assignment: the live config value passes straight through ------------------

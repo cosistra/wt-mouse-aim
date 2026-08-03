@@ -416,6 +416,18 @@ def provenance(path, meta):
         if m3:
             prov["stop"] = m3.group(1).strip()
             prov["aborted"] = prov["stop"].startswith("abort:")
+        # v0.84 `# entry` line: how far the per-replicate placement actually MOVED this aircraft.
+        # 0.0 means the placement was a no-op, which on the FIRST replicate of a lane is structural
+        # rather than incidental — that placement is the one that CAPTURES the run anchor, so it
+        # cannot snap back to it. Such a replicate therefore flies from the spawn state while every
+        # later one arrives teleported and decelerated, and `ArmOf(0) = 0` puts the whole stratum on
+        # arm 0. compare-runs.py's _arm_comparisons() needs this to keep it out of an A/B pool.
+        # ABSENT (no `# entry` line at all — an ungated card, e.g. every R39 rotorcraft capture) must
+        # stay absent, never 0: "the placement moved nothing" and "there was no placement" are
+        # different facts and only the first one is evidence.
+        m4 = re.match(r"# entry .*?snapBackM=([-\d.]+)", h)
+        if m4:
+            prov["snapBackM"] = float(m4.group(1))
     if meta.get("cfg"):
         prov["config"] = meta["cfg"]
     fbw = aw.fbw_params(meta)  # reused as-is: same meta shape

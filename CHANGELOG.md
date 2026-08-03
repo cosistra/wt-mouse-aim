@@ -3,6 +3,116 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 1.0.1
+
+**The mod has never been able to accept a bug report from most of Europe, and nobody noticed because
+the failure looks like the user posting nothing.** Triage of the v0.68.0 Discord bundle
+(`debugtests/DISCORD-V68-TRIAGE.md`) found five of six posted files unreadable for one reason:
+**every number the mod writes was formatted in the ambient culture.** Instrumentation only — no
+control-law change, no recorder columns added or moved, no behaviour difference on a dot-decimal
+machine.
+
+### Culture-invariant artifacts (#72)
+
+String interpolation renders through `CultureInfo.CurrentCulture`, and nothing in this mod ever set
+one — `grep -rn CultureInfo *.cs` returned exactly **two** hits before this release, both inside the
+`.airframe.json` sidecar writer, which is precisely why the sidecar was the one artifact that
+survived. So on `ro-RO`/`de-DE`/`fr-FR`/`es-ES`/… `ManeuverRecorder.Sample` wrote a **comma decimal
+into a comma-delimited CSV**:
+
+```
+116,217,0,22,0,24,0,08,74,0,0,000,-4,1,…      # t=116.217 off=0.22 azErr=0.24 elevErr=0.08 phi=74.0 …
+```
+
+`analyze-wobble.py --digest` drops **1652/1652** and **849/849** rows — *"no data rows"*. Three
+fields become six; the row count survives and the data does not. The same bug hit the `# config`
+header every offline tool parses (`sens=3,0 chaseDamp=0,25`), the `# fbw` header
+(`maxPitchAngVel=0,9`), and **every `[anomaly]`/`[anomaly:trail]`/`[maneuver]` line**
+(`t=134,883 g=9,3`), so the affected user could hand in neither a capture nor a greppable anomaly log.
+
+**Fixed at the write paths, in two mechanisms, each chosen for what the site looks like** — and
+*not* by setting `CultureInfo.DefaultThreadCurrentCulture` in `Awake`, which is the tempting one-line
+version: that culture belongs to the whole Unity process, so it would restyle the **game's** own
+HUD and menu numbers for every non-English player. A mod does not mutate process state it does not own.
+
+- **`WTMouseAimPlugin.Inv(FormattableString)`** — one line, no new type — wraps sites with a fixed,
+  countable set of pieces: the `# started`/`# stop`/`# cfg`/`# opened` header lines, `FbwHeader`
+  (the `# fbw` header), the `[anomaly]` line, `[anomaly:trail]`, `[maneuver]`, and the
+  `[fbw]`/`[canard]`/`[helofbw]`/`[seam]` probe lines.
+- **A scoped `CurrentCulture` swap restored in `finally`** at the three sites where a wrap-per-piece
+  would be a standing trap: `ManeuverRecorder.Sample` (the CSV row — **72 columns, was 45, and it
+  will grow again**; enclosing the write covers the columns that do not exist yet, where twelve
+  `Inv(` wraps would leave every future column one omission away from silently re-breaking the file),
+  `Cfg.SnapshotString` (one return expression of a dozen concatenated pieces), and the verbose
+  `[chase]` trace — that last one *only* works as a swap, because it mixes interpolation holes with a
+  dozen bare `.ToString(f)` calls that render **before** interpolation and which `Inv()` therefore
+  cannot reach.
+
+**`ChaseController.Anomaly`'s `detail` parameter is now a `FormattableString`, not a `string`, and
+that single word fixes all eight detectors with zero call-site edits.** An interpolated literal binds
+to whichever type the parameter asks for, so `Anomaly("over-roll", $"bank={bank:0.0} …")` now arrives
+**unformatted** and is rendered invariantly inside. This is the root-cause shape: a `string`
+parameter could not have been fixed at `Anomaly` at all — by then the caller has already baked in the
+ambient culture, and the fix would have had to be repeated at every detector and remembered at the
+ninth.
+
+Verified by reproducing the corruption under a forced `ro-RO`: pre-fix the three-field row splits
+into **six**, both mechanisms emit `116.217,0.22,0.24`, the swap covers a bare `.ToString()`, and
+`finally` restores `ro-RO` — so the invariant culture cannot leak into the game's formatting.
+
+### The recorder no longer writes header-only files silently (#73)
+
+Four captures in the same bundle had **zero data rows**. Three stamped the *same* `t=134,579` three
+wall-clock seconds apart — `Time.time` frozen (paused / a menu open) — so `Sample`'s
+`now - _lastSample < minDt` rate limiter never passed and the recorder wrote a header and nothing
+else, three times in four seconds, while `[rec] done` cheerfully named a file that exists and has a
+size. `Stop` now logs one **warning** when `_samples == 0`, naming the likely cause. The user finds
+out at the moment of recording instead of when the analyzer says "no data rows".
+
+**Not fixed here, and deliberately:** the `# entry`/`# override` header notes are built in
+`ScenarioPlayer`/`TestDrone` and still format in the ambient culture. They are maintainer-side
+harness provenance, they are `#` comment lines no parser reads as numbers, and they are outside the
+files this change audited. Worth a sweep if the harness is ever run on a comma-decimal machine.
+
+### Replicate 0 is a WARM-UP and is on neither arm (#55b)
+
+`ArmOf(0)` returned **0**, so the first replicate of every lane flew arm A — on every ABBA card ever
+flown. That replicate is not exchangeable with the others: **its placement is the one that CAPTURES
+the run anchor**, so it cannot snap back to it. It flies from the spawn state while every later
+replicate arrives teleported, decelerated and one card lighter on fuel. Measured on R41
+`e1-below-suppress` / `FastBomber1` — replicate 1 entered `v=250→250 alt=6000→6000 snapBackM=0`
+against `v≈352→250 alt≈2180→6000 snapBackM≈11000` for replicates 2–8, and scored **5.495°**
+`terminalOffDeg` against **0.252–0.268°** for every other capture in that lane. Pooled, that one
+capture read as a **30% effect** on a knob whose true effect is **0.2%** (`debugtests/R41-fixedwing.md`
+§2). 12.5% of one arm, 0% of the other, and nothing warned.
+
+```
+ArmOf(i):  ((i + 1) >> 1) & 1        →  i == 0 ? -1 : (i >> 1) & 1
+schedule:  A B B A A B B A           →  . A B B A A B B A
+```
+
+**Excluded, not balanced, and the alternative is not a preference — it is arithmetically
+unavailable.** The anchor stratum is exactly **one** replicate per lane per run, and
+`compare-runs.py` groups by (airframe, card, arm), so the lane *is* the unit of analysis. One capture
+cannot be split across two arms, and alternating which arm receives it across *lanes* or *runs*
+balances a pool nothing ever compares. Anything that leaves it armed leaves an unmatched flight
+condition inside one arm. So it is armed as **neither**: `ArmOf` returns `-1`, `ApplyArm` assigns
+nothing (the knob keeps its live value), and the capture self-labels `arm=-1` — which is what keeps
+it out of a pool, since `compare-runs.py` only ever diffs 0 against 1 and `-1` is a third group.
+
+**Consequence a card author must act on: it is `repeat − 1` that has to divide by 4 now.** A card at
+`repeat: 8` scores seven replicates and cannot balance; cards want **5, 9, 13**. `SetUpArmSchedule`
+tallies the warm-up on neither side, prints it as `.` in the `ARMS` line, and says so in the
+`UNBALANCED` warning. **No shipped card was changed** — every `e*` card still declares `repeat: 8`
+and will now warn rather than silently confound, which is the correct order of operations.
+
+Guarded by **`debugtests/test-arm-schedule.py`**, which asserts the *stratum property* — "no scored
+arm may ever contain replicate 0" — rather than the pattern, so a future rewrite of the sequence
+cannot quietly reintroduce it; the pre-v1.0.1 form is carried as a counterfactual that must fail.
+The analysis-side guard added the same day (`compare-runs.py._anchor_replicate_filter`, which
+retro-fixes R41 and every earlier batch) is asserted to become a **no-op** on post-fix data, so the
+two do not double-count.
+
 ## 1.0.0
 
 **Four defects, and the first one is the reason for the version number: a whole branch of the control
