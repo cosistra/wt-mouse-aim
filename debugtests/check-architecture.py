@@ -601,7 +601,11 @@ def source_invariants(sources: dict) -> list:
     # The allowlist is the per-RUN state, which NextCard must NOT touch: the queue and its cursor, the
     # A/B schedule the run is halfway through, the anchor every replicate snaps back to, and the abort
     # tally the run reports at the end.
-    per_run = {"_card", "_queue", "_qi", "_armEntry", "_armIdx", "_anchorSet", "_aborted"}
+    # `_owed` (v1.0.2) is per RUN in the strongest sense: it is the run's OUTCOME, computed from the
+    # queue on the way out and read back by TestDrone.LaneLost after the teardown. NextCard must not
+    # touch it — a recoverable abort hands over to NextCard and the lane is still flying, so clearing
+    # it there would be right by accident and wrong the moment a fatal abort routed through it.
+    per_run = {"_card", "_queue", "_qi", "_armEntry", "_armIdx", "_anchorSet", "_aborted", "_owed"}
     fin = method_body(scen, r"private void Finish\(string reason\)")
     nxt = method_body(scen, r"private void NextCard\(\)")
     if fin is None or nxt is None:

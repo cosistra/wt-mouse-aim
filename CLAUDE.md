@@ -489,9 +489,26 @@ Machine-specific paths are written as placeholders:
     `arm` before the scored segment starts.
     `Cfg.ScenarioArmToggle` — or, since v0.90, the first selected card's own `armToggle`, which wins
     over it — names a bool knob the runner alternates **ABBA** by **replicate** index
-    (`ArmOf(_qi / _block)`, `((i+1)>>1)&1`) — never A×N then B×N, which is the pattern that turns
-    drift into a fake effect — and each capture self-identifies via `arm=`/`armKnob=` on its
-    `# config` line.
+    (`ArmOfRun(_qi / _block, _resumeRep)` over `ArmOf`'s `(i >> 1) & 1`) — never A×N then B×N, which
+    is the pattern that turns drift into a fake effect — and each capture self-identifies via
+    `arm=`/`armKnob=` on its `# config` line.
+    **v1.0.1 + v1.0.2 — ONE INVARIANT ABOVE THE PATTERN: no SCORED replicate may be
+    anchor-capturing** (backlog #55b, ledger `X27`). The replicate whose placement *captures* the run
+    anchor cannot snap back to it: it flies from the spawn state, `snapBackM = 0`, while every sibling
+    arrives teleported and one card lighter on fuel — a permanently distinct flight condition that
+    cannot be balanced into an arm. So it is armed as **neither**: `ArmOf` returns **−1**, the capture
+    prints `arm=-1`, and `compare-runs.py` only ever diffs 0 against 1. v1.0.1 covered replicate 0;
+    **v1.0.2 generalised it, because lane respawn made a second one** — a lane resuming on fresh metal
+    re-anchors, so its resume replicate is anchor-capturing at index 3 of 9, where nothing keyed on the
+    index could see it. `ArmOfRun(replicate, resume)` is the composed rule and `resume == 0` is `ArmOf`
+    verbatim, so a lane that never respawns does not change by one arm. **Consequence for card
+    authors:** the scored count is `repeat − 1`, so ABBA balances at **repeat = 4k+1** (5, 9, 13 — not
+    4, 8, 12), and a respawned lane spends one more. `SetUpArmSchedule` tallies through the *same*
+    function, so the printed schedule is the one the lane will actually fly and its existing UNBALANCED
+    warning fires on the shortfall — a shortened scored sequence is never silent. The analysis-side
+    guard (`compare-runs.py._anchor_replicate_filter`, which keys on `snapBackM` rather than on the
+    index) stays a **backstop**, not the defence: it is what covers the paths no arm reaches — an
+    ungated card, a hand-flown capture, the pre-v1.0.1 corpus.
     **v0.99.1 fixed the index and it invalidates data.** It was `ArmOf(_qi)`, the QUEUE position, and
     a multi-card selection blocks the queue (c1,c2,c1,c2 — see `SelectCards`): with 2 cards × repeat 4
     card c1 sat at indices 0,2,4,6 → arms A,B,A,B → **mean position 1 vs 2 inside c1's own sequence**.
@@ -674,6 +691,15 @@ Machine-specific paths are written as placeholders:
       *with* the code: **`SPEC-GRAMMAR`** (`SplitSpec`, checked by `debugtests/test-spec-grammar.py`)
       and **`FLEET-RESOLVE`** (`ResolveCount` + `CountKeys`, checked by
       `debugtests/test-fleet-resolve.py`).
+    - **`LANE-CONTINUITY` (v1.0.2)** — a fourth such region: `MaxLaneRespawns` + `OwedFrom` +
+      `RespawnAt`, the arithmetic behind respawning a drone lane whose aircraft died, checked by
+      `debugtests/test-lane-respawn.py` (which compiles it **together with** `ARM-SCHEDULE`, because
+      the property is compositional). `OwedBy(aircraftId)` beside it is the harness's read of it, and
+      `_owed` is the field that survives `Finish` nulling `_queue` — it is in
+      `check-architecture.py`'s per-run allowlist for that reason. `StartSuite` gained
+      `(startAt, respawn)`, both defaulting to a fresh lane, and sets `_resumeRep` from them: a
+      resumed lane re-anchors, so its resume replicate is **anchor-capturing and armed as neither**
+      (`ArmOfRun`, ledger `X27`). See `ARCHITECTURE.md` L1.6 v1.0.2.
   - `TestDrone.cs` — `TestDrone` + `Drone` + `TestDronePatch` (v0.81 harness, **v0.87 phase 2**).
     Spawns aircraft nobody is sitting in, flies them, despawns them — **N alive at once**,
     launched on a stagger, and since **v0.98** N *fleets* one after another, unattended
@@ -705,6 +731,25 @@ Machine-specific paths are written as placeholders:
     stagger exists to prevent) — and calls `ScenarioPlayer.OwnInputs` for the throttle between the
     stick write and `FilterInputs`, mirroring the player's seam postfix (a card at `throttle == 0` is
     the game's airbrake trigger; that was R18's false "energy failure").
+    **The COLLECTIVE — when `OwnInputs` DECLINES the throttle, the harness holds altitude itself.**
+    `OwnInputs` returns false on a card declaring a **zero entry speed**, deliberately: on a rotorcraft
+    the throttle *is* the collective, so pinning one number at a hover commands a climb or a descent.
+    But that left the axis at whatever the level-hold last wrote (`HoldThrottle`, 0.60), and one fixed
+    collective is not a hover for more than one airframe — R41 flew all three rotorcraft at 0.60 and
+    got a three-way split, `UtilityHelo1` sinking at **−25 m/s** into **16 of 16** altitude-floor
+    aborts (`debugtests/R41-rotor.md` §5a). So `OnPilotStep` now reads that return:
+    `if (!sp.OwnInputs(ac)) HoldCollective(d, sp)`. `HoldCollective` is a **PI on the throttle axis**
+    (altitude error → commanded climb rate through the level-hold's own `VsPerAltErr`/`VsMax`, then
+    P for damping + I for trim), gated on *card running* **and** *card declined the throttle* **and**
+    `ChaseController._collective`. **The integrator is the design, not an embellishment:** it *learns*
+    that lane's hover collective from live vertical speed, which is how the loop obeys the one-law rule
+    — a P-only version droops ~244 m on the `UtilityHelo1` shape. Deliberately **not** gated on the
+    live `_heliBlend`: that falls as forward speed builds, so the hold would cut out exactly during the
+    speed runaway R41 §2 measured. Target altitude is `ScenarioPlayer.CardAltM` (what the placement
+    *wrote*), falling back to the drone's spawn altitude. Fixed-wing lanes and crewed flight are
+    bit-for-bit unaffected. No new CSV column — `thr` already records commanded throttle. The loop's
+    arithmetic lives between the `COLLECTIVE-HOLD` markers and is checked by
+    `python debugtests/test-collective-hold.py`; keep it inside them.
     Also the reason `WTMouseAimPlugin` now has a `FixedUpdate`: the launch stagger needs a fixed-step
     clock that exists before any drone does. **Both** removal paths (`Despawn` and `PruneDead`) call
     one `ForgetState(aircraftId)` that drops **every** per-aircraft registry — `ScenarioPlayer`,
@@ -740,6 +785,22 @@ Machine-specific paths are written as placeholders:
       drone keeps a full complex-physics aero job and all three per-aircraft registries alive — the
       same frame budget the stagger protects and `frameMs` measures. `Despawn` now takes a reason and
       logs it.
+    - **A lane that loses its AIRCRAFT is respawned (v1.0.2).** `LaneLost(d, reason)` sits on **both**
+      removal paths and in both **before `ForgetState`** — that is what aborts the card and nulls
+      `_queue`, and `_queue` is the only record of what the lane still owed. It asks the card player
+      (`ScenarioPlayer.OwedBy`), and if the lane owes replicates the dead `Drone` is queued on
+      `_relaunch`; `FixedTick` drains it through **`LaunchLane(slot, resumeAt, respawns)`** — the same
+      shared lane path a first launch takes, so the replacement returns on its own azimuth, deck,
+      airframe and per-lane entry speed. It is **not** just about lost data: replicates are armed ABBA
+      and indexed by the lane's own queue position, so a lane that dies mid-sequence leaves *its own*
+      A/B truncated and leaning, and nothing warns. Bounded by `MaxLaneRespawns` (2, a `const`) with a
+      loud warning at the cap; `DespawnAll` sets `_cancelling` because the panic key is an abort, not a
+      pause; anything reporting a `Player` is refused outright. Captures say so via `respawn=N` on the
+      `# entry` line. **The resume costs the lane exactly one scored replicate, on purpose:** a
+      replacement is fresh metal, so `StartSuite` re-anchors and the resumed replicate is
+      *anchor-capturing* — `snapBackM ≈ 0`, flying from the spawn state — which is the #55b stratum
+      again, so `ArmOfRun` arms it as neither and the suite-start line + arm tally both say so
+      (ledger `X27`). Checked by `debugtests/test-lane-respawn.py`.
     - **A shot-down drone is caught in `OnPilotStep`, not `PruneDead`.** `PruneDead`'s predicate is
       `Aircraft == null || Aircraft.disabled`, and the game **never self-disables an `Aircraft` on
       damage**: `Unit.disabled` is written only by `ServerDisableUnit`/`ReturnToInventory`/`OnDestroy`,
@@ -1411,6 +1472,19 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   asserted balanced. Stdlib only, no
   SDK. Run it after touching the lane geometry — reverting to a `Vector3` compiles fine and writes a
   batch that scores fine.
+- **Dead-lane respawn (v1.0.2).** `python debugtests/test-lane-respawn.py` compiles the
+  `LANE-CONTINUITY` **and** `ARM-SCHEDULE` regions of `ScenarioPlayer.cs` together, because the
+  property is compositional and neither piece can state it alone: **a lane that loses its aircraft at
+  any replicate and resumes where it left off flies every queue index an undamaged lane would have**
+  (nothing re-flown, nothing skipped) **and scores no anchor-capturing replicate** (ledger `X27`) —
+  the resumed one is a warm-up, and the check pins the cost at exactly that one replicate so a fix
+  that unscored the whole resumed tail would fail too. Plus the **hard cap**: a lane that dies on every replicate must
+  relaunch exactly `MaxLaneRespawns` times, not sixteen (R41's `UtilityHelo1`). Plus five source
+  asserts the arithmetic cannot make about itself — `TestDrone.LaneLost` still asks the card player,
+  **both** removal paths ask it *before* `ForgetState` (which nulls the queue that holds the answer),
+  the respawn reuses `LaunchLane` rather than a second spawn site, `DespawnAll` guards with
+  `_cancelling`, and the resume actually reaches `StartSuite`. Run it after touching the despawn
+  paths, the lane spawn path, or the arm schedule.
 - **Card (de)serialisation (v0.90.1).** `python debugtests/test-card-model.py` does the same trick to
   the `CARD-MODEL` region of `ScenarioPlayer.cs`: extracts the three model classes verbatim, compiles
   them against the game's `Newtonsoft.Json.dll`, and round-trips **every file in `cards/`**. It exists
@@ -1425,6 +1499,16 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   field the round-trip stops covering the moment the grid stops using it. The airframe string is
   asserted byte-for-byte: `AirframeList` splits it per lane and `CountKeys` counts the same tokens, so
   a serializer that reformatted it would change both the fleet size and which lane flies what.
+- **The rotorcraft collective hold.** `python debugtests/test-collective-hold.py` does the same
+  extract-and-compile trick to the `COLLECTIVE-HOLD` region of `TestDrone.cs` — the PI altitude hold
+  that owns the throttle on a drone-flown rotorcraft *hover* card. Two halves. (1) **Eleven one-step
+  cases** pin the **sign** and the shipped gains: an inverted collective term does not wobble, it flies
+  the aircraft into the ground at full deflection and the capture reads as a control-law failure. They
+  also pin the `VsMax` cap, both clamps and the fact that `dt` scales the integrator *and nothing else*.
+  (2) **Six closed-loop cases** fly a first-order rotorcraft for 120 s whose hover collective the loop
+  is **never told**, spanning 0.35–0.90 — that is the generality rule asserted rather than argued, and
+  it is the check that fails if anyone replaces the integrator with a constant. Run it after touching
+  the loop or its gains. Needs the .NET SDK, like the other extract-and-compile checks.
 - **On-screen HUD.** `ShowDebugHud` reveals status / live stick command / anomaly+phase readouts
   (hidden by default). Use it to watch the control law react in real time while flying.
 - **Live tuning without a rebuild.** With the BepInEx ConfigurationManager plugin installed, **F1**

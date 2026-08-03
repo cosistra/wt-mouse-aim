@@ -3,6 +3,137 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 1.0.2
+
+**Two harness features that each recover a batch the old harness threw away — and one interaction
+between them that would have quietly undone v1.0.1.** No control-law change: `ChaseController` is
+untouched, no CSV column was added or moved, and a lane that never respawns flies byte-identical arms.
+
+### The COLLECTIVE — a rotorcraft hover card gets its own throttle (R41 §5a)
+
+`ScenarioPlayer.OwnInputs` *declines* the throttle when a card declares a zero entry speed, and that
+is right: on a rotorcraft the throttle **is** the collective, so pinning one number at a hover
+commands a climb or a descent rather than an entry condition. But declining left the axis holding
+whatever the level-hold last wrote — `HoldThrottle`, **0.60** — and **one fixed collective is not a
+hover for more than one airframe.** R41 measured the three-way split at exactly that value:
+`QuadVTOL1` and `AttackHelo1` climbed at **+2.2…+5.7 m/s** while `UtilityHelo1` sank at **−25 m/s**,
+lost 1.9 km in 78 s and aborted **16 of 16** replicates on the 500 m floor — leaving the whole
+`rotor-hover` verdict resting on the one airframe that happened to hover. A card cannot fix it: the
+throttle pin is read *after* that early return.
+
+So `TestDrone.OnPilotStep` now reads the return — `if (!sp.OwnInputs(ac)) HoldCollective(d, sp)` —
+and `HoldCollective` runs a **PI on the throttle axis**: altitude error → commanded climb rate
+(through the level-hold's own `VsPerAltErr`/`VsMax`), then P for damping and **I for the trim**.
+
+**The integrator is the design, not an embellishment.** The collective that holds a given rotorcraft
+level is a different number for every airframe, and the ONE-LAW rule forbids writing those numbers
+down — so the loop **measures** it. `Drone.Collective` is per drone, its steady state *is* that
+lane's hover collective, learned from live vertical speed and re-learned as fuel burns off. Nothing
+keys off a `jsonKey`, a mass or a rotor count. A P-only loop structurally cannot do this: it holds
+altitude only where its fixed trim happens to *be* the hover value and droops everywhere else —
+**89–282 m** off target with the integrator deleted, measured in `test-collective-hold.py`.
+
+Three gates, and one of them is a deliberate rejection: a card is running; the card did **not** take
+the throttle (which confines this to *declared-hover* cards — `rotor-transition` and every
+forward-entry card keep their pinned throttle and are byte-identical); and the airframe is
+collective-classed (`ChaseController._collective`). Gating on the live `_heliBlend` instead was
+considered and **rejected**: it falls as forward speed builds, and a forward-speed runaway is exactly
+the failure R41 §2 measured, so the hold would cut out precisely when the aircraft is diverging.
+A card's declared hover does not move.
+
+The target is the new `ScenarioPlayer.CardAltM` — the altitude the placement **actually wrote**, not
+`startAlt`, which is optional and would disagree the moment a card omits it — falling back to the
+drone's spawn altitude when no placement has landed. Fixed-wing lanes and crewed flight are
+unaffected by construction: the only caller is the drone seam and the write sits past `!_collective`.
+**No new CSV column** — `thr` already records the commanded throttle.
+
+Guarded by **`debugtests/test-collective-hold.py`**, which compiles the `COLLECTIVE-HOLD` region
+verbatim: 11 one-step cases pin the **sign** and the shipped gains (an inverted collective term does
+not wobble, it flies the aircraft into the ground), and 6 closed-loop cases fly a first-order
+rotorcraft for 120 s whose hover collective the loop is **never told**, over 0.35–0.90 — the ONE-LAW
+property asserted rather than argued.
+
+### A lane that loses its AIRCRAFT is respawned for the rest of its replicates (#51)
+
+v0.99.1 made an abort end the **replicate**, but only where the airframe survives (the altitude
+floor). Where it does not — a part fell off, the pilot was killed, the game removed the unit — the
+lane still ended, because there was nothing left to fly the queue with. R41 lost **6 captures** that
+way (5 `Darkreach` + 1 `EW1`).
+
+**The lost data is the smaller half.** Replicates are armed ABBA and indexed by the lane's own
+position in its own queue, and that sequence is balanced only when the lane flies **all** of it. A
+lane of 9 that dies during replicate 3 stops there — and nothing warns, because `SetUpArmSchedule`
+prints the schedule the lane *intended* to fly and `compare-runs.py` pools whatever arrived. That is
+the R21 confound ABBA exists to kill, reintroduced by one airframe losing a wing.
+
+Three pieces, and the seams are chosen so neither file learns the other's job:
+
+- **The question lives in the card player.** `OwedFrom(qi, queueLen)` is the resume index — always the
+  replicate *after* the one that died, so the dead replicate stays an abort with its own truncated
+  capture and nothing is flown twice or skipped. `OwedBy(aircraftId)` answers from the **live cursor**
+  when the suite is still nominally running, and from a stashed `_owed` when a fatal abort already
+  nulled `_queue` — which the damage abort does `IdleDespawnSec` before anything despawns the drone.
+- **The answer is PULLED by the harness**, at the instant a drone leaves the registry.
+  `TestDrone.LaneLost` is called from **both** removal paths and, in both, **before `ForgetState`** —
+  which is what destroys the answer. It refuses outright for anything reporting a `Player`.
+- **The respawn reuses the lane path, whole.** `LaunchLane(slot, resumeAt, respawns)` is `LaunchDue`'s
+  body split out and given the slot as a parameter, so a replacement returns on its own azimuth, deck,
+  airframe and per-lane entry speed, through the same envelope gate. A second spawn site is the one
+  thing that would make the resumed capture non-comparable with the ones the lost aircraft wrote.
+
+**Bounded, and loudly.** `MaxLaneRespawns = 2`: R41's `UtilityHelo1` sank on 16 of 16 replicates and
+an uncapped rule would have relaunched it sixteen times for nothing. At the cap the lane is declared
+**OUT** in a warning naming the shortfall. `DespawnAll` sets `_cancelling` around its teardown loop —
+the panic key is an abort, not a pause, and without it clearing the sky would be followed one fixed
+step later by the fleet respawning itself. Captures self-identify with **`respawn=N`** on the
+`# entry` line, emitted only when non-zero, so undamaged captures stay byte-identical and
+`index-captures.py` simply grows an `entry_respawn` column on the ones that need it.
+
+### The interaction: a resumed replicate is anchor-capturing, and v1.0.1 would have scored it (X27)
+
+**This is what integrating the two features actually cost, and it is the reason for the release
+note.** v1.0.1 closed #55b by making replicate 0 a warm-up armed as neither — it is the placement
+that **captures** the run anchor, so it flies from the spawn state with `snapBackM = 0` while every
+sibling arrives teleported. A respawned lane resumes on **fresh metal**, and `StartSuite` sets
+`_anchorSet = false` on every suite — so the resumed replicate is anchor-capturing too, in exactly
+the same way, at **replicate 3 of 9**, where an index test cannot see it. Merged as written, the two
+features would have restored #55b on a new path in the same release that closed it.
+
+So the property is restated index-free, which is the form that survives:
+
+> **No SCORED replicate may be ANCHOR-CAPTURING.**
+
+```
+ArmOf(i):            i == 0 ? -1 : (i >> 1) & 1
+ArmOfRun(i, resume): i == resume ? -1 : ArmOf(i)          # resume == 0  =>  ArmOf, verbatim
+
+fresh lane,   9 replicates:      . A B B A A B B A
+respawn resuming at replicate 4: . A B B . A B B A        <- one scored replicate spent
+```
+
+`ApplyArm` indexes through `ArmOfRun` and **`SetUpArmSchedule` tallies through it**, so the schedule
+printed before the resumed queue flies is the one the lane will actually fly, its `.` marks both
+warm-ups, and the existing `UNBALANCED` warning fires on the shortfall. The suite-start line names
+the resumed replicate as a warm-up in the same breath as the resume. **A shortened scored sequence is
+never silent** — that was the constraint, not a nicety.
+
+**The cost, stated because it is real:** a respawn spends one more scored replicate — a 9-replicate
+lane that dies twice scores 6 of 8 rather than 8 of 8, against R41's actual alternative of **0**.
+`compare-runs.py._anchor_replicate_filter` is unchanged and stays what it was: the analysis-side
+**backstop** for the paths no arm reaches — an ungated card, a hand-flown capture, the pre-v1.0.1
+corpus. The rejected alternatives (transfer the old anchor, fly the replicate twice, restart the lane,
+gate on `!_anchorSet`) are recorded with their disproofs in `LAW-LEDGER.md` **X27** — the anchor
+transfer is the one worth knowing about, because it is the obvious fix and it is *arithmetically
+empty*: a respawn spawns on the same deterministic ring slot, so the new anchor lands where the old
+one was and `snapBackM` reads ~0 either way.
+
+Guarded by **`debugtests/test-lane-respawn.py`**, which compiles `LANE-CONTINUITY` and `ARM-SCHEDULE`
+together and asserts the composed property: every queue index re-flown, **no scored row is the first
+placement of its suite**, the cost is exactly one replicate per respawn (so a fix that unscored the
+whole resumed tail fails too), and a lane that dies every replicate relaunches exactly twice.
+`test-arm-schedule.py` gains the generalised stratum property and two source asserts — `ApplyArm`
+must index through `ArmOfRun`, `SetUpArmSchedule` must tally through it.
+
 ## 1.0.1
 
 **The mod has never been able to accept a bug report from most of Europe, and nobody noticed because

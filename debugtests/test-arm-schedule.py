@@ -34,6 +34,17 @@ through `Arm()` rather than off `Cfg` directly. Plus two more since v0.99.1: tha
 by `_qi / _block` and not by a bare `_qi`, and that `SetUpArmSchedule` tallies balance with `_block`
 in hand — neither fails to compile, and both put the per-card confound straight back.
 
+v1.0.2 GENERALISES THE ANCHOR STRATUM (ledger X27). #55b's defect was never "index 0 is special" —
+it was that the ANCHOR-CAPTURING replicate (the one whose placement captures the run anchor, so it
+flies from the spawn state while every sibling arrives teleported) landed on a scored arm. Lane
+respawn produced a second such replicate on a different index: a lane resuming on fresh metal
+re-anchors, so its resume replicate is anchor-capturing at index 3 of 9. `ArmOfRun(replicate,
+resume)` is what knows both halves, and case 1c asserts the invariant in its general form — **no
+scored replicate may be anchor-capturing** — plus that `resume == 0` is `ArmOf` verbatim, so no card
+that never respawns changes by one arm. Two more source asserts go with it: `ApplyArm` must index
+through `ArmOfRun`, and `SetUpArmSchedule` must TALLY through it, or a resumed lane prints an
+undamaged lane's schedule while flying a shorter, leaning one.
+
 Needs the .NET SDK, which this repo already requires to build at all (see CLAUDE.md).
 
 Usage:
@@ -166,12 +177,16 @@ def source_checks() -> list:
             bad.append("ScenarioPlayer.ApplyArm no longer assigns the arm through ChaseController.SetArm.")
         # v0.99.1 — the index is the REPLICATE. `ArmOf(_qi)` compiles, flies, and gives every card
         # A,B,A,B internally while the queue-wide tally reports balanced (see the docstring).
-        if "ArmOf(_qi / _block)" not in body:
+        # v1.0.2 — ...through ArmOfRun, which also needs the replicate this RUN anchors on. A bare
+        # ArmOf(_qi / _block) compiles and flies and puts a respawned lane's anchor-capturing
+        # resume replicate straight onto a scored arm: #55b again on a different path (ledger X27).
+        if "ArmOfRun(_qi / _block, _resumeRep)" not in body:
             bad.append(
-                "ScenarioPlayer.ApplyArm does not index the arm by ArmOf(_qi / _block). Indexing by "
-                "the raw queue position confounds arm with position WITHIN each card as soon as a "
-                "second card is selected — 2 cards x repeat 4 gives every card A,B,A,B, mean position "
-                "1 vs 2 — and the queue-wide balance check reports it as balanced."
+                "ScenarioPlayer.ApplyArm does not index the arm by ArmOfRun(_qi / _block, _resumeRep). "
+                "Indexing by the raw queue position confounds arm with position WITHIN each card as "
+                "soon as a second card is selected — 2 cards x repeat 4 gives every card A,B,A,B, mean "
+                "position 1 vs 2 — and dropping _resumeRep scores the replicate a RESPAWNED lane "
+                "resumes on, which is anchor-capturing (snapBackM=0, flying from the spawn state)."
             )
 
     # 3b. ...and the balance check has to be tallied over the same thing the arm is indexed by, or it
@@ -185,6 +200,16 @@ def source_checks() -> list:
             "ScenarioPlayer.SetUpArmSchedule does not use _block. Its balance tally must run over the "
             "REPLICATE index, i.e. the same thing ApplyArm indexes by — tallying the whole queue is "
             "what let 2 cards x repeat 4 print 'balanced' while every card flew A,B,A,B."
+        )
+    elif "ArmOfRun(" not in m.group(1):
+        # v1.0.2 — the tally must go through the SAME function ApplyArm does, or a respawned lane
+        # prints the schedule of an undamaged one while flying a shorter, leaning sequence. That is
+        # the "silently shortened" failure the resume is not allowed to have (ledger X27).
+        bad.append(
+            "ScenarioPlayer.SetUpArmSchedule tallies with ArmOf, not ArmOfRun. The printed schedule "
+            "and its balance warning must be the sequence the lane WILL FLY: a resumed lane loses its "
+            "resume replicate to the warm-up, which usually unbalances it, and a tally that cannot see "
+            "that reports the undamaged schedule and warns about nothing."
         )
 
     # 4. Every lever read through Arm(). Cfg.X.Value in the law is not a compile error and not a
@@ -257,6 +282,40 @@ internal static class P
         Ok((((0 + 1) >> 1) & 1) == 0,
            "counterfactual: the pre-v1.0.1 ArmOf(0) = ((0+1)>>1)&1 = 0 put the anchor replicate on "
            + "arm A on every ABBA card ever flown — 12.5% of one arm, 0% of the other");
+
+        // --- 1c. THE SAME STRATUM PROPERTY UNDER A RESPAWN (v1.0.2, ledger X27) ---------------
+        // A lane that loses its aircraft resumes on FRESH METAL, so StartSuite re-anchors and the
+        // RESUMED replicate captures the anchor exactly as replicate 0 does — same snapBackM=0, same
+        // "flies from the spawn state while its siblings arrive teleported" condition — but at index
+        // 3 of 9, not 0. So the property is about the ANCHOR-CAPTURING replicate, not about index 0,
+        // and ArmOfRun is the one function that knows both halves. Stated as: for any resume point,
+        // the unarmed replicates are EXACTLY replicate 0 and the resume, and every other is scored.
+        for (int resume = 0; resume < 16; resume++)
+            for (int i = 0; i < 64; i++)
+            {{
+                bool warm = Sched.ArmOfRun(i, resume) < 0;
+                Ok(warm == (i == 0 || i == resume),
+                   $"ArmOfRun({{i}}, resume={{resume}}) = {{Sched.ArmOfRun(i, resume)}} — a replicate "
+                   + "must be unarmed exactly when it is anchor-capturing (index 0, or the resume)");
+                if (!warm)
+                    Ok(Sched.ArmOfRun(i, resume) == 0 || Sched.ArmOfRun(i, resume) == 1,
+                       $"ArmOfRun({{i}}, resume={{resume}}) is neither 0 nor 1 nor a warm-up");
+            }}
+        // A lane that never respawned is ArmOf VERBATIM — the whole point of resume==0 being the
+        // fresh-lane value. If this drifts, v1.0.2 silently re-armed every existing card.
+        for (int i = 0; i < 64; i++)
+            Ok(Sched.ArmOfRun(i, 0) == Sched.ArmOf(i),
+               $"ArmOfRun({{i}}, 0) = {{Sched.ArmOfRun(i, 0)}} must equal ArmOf({{i}}) = {{Sched.ArmOf(i)}} "
+               + "— a lane that never respawns must not change by a single arm");
+        // ...and the counterfactual this exists against: scoring the resumed replicate (i.e. plain
+        // ArmOf) puts an anchor-capturing replicate on a SCORED arm at every resume point >= 1.
+        {{
+            int scoredAnchors = 0;
+            for (int resume = 1; resume < 16; resume++) if (Sched.ArmOf(resume) >= 0) scoredAnchors++;
+            Ok(scoredAnchors == 15,
+               $"counterfactual: plain ArmOf scores the resumed replicate at {{scoredAnchors}} of 15 "
+               + "resume points — #55b reintroduced by the respawn path, which is why ArmOfRun exists");
+        }}
 
         // --- 2. THE INVARIANT: equal counts AND equal mean position, at every multiple of 4 ---
         // Equal counts alone is not it: ABBAAB has 3/3 and still leans A early, which is why the
