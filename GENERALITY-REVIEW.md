@@ -89,7 +89,7 @@ live signal inside its own feedback path is a loop gain wearing a measurement's 
 the existing generality test unchanged.
 
 **Status (2026-07-29): that question was run over the whole `Apply` pipeline — see
-[`debugtests/LOOP-AUDIT-FINDINGS.md`](debugtests/LOOP-AUDIT-FINDINGS.md) (tool:
+the loop-audit investigation, consolidated into `LAW-LEDGER.md` L12–L14 (tool:
 `debugtests/loopaudit.py`, `--selftest`). NEITHER `_yawWeak` NOR `_pitchEff` cleared** (they are
 findings 14 and 15 below); a third, larger one (16) fell out of the same sweep. Nine other terms were
 cleared with reasons, including `pullGate`, which keys on the *same* body-frame `alignFrac` v0.85 had
@@ -108,7 +108,7 @@ _pitchEff` below `PEffRevThresh`, `aoaRecover *= _pitchEff`) and **nothing anywh
 increases authority or changes strategy**. On nine of ten airframes the airframe's own stability
 covers the gap. On `Darkreach` it does not, and R32 measured the schedule sitting on its floor for
 100.0% of the rows past |AoA| 20° while the aircraft descended 3 000 m and killed the pilot. Full
-evidence in [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md); finding 18 below.
+evidence in `LAW-LEDGER.md` K1–K5 / P1–P3 (the R32 batch); finding 18 below.
 
 **Also corrected by the R32 decompile audit, because it changes what "the game protects it" means:**
 `ControlsFilter.GLimiter` is **dead code** (one occurrence in 181 878 lines, never instantiated,
@@ -184,7 +184,29 @@ phase-margin arithmetic hardcodes the fitted UH-90/RAH-72 lag. A modded helo wit
 shifts the margin. Measuring the lag online (achieved vs commanded rate — the same machinery as
 finding 2, helo edition) would close it.
 
-### 5. MEDIUM — the roll axis is the least normalized axis — OPEN again (v0.65 — Unified removed)
+### 5. HIGH — the roll axis is the least normalized axis — OPEN, and FIELD-CONFIRMED (2026-08-02)
+
+> **PROMOTED MEDIUM → HIGH, 2026-08-02. This is the only finding in this file confirmed by a user in
+> the wild, and the corpus structurally cannot see it.** Two v0.68.0 Discord captures on `FS-12` at
+> 348–423 m/s show a **~2 Hz `outR` limit cycle while on target**: across a 22.7 s `HOLD`, `targetBank`
+> mean **−0.162°** and `off` 0.188° — the outer loop is commanding nothing — while the inner roll servo
+> swings **±0.5 stick and ±3° of bank**, 105 stick sign-flips in 29.6 s. `azErr` oscillates *in phase
+> with* `bank` and the marker is world-locked, so the airframe is moving the error: a closed
+> self-sustained cycle, not pilot input. The mechanism is visible in raw rows — a live P-error of +5.1°
+> is **inverted** to `outR` −0.230 just 0.18 s after commanding +0.509, i.e. `RollDamping × rollRateF`
+> overwhelming a live error on a plant whose roll authority has roughly doubled with q. That is exactly
+> the disease named in the paragraph below, and the "unreported" 1.28 Hz `Multirole1` chatter at
+> ~450 m/s (rec 014141) is now **reported and reproduced on a second airframe**.
+>
+> **Why it survived to v1.0.0: `captures.db` has ZERO rows between 250 and 400 m/s.** Every real
+> airframe in the corpus tops out at **221 m/s** — cards enter at `startSpeedCorner 1.0×` and never
+> accelerate past it — so the entire evidence base sits at roughly *half* the speed where this lives.
+> R39-D's mean |`outR`| of 0.0068–0.0109 in sustained tracking is ~30× smaller than the 0.26 measured
+> here, which is a statement about the corpus's speed band and not about the law.
+>
+> `RollGain` / `RollDamping` / `RollRateSmoothing` are still global constants at v1.0.0 and the
+> prescribed fix below is unbuilt. Test and full evidence: `LAW-LEDGER.md` **O11**.
+
 **Regressed to OPEN (v0.65).** The measured roll-effectiveness normalization lived ONLY in Unified's
 geodesic roll servo (`_rollEffFilt`, the roll twin of `_pitchEff`/`_yawEffFilt`), which was deleted
 with the law. EvolvedLegacy — now the only law — is back to fixed `RollGain`/`RollDamping`. The design
@@ -202,11 +224,24 @@ roll-stick chatter at ~450 m/s (rec 014141) — are both roll-axis, i.e. the sam
 had before v0.55/v0.59: one gain serving plants whose response varies by an order of magnitude
 across speed/airframe. A probed roll-rate normalization is the principled fix.
 
-### 6. LOW — regime thresholds for plain helis are global speed constants
+### 6. MEDIUM — regime thresholds for plain helis are global speed constants
 `HeliForwardSpeed`/`HeliHoverSpeed` (60/20 m/s) drive `heliBlend` for any rotorcraft without a
 tilt/nozzle gauge. Semi-principled (the 60 matches the game's own weathervane fade, which is
 game-wide), but a heavy compound heli and a light scout blend identically.
 `CompoundHeloController` is detected but log-only.
+
+> **MEASURED CONSEQUENCE (R41, 2026-08-02).** Because these are absolute m/s, **`AttackHelo1` can never
+> leave the hover regime at any speed it is capable of flying** — Vmax 100 m/s gives a lowest reachable
+> `heliBlend` of 0.455 — while `QuadVTOL1` reaches full fixed-wing behaviour at its Vmax. R41 measured
+> the failure that follows: with the blend pinned at 1.0 the law **deletes the bank channel**
+> (`tBankE *= (1 − heliBlend)`), so `tgtBank` rails at 72° while `bank` delivers 0.3° and a saturated
+> pedal is the only actuator left; |azErr| then grows without bound to 34.1°. See `LAW-LEDGER.md` H4.
+>
+> **A second, separate hazard the same batch exposed: these knobs are live config and drift.** R41 flew
+> with `HeliForwardSpeed = 150` / `HeliHoverSpeed = 40.28` — a hand-tuned **v0.43** pair that had never
+> been reset — which configured the v0.58 design's central mechanism (hand the turn to the wing as
+> speed builds) out of the entire batch. At the shipped 60/20 the diverging segments would have handed
+> **52.9%** of the bank demand back instead of 0.8%. A defaults-vs-live check belongs in the preflight.
 
 ### 7. LOW — fine boost is binary-off for collective airframes, not regime-blended — DEFERRED (v0.60)
 **Deferred:** the `if (_collective) fineGain = 1` line is in shared pre-compute that EvolvedLegacy
@@ -330,7 +365,7 @@ channel can close the error rather than on how big the error is. Also flags **de
 read — they reach only the recorder, the `[chase]` trace and the `over-roll` detector.
 
 > **RESOLVED 2026-08-02, HALF-CONFIRMED — and the wrong half is the durable lesson.** R39-D
-> (`debugtests/R39-D-sustained-ab.md`, 8 lanes × n=8) swept `MarkerRateFeedForward` directly. The
+> (the R39-D sustained-turn pair, 8 lanes × n=8) swept `MarkerRateFeedForward` directly. The
 > **observation reproduces**, and off the `lateralHold` rail this time (`bWt` 0.000–0.040, so this is
 > not the railed regime above): mean `|outR|` is **0.0068–0.0109 on BOTH arms**. The **inference is
 > refuted.** The feed-forward is worth **55–58% of the standing azimuth error** (`fixedWindowOffDeg`
@@ -343,7 +378,7 @@ read — they reach only the recorder, the `[chase]` trace and the `over-roll` d
 > `bankTR` (+10.4 to +15.4°, achieved bank +4 to +14°); roll stick is what trims the aircraft *to*
 > a bank and returns to ~0 once there, so reading it to decide whether a bank-target term fired
 > measures the settling, not the command. `bankClampActivePct` made the same class of error on a
-> different column and cost the corpus its rail detector (`debugtests/R40-metric-repair.md`).
+> different column and cost the corpus its rail detector (the R40 metric repair; see `LAW-LEDGER.md` header).
 >
 > What survives of this finding: the `blendWeight` hand-off critique in the paragraph above stands
 > unaltered and is still OPEN — it is a separate claim from the feed-forward's reach. The "dead code"
@@ -357,7 +392,21 @@ read — they reach only the recorder, the `[chase]` trace and the `over-roll` d
 > `startSpeedCorner: 0.75` with the throttle pinned. If standing `|azErr|` climbs back toward the
 > 3.5° OFF-arm figure once the rail is gone, this vindication is narrower than it reads.
 
-### 17. MEDIUM — v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` — OPEN (STRUCTURAL, unflown)
+### 17. MEDIUM — v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` — STRUCTURAL, and FLOWN NULL on the 6° oblique (R41)
+
+> **FLOWN 2026-08-02 (R41), and the worry this finding raised is retired for this geometry.**
+> `e1b-align-lead` is a **valid** test — `phiLead` max is *exactly* 0.00000 on arm 0 and 2.72–2.77° on
+> arm 1, so the knob is genuinely off on one arm and the term demonstrably fires on the other — and the
+> answer is **inert**. Pointing 0.436 → 0.431, `rollYawOpposedPct` 32.3 → 32.4, and `stickFlipRateR`
+> **identical to three decimals on three of four segments**. Neither the runbook's PASS (lower
+> overshoot *and* lower flip rate) nor its named FAIL (flip rate or wobble episodes **up**, the damping
+> side-effect) fired. **So `AlignRateLead` does not cost roll damping on the 6° oblique diamond.**
+> The structural argument below is unchanged and still applies wherever `blendWeight` is large — this
+> card's below-nose segments run `bWt` ≈ 0.003–0.007, so it was never the geometry that would show it.
+> **Consequence for the backlog: a spent lever is retired outright** (precedent: `RelativeTurnLead`,
+> v0.99.1) — either retire the card or retire the knob. See `LAW-LEDGER.md` A2.
+
+**The structural finding, unchanged.**
 The lead itself is correct (it is the true derivative of the align channel's own error). The side
 effect is not: with `phi` in degrees and `rollRate` in rad/s, against a stationary marker the lead
 adds `rollRate·RollDamping·(180/π)/90` of rate feedback **weighted by `blendWeight`**, so the
@@ -386,7 +435,7 @@ at 0.30.
 ### 18. HIGH — the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs — OPEN (MEASURED, R32)
 
 **The clearest one-law violation in the corpus: a hardcoded constant, not a probed quantity, decides
-whether an airframe recovers.** Evidence: [`debugtests/R32-FINDINGS.md`](debugtests/R32-FINDINGS.md)
+whether an airframe recovers.** Evidence: the R32 batch, `LAW-LEDGER.md` K1–K5
 §6 (63 captures, 37 868 rows, `Darkreach` on `darkreach-05`, 18 departures, 3 dead pilots).
 
 **The constant.** `ChaseController.cs:1255`:

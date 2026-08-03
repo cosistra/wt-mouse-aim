@@ -21,7 +21,7 @@ flown against.
 > 64 captures each). `oblique-6-dwell` is now **RETIRED as a between-airframe ranking instrument,
 > all 314 captures** — its four legs are four flight conditions and *no throttle makes them one*
 > (drift 0.96–2.14×, descent throttle-independent at Pearson +0.997). It stays valid as a
-> within-lane, within-airframe A/B. Source: `debugtests/R39-B-card-validity.md`.
+> within-lane, within-airframe A/B. Source: R39-B; `LAW-LEDGER.md` X19.
 > **W4 — the card named below is retired**; fly `alpha-pullup`, not `alpha-sweep`.
 > **W5 — CLOSED WONTFIX**, the detector was deleted.
 > The standing-hole paragraph at the end of this section is also stale — see its own correction.
@@ -55,10 +55,10 @@ And the standing hole that dwarfs all of them: **two of the four airframe cases 
 > captures. Neither case is closed by them:
 > - **Hovering helo:** `_heloOk` was **false on all 48** rotorcraft captures — the v0.58 rotorcraft
 >   branch never executed, so they measure the *pre-v0.58* law, not the shipped one. Blocked on a
->   probe call-order fix. `debugtests/R39-rotor.md` §1a.
+>   probe call-order fix. **CLOSED in v1.0.0** — `LAW-LEDGER.md` H1.
 > - **STOL trainer:** the card declared 90 m/s but throttle was unpinned at 1.00, so eight of ten
 >   lanes were at **340–381 m/s (2.1–2.4× corner)** by the last scored segment — *faster than
->   anything else in R39*. It is a second high-q dataset, not STOL data. `debugtests/R39-stol.md` §2.
+>   anything else in R39*. It is a second high-q dataset, not STOL data. `LAW-LEDGER.md` X25.
 >
 > So the correct current statement is: **the two cases now have captures and still have no valid
 > measurement.** Both need a re-fly, and both re-flies are gated on code fixes.
@@ -285,7 +285,7 @@ against ceilings 8.5–23°.~~
 > false as stated. What remains true is the **W4 effect size itself**: nothing isolates `aoaFade`'s
 > fade band, because reaching the ceiling is not the same as measuring the fade's shape. The
 > weakness stays OPEN and the discriminating test below is unchanged in intent — but read
-> `debugtests/R39-E-alpha.md` §3–§4 first: `alpha-sweep` has since been **retired** (its azimuth
+> `LAW-LEDGER.md` X23 / N1 first: `alpha-sweep` has since been **retired** (its azimuth
 > demand loads the wing only through bank, clamped at 72° ⇒ n = 3.24) and replaced by
 > `alpha-pullup` (`cards/ALPHA-CARD-REDESIGN.md`).
 > Reproduce: `index-captures.py --query` over R35 `alpha-steps`, `tag <> 'arm'`, `GROUP BY airframe`.
@@ -324,8 +324,8 @@ re-solved another way.
 > practice (0.977–1.084 measured on R39 `alpha_hold`), so a "fraction used" that reads > 1 was
 > never measuring what its name claimed. Every number below is still an accurate description of the
 > old detector; the **gap** it identified — no detector for "the law is leaving authority unused" —
-> is still open and now has nothing covering it. See `debugtests/R40-metric-repair.md` and
-> `debugtests/R39-D-sustained-ab.md`. Verified deleted: `grep -n "authorityUsedFrac" debugtests/scorecard.py`
+> is still open and now has nothing covering it. See the `authorityUsedFrac` withdrawal at the head of
+> `LAW-LEDGER.md`. Verified deleted: `grep -n "authorityUsedFrac" debugtests/scorecard.py`
 > returns only tombstone comments plus the `gone = {...}` assertion at `:2136`.
 
 **Claim.** `rail_warning`'s SLACK branch — the one detector in the whole pipeline that looks for the law

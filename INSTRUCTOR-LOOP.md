@@ -136,7 +136,7 @@ the 18 `fixedwing-v2` captures at `--cone 0.2` (medians):
 | `xfSus%` | **46.5** | 20.8 | 11.6 | 9.6 | 6.5 | 0.0 | 0.0 |
 
 `elDn` is fully sustained — a fight, not crossings — and independently reproduces
-`GATE-CHATTER-FINDINGS.md` §3 (42.6% there) on a different tick population. `reversal` is the
+the gate-chatter investigation (42.6% there) on a different tick population. `reversal` is the
 opposite: occupancy that the sustain control removes entirely. Note again that the complaint's
 *small* movements (`micro*`, `fine`) score **0.0**; cross-fighting lives in the large oblique and
 below-nose reorientations.
@@ -280,7 +280,7 @@ with probes** — which is the project's actual goal.
 ## 5. Where the cross-fighting comes from — tested, and it was not what I thought
 
 **Status: the gate-chatter hypothesis below is FALSIFIED.** Kept in place because the reasoning that
-killed it is the reusable part. Full detail in [`GATE-CHATTER-FINDINGS.md`](debugtests/GATE-CHATTER-FINDINGS.md).
+killed it is the reusable part. Verdict and evidence: `LAW-LEDGER.md` S4–S6, L7, X9; the tool is kept for reproduction at `debugtests/gatechatter.py`.
 
 The `Apply` pipeline allocates azimuth error across roll and yaw through several independent gates
 and blends: `bankBlend`, `assist`, `yawEff`/`yawWeak`, `qSched`, and the v0.65 `settleOn` gate. Each

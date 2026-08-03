@@ -61,6 +61,73 @@ next to nine 192-segment lanes. Run `--check` before trusting a batch.
 
 ---
 
+## The batch index — what each run tag flew, and where its conclusions live
+
+**There are no per-batch findings documents any more.** They were consolidated 2026-08-02 (see
+[the doc convention](#the-doc-convention--batch-analyses-update-standing-docs) below); the
+conclusions live in the standing docs, and the raw evidence lives in `captures.db` plus
+`debugtests/archive/`. This table is how a citation of the form `R39-rotor 1d` or
+`R28-FINDINGS.md §3.2` — of which ~60 survive in `.cs` / `.py` / `cards/*.json` comments — still
+resolves.
+
+**Read a batch citation as "the finding, in the standing doc named here".** The letters/numbers in
+those citations (`H7`, `§5a`, `1d`, `F2`) were document-local and are gone; the finding is not.
+
+| run tag | mod | what flew | where its conclusions live now |
+|---|---|---|---|
+| **R21** | v0.83 | `fixedwing-v2`, sustained `turn360`, 10 replicates | `LAW-LEDGER.md` **S1–S3** (bank clamp is a bystander; `lateralHold` rails the bank pipeline; `_iPitch` dead outside the fine cone), **X8** (the clamp is NOT what holds the 9.4° lag), **L7** (`predFloor` binds 100%) |
+| **R22–R25** | v0.87–0.89 | Gates A–D, the instrument-validation ladder | `LAW-LEDGER.md` **§1.1 I1–I3** (now carrying the gate evidence inline), **X3** (aoaTrim theory disproved), **X4** (the retracted `ctrlReset` claim), **X11** (#23 "harmless" retired) |
+| **R26 / R27** | v0.90–0.92 | first drone batches | `LAW-LEDGER.md` **I4** (#29/#30/#37 instrument defects), **X7** (`aoaLimiterActivePct` is non-zero at corpus scale) |
+| **R28** | v0.93 | `oblique-12-*`, 8 airframes, 384 caps | `LAW-LEDGER.md` **D1, D10, I6, I7, L10, X10, X13, X14**. The down-step penalty's first measurement. Cited by `cards/oblique-12-fwd.json` / `-rev.json` as "F1" |
+| **R29** | v0.93 | `oblique-*`, 10 airframes, 441 caps | `LAW-LEDGER.md` **D1, D5, G1–G7, L1, L9, L11, X13, X15, O2** |
+| **R30** | v0.94 | `oblique-12-fwd`/`-rev` crossed design, 48 caps | `LAW-LEDGER.md` **D2, D3, D4, L8, X10** — direction, not position; the crossed control |
+| **R31** | v0.94 | `BelowAlignSuppress` sweep, 2 cards, 96 caps | `LAW-LEDGER.md` **D8–D12, I5, X12**, and the **BATCH SUSPECT** block at the head of the ledger (multi-card ABBA confound) |
+| **R32** | v0.95 | `darkreach-05`, 63 caps, 18 departures | `LAW-LEDGER.md` **K1–K5, P1–P3, L3–L5, X1, X2, X17, X18**; `LAW-CHARACTERIZATION.md` §7 **#45**, **#23**; `GENERALITY-REVIEW.md` finding 18 |
+| **R33** | v0.96.0 | `oblique-6-c`, 10 airframes, 77 caps | `LAW-LEDGER.md` **G2, G4, K6, L6, O4**; gotcha 12 below (the `gJitterG` r = 0.886 figure) |
+| **R35** | v0.96.2 | `oblique-6-dwell` + `alpha-steps`, 186 caps | `LAW-LEDGER.md` **I8** (float-grain distance law); the corrected `alpha-steps` figure is in `LAW-WEAKNESS-MAP.md` W4 |
+| **R36** | v0.97.1 | `oblique-6-dwell` ×2 launches, 64 caps (32 usable) | `LAW-LEDGER.md` **I8, I9** — the distance law without the airframe confound, and `fixedWindowOffDeg` as the metric `terminalOffDeg` was pretending to be |
+| **R37** | v0.97.2 | `oblique-6-dwell`, 125 caps, the clean batch | `LAW-LEDGER.md` **I9, I10** — the placement kill fixed 109/109; the ranking reproduces at ρ +1.000; 74% of legs at the resolution floor |
+| **R39** | v0.98.1 | five cards, 411 caps — the big batch | See the R39 sub-rows below. Six analyses (`A`–`F`) plus rotor and STOL |
+| R39 · `A` ranking | | `oblique-6-dwell` throttle contrast | `LAW-LEDGER.md` **G8** — the airframe spread survives at matched speed |
+| R39 · `B` card validity | | same, criterion B/D | `LAW-LEDGER.md` **X19** (`oblique-6-dwell` retired as a ranking instrument), **X20** (thrust-to-weight attribution refuted); `LAW-WEAKNESS-MAP.md` W1 |
+| R39 · `C` settle mode | | Darkreach azimuth mode | `LAW-LEDGER.md` **K7** (V-dependent, Darkreach-only, f ∝ V^0.305), **X21** (the wobble detector measured entry transients) |
+| R39 · `D` sustained A/B | | `e3-marker-ff`, `e2-rel-turn-lead`, 121 caps | `LAW-LEDGER.md` **D13** (the first above-floor steady-state pointing measurement), **A1** (`MarkerRateFeedForward`), **X22** (`RelativeTurnLead` spent); `GENERALITY-REVIEW.md` finding 16 |
+| R39 · `E` alpha | | `alpha-sweep`, 61 caps | `LAW-LEDGER.md` **X23** (the card cannot reach the alpha regime), **N1** (the AoA guard's 40% onset spread from two absolute constants); `cards/ALPHA-CARD-REDESIGN.md` |
+| R39 · `F` Darkreach damage | | ledger #51, third reproduction | `LAW-CHARACTERIZATION.md` §7 **#51**; `LAW-LEDGER.md` **X24** (`dmgFrac` structurally zero; `0.114` is subtree size, not four events) |
+| R39 · rotor | | `rotor-hover` + `rotor-bob`, 48 caps | **Superseded by R41** for the shipped law. `LAW-LEDGER.md` **H1** (the v0.58 branch never executed), **H2** (the hover bistability). Cited from `scorecard.py` (13×), `check-card.py`, `ChaseController.cs`, `Recording.cs`, `ScenarioPlayer.cs`, `cards/rotor-*.json` |
+| R39 · STOL | | `stol-steps` + `stol-sweep`, 53 caps | `LAW-LEDGER.md` **X25** — the card declared 90 m/s and flew 340–381; it is a second high-q dataset, not STOL data |
+| **R40** | v0.99.1 | `alpha-pullup`, `place-noop`, `place-deflect`, 109 caps | `LAW-LEDGER.md` **N2** (the law never backs off — commanding into the ceiling on 100% of gate-biting samples), **X26** (the #51 phenomenon did not reproduce; 32 clean placements) |
+| **R40** · metric repair | v0.99.1 | corpus-wide re-score, no flying | The **two corpus-wide invalidations** at the head of `LAW-LEDGER.md`, and the metric definitions in this file. Cited from `ScenarioPlayer.cs` |
+| **R41** | v1.0.0 | seven fixed-wing cards + three rotor, 451 caps | `LAW-LEDGER.md` **A1** (feed-forward off the rail), **A2** (the `e1*` nulls), **H3–H5** (rotorcraft), **I11** (the ring geometry), **X27** (replicate 1 is a different flight condition). Cited from `compare-runs.py` |
+| **Discord v0.68 field bundle** | v0.68.0 | two users, six recordings, not a batch | `LAW-LEDGER.md` **X28** (the locale formatting bug, fixed v1.0.1) and **O11** (the high-q roll limit cycle); `GENERALITY-REVIEW.md` finding 5. Cited from `WTMouseAimPlugin.cs`, `Recording.cs` |
+
+**Raw evidence** for R28–R37 is in `debugtests/archive/R<n>-<date>/` (CSVs, sidecars, logs). Later
+batches are archived out of `<game>/BepInEx` with
+`python debugtests/index-captures.py "<game>/BepInEx" --archive debugtests/archive --run R<n>`.
+
+### The doc convention — batch analyses UPDATE standing docs
+
+**Do not create a new `R##-*.md`, `SESSION-*.md` or `*-FINDINGS.md`.** That habit produced 25 files
+that disagreed with each other and with the code, and cost more to keep straight than they were
+worth. A batch analysis lands as edits to the standing docs:
+
+| what you found | where it goes |
+|---|---|
+| a claim you can now believe, or one you must stop believing | `LAW-LEDGER.md` — ESTABLISHED / PLAUSIBLE / **REFUTED** / OPEN, one line, with batch + n + effect size |
+| an open action item | `LAW-CHARACTERIZATION.md` §7 — the durable backlog |
+| a ONE-LAW violation (a constant that should be a probe) | `GENERALITY-REVIEW.md` findings |
+| a ranked weakness, or a hypothesis to stop re-proposing | `LAW-WEAKNESS-MAP.md` (W-items, and its REFUTED / DO-NOT-RE-PROPOSE list) |
+| a schema/metric/SQL trap | this file |
+| a card's validity verdict | the card's own `note` field, plus `cards/README.md` |
+| what shipped | `CHANGELOG.md` (append-only) |
+
+Then **add a row to the batch index above** naming the run tag and where its conclusions went, and
+archive the raw captures. The ledger line is the finding; the CSVs are the evidence; nothing in
+between needs to exist. If a batch produced nothing that changes a standing doc, that is a result —
+record it as one line in the index and move on.
+
+---
+
 ## Tables
 
 ### `captures` — one row per CSV (86 columns today; the `sc_`/`entry_`/`ov_` ones are dynamic)
@@ -445,6 +512,17 @@ SELECT run_tag, count(*) n, round(avg(entry_snapBackM),1) snapback,
 `entry_*` is what the per-replicate reset had to undo. A batch whose `snapBackM` is climbing is a
 batch whose replicates were drifting further apart before each reset.
 
+> **`entry_snapBackM = 0` is a stratum, not a reading — filter it out of any A/B.** The FIRST placement
+> of a lane is the one that *captures* the run anchor, so it cannot snap back to it: it writes back the
+> speed and altitude the aircraft already had and the replicate flies from the spawn state, while every
+> later replicate arrives teleported and decelerated. `ArmOf` is `((i+1)>>1)&1`, so index 0 is **arm 0
+> on every ABBA card ever flown** — the stratum is 12.5% of one arm and 0% of the other. On R41
+> `e1-below-suppress`/`FastBomber1` that single capture turned a 0.2% null into an apparent **30% knob
+> effect** (`LAW-LEDGER.md` X27). **Add `AND entry_snapBackM <> 0` to any
+> query that groups by `arm`.** `compare-runs.py` does this for you; raw SQL does not.
+> `NULL` is different again — no `# entry` line at all, i.e. an ungated card — and means *unknown*,
+> not zero.
+
 #### Q10. Which grid cells have we NEVER flown? — *needs `--cards cards/` first*
 ```bash
 python debugtests/index-captures.py --cards cards/
@@ -529,6 +607,6 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
 12. Comparing replicate spread across batches without checking `gJitterG` first. The game's world
     origin follows the OPERATOR'S CAMERA (`OriginShift`, decompile `:19365`), and a lane's physics
     jitter — which is the dominant term in `terminalOffDeg` scatter (r = 0.886 over 9 lanes,
-    `R33-FINDINGS.md`) — moves with it, **mid-batch, without warning and in opposite directions on
+    the R33 batch; `LAW-LEDGER.md` I8) — moves with it, **mid-batch, without warning and in opposite directions on
     different lanes**. Check the per-*replicate* series, not the mean: R33's flip is invisible in a
     lane average. A noise floor quoted without its `gJitterG` is one session's camera position.

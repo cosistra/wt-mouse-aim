@@ -17,9 +17,9 @@ Built-in cards (`fixedwing-v2`, `rotorcraft-v2`, `fixedwing-sweep`) are **not** 
 `ScenarioPlayer.cs`. This grid is additive: 16 baseline cards, ~11 min of flying, sized against the
 law's own thresholds (below) to cover the regimes the built-ins leave open — plus **4 `e*`
 attribution cards**, each one A/B experiment wired into its own file (see
-[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-4-cards)), and **3 follow-up cards**
+[Attribution A/B](#attribution-ab--one-checkbox-per-experiment-4-cards)), and **4 follow-up cards**
 written against a specific finding rather than a regime (see
-[Follow-ups](#follow-ups--cards-written-against-a-finding-3-cards)).
+[Follow-ups](#follow-ups--cards-written-against-a-finding-4-cards)).
 
 ## The three thresholds every card is sized against
 
@@ -224,17 +224,33 @@ gives: armed together, a below-suppression change and a 64% roll-damping change 
 Each is 8 replicates — 5.1 min for an oblique card, 6.1 for a sweep, ~22 min for all four, **and that
 is the same ~28 min whether each flies one airframe or eight** (see the paragraph above).
 
-### Follow-ups — cards written against a finding (3 cards)
+### Follow-ups — cards written against a finding (4 cards)
 
-Unlike everything above, these three are not regime coverage: each was written to settle one specific
-question a batch raised, and all three have flown. They stay in the grid because the question can be
-re-asked on a new build — that is the point of a card.
+Unlike everything above, these are not regime coverage: each was written to settle one specific
+question a batch raised, and the first three have flown (`hs-hold` has not). They stay in the grid
+because the question can be re-asked on a new build — that is the point of a card.
 
 | card | what it isolates | pass / fail |
 |---|---|---|
 | `oblique-12-fwd` | **direction vs card position**, forward arm. Identical `oblique-12` diamond, down legs in slots 2–3; `Fighter1, Multirole1, FastBomber1` | read **only** against `oblique-12-rev` — a number from one arm alone measures the confound, not the effect |
 | `oblique-12-rev` | the same diamond with the traversal **reversed**, up legs in slots 2–3 | the down/up `terminalOffDeg` ratio must **not invert** when the up legs move early. It does not: R30 measured ×3.07 / ×5.39 / ×1.39 on the three airframes, every 95% CI excluding 1, with a real but 4–7× smaller position effect pointing the *other* way |
 | `darkreach-05` | the **R29 departure precursor** — `oblique-05` geometry, `Darkreach` alone, at the absolute 171 m/s R29 flew | the *precursor*, not the crash: a healthy capture commands **no** bank below 0.5° of `azErr` (0.0% of samples on 25 `fixedwing-v2` captures), so `targetBank` > ~10° at \|`azErr`\| < 2° is the defect firing. R32 reproduced it (34–56° at \|`azErr`\| < 5°) and **18 of 63 captures departed**. A truncated capture here is a **result**, not a failed run |
+| `hs-hold` | the **250–400 m/s hole** and the roll limit cycle that lives in it — `LAW-LEDGER.md` O11 / `GENERALITY-REVIEW.md` finding 5. Level on-boresight cruise: mirrored 30 s holds at ±1° plus a mirrored 0.5° pair, at **2.2× FBW corner** (352/352/341/440 m/s) on `Fighter1, Multirole1, SmallFighter1, FastBomber1`. **NOT a maneuver card** — no elevation demand anywhere | pass = `outR` sd ≲ 0.05 over the settled tail with no sustained sign-flipping: **`wobbleFreqHzOutR` absent**, `wobbleEpisodesOutR` = 0, `stickFlipRateR` at the oblique family's level, R/L mirror pairs within noise. fail = the R6-02 signature — `wobbleFreqHzOutR` **1–2 Hz** with high `wobbleCoherenceOutR` and episodes at pp 0.3+, *while* `targetBank`/`tBankE` ≈ 0 and `off` < 1°. A limit cycle **with** a live bank demand is an outer-loop defect and belongs to the oblique family, not here |
+
+`hs-hold` has three things that are easy to get wrong if you copy it. **2.2 is the largest multiple
+the whole roster clears** — `0.95 × Vmax / FBW corner` is 2.28 on `FastBomber1`, so 2.3 refuses a lane
+pre-spawn — and the roster is not a preference: 2.2× refuses `trainer`, `VTOLTrainer1`, `CAS1`, `COIN`
+and `EW1` at the gate outright, and `Darkreach` is left out by hand because 2.2 × its 100 corner is
+220 m/s, i.e. not in the band the card exists to fill. **`ScenarioThrottle` is pinned at `1.00` and
+must not be lowered**: R39-stol measured these same jets running to 340–381 m/s on a pinned 1.00
+throttle, so full throttle *trims* them right here — this card asks for the speed the pin already
+holds, which is the inverse of the `stol-*` problem (declared 90, flew 381). At 0.70 the entry becomes
+a deceleration and the card slides back out of the band. And **`Drone/DroneAltDeckM` can be left at its
+3000 default here**, the opposite of the `stol-*` instruction: the decks put half the fleet at 2500 m
+and half at 5500 m — q 59.3 vs 43.2 kPa against the corpus's all-time high of 25.6 — crossed with
+airframe on the Latin-square diagonal, so the decks become a balanced dynamic-pressure factor inside
+one card, and q is exactly what finding 5 is about. There is no vertical demand anywhere, so unlike
+every other high-energy card this one has no altitude budget to blow and cannot reach the 500 m floor.
 
 Why `oblique-12-fwd`/`rev` are a pair and not one card with a flag: every other oblique card traverses
 N→E→S→W→N, so the two **down** legs are always slots 2–3 and the two **up** legs always 4–5 —
@@ -330,6 +346,50 @@ the same **band**, which is the quantity that matters for those cards.
 2500 m or above and no segment can lose that much; the deepest is `oblique-below` (38 s nose-down,
 ~3.3 km, entered at 6000 m for that reason).
 
+## Launch procedure — the four things that silently ruin a batch
+
+Cards bind at **startup**, so install then restart the game:
+
+```powershell
+Copy-Item cards\*.json "<game>\BepInEx\config\wtmouseaim-cards" -Force
+```
+
+Then, in `BepInEx\LogOutput.log`, check **two lines** before you press anything:
+
+```
+[card] N card(s) bound (3 built-in, 36 from disk) — ...
+[session] run R<N>
+```
+
+`0 from disk` **with files in the folder** means nothing below will fly. The `R<N>` tags every capture
+and every log this session and **only increments on a game restart**, so consecutive batches share it
+unless you quit in between.
+
+| knob | value | why |
+|---|---|---|
+| `Drone/DroneEnabled` | **ON** | master switch; the harness is inert and its hotkeys unread while off |
+| `Scenario/ScenarioCardSet` | **the card name** | the only safe way to pick a card — see the `sel[0]` rule below |
+| `Scenario/ScenarioArmToggle` | **empty** unless the batch says otherwise | a leftover value here sweeps a knob nobody asked to sweep. `e*` cards name their own `armToggle` and win; other cards declare none |
+| `Scenario/ScenarioForceEntry` | ON (default) | the placement writes the entry condition; off, a lane not already on condition simply refuses |
+| `Control/Enabled`, `Control/WriteControl` | **ON** | with either off the card moves the marker and nothing chases it. `[card]` warns, and the capture is not a law measurement |
+| `Recording/DebugLogging` | **OFF** | per-tick spam; it costs frames on a wide fleet |
+
+**Run `python debugtests/check-card.py cards/*.json` before every batch.** Three cards in two days
+failed on arithmetic it computes in advance — `alpha-sweep` (a 3.24 g ceiling against the 4.8–24 g its
+lanes needed), `stol-*` (declared 90 m/s, flew 340–381), `rotor-*` (never hovered). The flight is the
+most expensive step and must not be where design errors are discovered.
+
+**Read the PREFLIGHT run board before every spawn press** — it is the only confirmation that the card,
+and not the F1 checkboxes, is driving.
+
+**After the batch:** index it, then archive it out of `<game>` before the next game start overwrites
+`LogOutput.log`:
+
+```bash
+python debugtests/index-captures.py "<game>/BepInEx"
+python debugtests/index-captures.py "<game>/BepInEx" --archive debugtests/archive --run R<N>
+```
+
 ## Entry conditions — read before ticking a checkbox
 
 `cls` gates only the airframe *class* (`Pilot.PilotType`), and a trainer and a fighter are both
@@ -344,9 +404,13 @@ for an airframe it was not written for:
   but only well above its 130 m/s FBW corner speed, so it is placed somewhere it cannot maneuver — untick
   them when flying one. `CAS1` (Vmax 205.6), `COIN` (141.7) and every rotorcraft cannot reach 250 at
   all: the placement writes the speed anyway and the capture measures the decay.
-- `rotor-*` declare no entry condition (`startSpeed` 0). Nothing is placed, the collective stays with
-  the pilot, and **no reset happens between replicates** — fly one replicate per hand-established
-  hover.
+- `rotor-*` declare a **hover** (`startSpeed: 0`). Since v1.0.0 that is a *declared* zero rather than
+  an absent field, so the placement runs and every replicate carries its own `# entry` header — the
+  replicates are independent, which R39's were not. **The collective is still unowned:**
+  `ScenarioPlayer.OwnInputs` early-returns at `EntrySpeed <= 0`, so a `ScenarioThrottle` pin is read
+  after the return and does nothing. At the harness's fixed `HoldThrottle = 0.60` one rotorcraft in
+  three sinks at 25 m/s and aborts on the altitude floor (`LAW-LEDGER.md` H5), so a hover card cannot
+  yet hold a hover on every airframe.
 
 For the **loaded** jet case the loadout is yours to choose: a card cannot set it. Fly `alpha-sweep`
 and `alpha-steps` clean, then again with heavy stores. Once loadout variation lands in the drone
@@ -560,3 +624,13 @@ demand silently freezes — which is why the selftest asserts the length.
   cannot command a roll rate directly.
 - **Oblique at low q or on a trainer.** The whole oblique ladder is 250 m/s / 4000 m. Re-issuing it
   at the `stol` entry condition is a copy-and-edit away, once the jet ladder has said something.
+- **A speed SWEEP, at any speed.** `startSpeedCorner` is one multiple for the whole card, resolved per
+  lane against each airframe's own corner — so lane-by-lane speeds exist only as a side effect of the
+  roster, confounded with airframe. `hs-hold` gets 341–440 m/s across four keys that way, and 250–300
+  m/s and >450 m/s stay unsampled; a genuine sweep needs either four cards or a per-lane multiple the
+  grammar does not have. **`hs-hold` also ships no matched low-speed control** — a twin at `1.0x` would
+  accelerate straight out of its own band on any throttle ≥ `MinThrottle`, which is the `stol-*`
+  failure again, so the low-q arm is the existing corpus (R39-D's mean \|`outR`\| 0.0068–0.0109 in
+  sustained tracking, and the `oblique-*-c` family's `stickFlipRateR` on the same four airframes)
+  rather than a card. That is a weaker comparison than a twin and is the first thing to fix if the
+  card comes back FAIL.

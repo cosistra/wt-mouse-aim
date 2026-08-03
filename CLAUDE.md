@@ -14,10 +14,14 @@ explicitly. This file tells you where code *lives*; that one tells you how it *w
 **What to fly, and why that:** [`LAW-CHARACTERIZATION.md`](LAW-CHARACTERIZATION.md) is the standing
 test plan — the state of what has actually been measured (one card, one airframe, saturated), the
 batches to run in order, and the airframe roster with the entry conditions each one can survive. It
-supersedes the Experiments section of [`FLIGHT-PROTOCOL.md`](FLIGHT-PROTOCOL.md), which remains the
-record of how the *instrument* was validated (gates A–D, all passed). Read the characterization plan
-before proposing an experiment; most of the obvious ones are already scheduled, and several would
-currently measure a railed actuator rather than the control law.
+Read the characterization plan before proposing an experiment; most of the obvious ones are already
+scheduled, and several would currently measure a railed actuator rather than the control law.
+
+**What is known, and what is merely believed:** [`LAW-LEDGER.md`](LAW-LEDGER.md) is the arbiter —
+ESTABLISHED / PLAUSIBLE / REFUTED / OPEN, one citation per line. It carries the instrument-validation
+record (gates A–D, all passed, at I1–I3) and every per-batch finding the repo has. **Do not build on a
+claim that is not in ESTABLISHED**, and read the three corpus-wide invalidations in its header before
+quoting any pre-R40 number.
 
 Machine-specific paths are written as placeholders:
 - `<game>` = your Nuclear Option install folder (the one containing `NuclearOption.exe`). The build
@@ -105,7 +109,7 @@ Machine-specific paths are written as placeholders:
     **Consequence to keep in view: ON is also what puts the fast lanes on the 72° `MaxBankAngle`
     wall** (Fighter1 61.6° → 73.6° commanded), so it buys pointing accuracy with turn-rate headroom.
     **v0.83** fixes the two law defects R21 pinned behind the *rest* of that lag (see
-    `debugtests/R21-FINDINGS.md`), each behind its own checkbox, both default ON:
+    `LAW-LEDGER.md` S1–S3, the R21 batch), each behind its own checkbox, both default ON:
     (a) **the relative-rate turn lead** (`Cfg.RelativeTurnLead` until v0.99.1 deleted the knob) — the
     v0.51 anticipatory lead subtracted the **absolute** nose heading
     rate, but `d(azErr)/dt = markerRate − noseRate`, so that was the true derivative only against a
@@ -116,7 +120,7 @@ Machine-specific paths are written as placeholders:
     stationary-marker regime where the two lead forms are identical; the change just stops it binding
     in a matched turn.
     **v0.99.1 — THE LEVER IS GONE, THE TERM STAYS, and the direction is the part to read.** R39-D
-    (`debugtests/R39-D-sustained-ab.md` §5) swept it 8 lanes × n=8: it does its declared job
+    (`LAW-LEDGER.md` X22) swept it 8 lanes × n=8: it does its declared job
     (`|leadDeg|` 2.85° → 0.08°, predFloor binding 98% → 60%) and the standing error moves 0.2–3.8%,
     **inside the batch's own 0.1–4.7% null contrast** between two byte-identical configurations (§6a),
     with `rms` up on 7 of 8 lanes. That is a verdict on the **knob**, not the term: §8 states the card
@@ -134,7 +138,7 @@ Machine-specific paths are written as placeholders:
     `iGate`/`leadDeg`.
     **v0.85** fixes the below-nose roll-to-align **positive feedback loop** (`elDn`: 6.92° standing
     error at ±43° bank, `blendWeight` correlating +0.918 with the `azErr` it is itself generating,
-    against 0.03° for the *larger* mirror step `elUp` — see `debugtests/GATE-CHATTER-FINDINGS.md` §5a).
+    against 0.03° for the *larger* mirror step `elUp` — see `LAW-LEDGER.md` S5).
     Two independent checkboxes, both default ON: (a) `Cfg.BelowAlignSuppress` — the v0.67
     `belowSuppress` keyed on **body-frame** belowness, so the aircraft's own roll erased it (at 90° of
     bank a straight-down target reads abeam), and its `(1 − lateralHold)` factor gated it on the very
@@ -1009,8 +1013,8 @@ Machine-specific paths are written as placeholders:
   (R28: 384 captures across 8 lanes in 30m14s). A card with a short airframe list is leaving
   measurement on the floor. Their entry stays **absolute** on purpose: converting to
   `startSpeedCorner` would change what each card measures, and `e1-below-control` only works as a
-  control if it matches `e1-below-suppress` exactly. `cards/TOMORROW.md` is the campaign runbook
-  (8 ordered batches, ~46 min, ~528 captures, with the pass/fail question for each).
+  control if it matches `e1-below-suppress` exactly. The launch/preflight procedure and the card grid
+  are in [`cards/README.md`](cards/README.md).
 - **[`AIRFRAMES.md`](AIRFRAMES.md)** — the airframe reference: all **14** real jsonKeys with
   Vstall/Vmax/corner/gLimit/turnR/mass, which of them have two seats, and the pre-spawn
   `Encyclopedia.Lookup` query. **Read it before writing an `airframe` list or a `startSpeed`**: the
@@ -1102,7 +1106,7 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   warn. **`dmgFrac` cannot currently reach that branch and must not be used as a damage filter** —
   the v0.96 abort truncates the capture *before* the row is written, so the column is 0 on all
   641,555 indexed rows against 8 known damage aborts; damage shows up as the abort and the short
-  capture, never as the column (`debugtests/R40-metric-repair.md`).
+  capture, never as the column (`LAW-LEDGER.md` X24).
   **Every metric routes through one dead-column guard (R40).** `load_csv` withdraws, per capture,
   any numeric column that is present in the header and identically 0.0 on every row, and emits one
   **DEAD COLUMN** warning naming them — so a metric derived from a column nobody writes comes out
@@ -1112,7 +1116,7 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   **flat within each capture but varying between them**, which is the shape a conditionally-written
   column takes.
   **Two metric families were repaired in R40 and one was deleted — read
-  `debugtests/R40-metric-repair.md` before quoting any pre-R40 score.** `bankClampActivePct` now
+  the three corpus-wide invalidations at the head of `LAW-LEDGER.md` before quoting any pre-R40 score.** `bankClampActivePct` now
   reads `bankTR`, not `targetBank` (which is the removed Legacy law's azErr-proportional bank
   target and errs in *both* directions — 27.5% of corpus segments move > 5 pp, 17 flip to RAILED);
   `wobbleEpisodes*`/`wobbleFreqHz*` are measured over a per-segment settled window with an
@@ -1151,7 +1155,7 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   `|v − vPrev|/(dt·9.81)` off the COCKPIT PART's rigidbody (`:61977`), so it carries the joint
   solver's noise, and that noise is the **dominant term in `terminalOffDeg` replicate scatter**
   (r = 0.886, log-log slope 0.82, over 9 lanes and in both directions —
-  [`debugtests/R33-FINDINGS.md`](debugtests/R33-FINDINGS.md)). It is a property of the **session, not
+  `LAW-LEDGER.md` I8, and `debugtests/CAPTURES-DB.md` gotcha 12). It is a property of the **session, not
   the airframe**: the game's world origin follows the OPERATOR'S CAMERA (`OriginShift`, `:19365`),
   and R33 caught it flipping mid-batch at one instant, widening six lanes 2.2–12x while narrowing
   four. Read the per-*replicate* series — the flip is invisible in a lane mean — and park the camera
@@ -1242,10 +1246,10 @@ Diagnostics are **instrument-first** — the mod tells you what it did rather th
   can report what fraction of the demand chain actually **reaches** a control output, plus the
   `_pitchEff` self-probe latch, diagnosed from the recorded rate pair rather than inferred.
   `--settled 20` drops entry transients; `--json`, `--selftest` (the closed forms, no data needed).
-  Write-up: `LOOP-AUDIT-FINDINGS.md`.
+  Findings: `LAW-LEDGER.md` L12–L14.
 - **Gate chatter — CLOSED INVESTIGATION.** `python debugtests/gatechatter.py <rec.csv>...
   [--win 0.20] [--cone 0.2] [--json] [--perm 399] [--skip 0.0] [--bytag] [--selftest]`. Kept for
-  reproduction only: its hypothesis was answered in v0.85 (`GATE-CHATTER-FINDINGS.md` §5a — the
+  reproduction only: its hypothesis was answered in v0.85 (`LAW-LEDGER.md` S4–S6, X9 — the
   below-nose roll-to-align positive feedback loop) and fixed behind
   `BelowAlignSuppress`/`AlignRateLead`. Its durable half is `flightscore`'s `xfightPct`. **Do not
   reach for it to score a routine batch.**
@@ -1573,6 +1577,25 @@ fix the prose too.** A green checker on a wrong diagram is the failure mode to a
   loaded jet mushing near its alpha limit above corner speed, a low-limit STOL trainer, and a
   hovering helo. `GENERALITY-REVIEW.md` is the standing audit of the law against this rule —
   update it when a finding is fixed or a new one is discovered.
+- **A batch analysis UPDATES a standing doc. Never mint a new `R##-*.md`, `SESSION-*.md` or
+  `*-FINDINGS.md`.** That habit produced ~25 files that went stale faster than they could be
+  maintained, disagreed with each other and with the code, and were consolidated away on 2026-08-02.
+  There is a fixed home for every kind of finding:
+  - a claim you can now believe, or must stop believing → **`LAW-LEDGER.md`** (ESTABLISHED /
+    PLAUSIBLE / **REFUTED** / OPEN — one line, with batch, n and effect size). It is the single home
+    for findings.
+  - an open action item → **`LAW-CHARACTERIZATION.md` §7**, the durable backlog.
+  - a ONE-LAW violation (a constant that should be a probe) → **`GENERALITY-REVIEW.md`**.
+  - a ranked weakness, or a hypothesis to stop re-proposing → **`LAW-WEAKNESS-MAP.md`**.
+  - a schema / metric / SQL trap → **`debugtests/CAPTURES-DB.md`**.
+  - a card's validity verdict → that card's own `note` field, plus `cards/README.md`.
+  - what shipped → **`CHANGELOG.md`** (append-only).
+
+  Then add one row to the **batch index** in `debugtests/CAPTURES-DB.md` naming the run tag and where
+  its conclusions went, and archive the raw captures. The ledger line is the finding; the CSVs are the
+  evidence; nothing in between needs to exist. A batch that changed no standing doc is a result — say
+  so in one line. **Deleting a doc is fine; deleting the only record of why something is the way it is
+  is not** — move the fact first, then delete.
 - **Keep this CLAUDE.md current in the same change.** When a change alters file structure, types,
   paths, the build/release flow, or a sign convention, update the matching section here as part of
   that change — the Layout/Paths sections are the agent's map, and stale notes cause wrong-file edits.
@@ -1596,7 +1619,7 @@ fix the prose too.** A green checker on a wrong diagram is the failure mode to a
   steady-state residual). **There is no mod-side G-limiter and THE GAME HAS NO G GOVERNOR EITHER** —
   do not write one, and do not assume something downstream is catching G. This bullet used to say
   "the game's stability control governs"; that was **false**, corrected in v0.96 after R32
-  (`debugtests/R32-FINDINGS.md` §1–§2). `ControlsFilter.GLimiter` is **dead code**: the identifier
+  (`LAW-LEDGER.md` P1–P3). `ControlsFilter.GLimiter` is **dead code**: the identifier
   occurs exactly ONCE in the 181,878-line 0.34 decompile (`:65242`), as its own `protected class`
   declaration — no field of that type exists, nothing instantiates it, and its `LimitG(...)` (`:65277`)
   has zero call sites. What *does* exist is

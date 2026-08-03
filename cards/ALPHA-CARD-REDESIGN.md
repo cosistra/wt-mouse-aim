@@ -1,7 +1,7 @@
 # `alpha-pullup` — the AoA-ceiling card, redesigned
 
 **Replaces `alpha-sweep`. Keeps `alpha-steps` untouched.** Written against
-[`debugtests/R39-E-alpha.md`](../debugtests/R39-E-alpha.md), which is the failure analysis this
+the R39-E `alpha-sweep` analysis (consolidated into `LAW-LEDGER.md` X23 / N1), which is the failure analysis this
 design is derived from — read its §4 and §10 before arguing with anything below.
 
 Deliverables: `cards/alpha-pullup.json` (repo + game load path), and — unrelated, §8 — the
@@ -571,8 +571,8 @@ unresolvable it warns once and then flies every replicate on the same arm while 
 labels itself `arm=0`/`arm=1` — a complete, well-formed, entirely fictional A/B, which is the exact
 silent null the arm machinery exists to prevent. Deleted from the repo **and from the game load path**
 (the live path — a repo-only deletion leaves it selectable). Its rows are gone from `README.md`'s grid
-table and `TOMORROW.md`'s runbook, both renumbered, and `README.md` now records that the sweepable set
+table and the campaign runbook, both renumbered, and `README.md` now records that the sweepable set
 is **four levers at five `Arm()` sites**. Its R39-D captures are archived and analysed; nothing is lost.
 
-`TOMORROW.md` was also updated for the alpha redesign — batch 7 was `alpha-sweep`, which is now
+The campaign runbook was also updated for the alpha redesign — batch 7 was `alpha-sweep`, which is now
 superseded and must not be launched; it is `alpha-pullup` at 10 lanes instead.

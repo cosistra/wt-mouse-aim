@@ -16,10 +16,10 @@ authority on what a `#n` means.
 
 | batch | question it was flown to answer | answer | where |
 |---|---|---|---|
-| **R29** | do all ten airframes fly, at `0.95x` their own corner? | yes, and the Darkreach departed on card 7 of 10 at 26.9 g — the event this whole thread comes from | `debugtests/R29-FINDINGS.md` |
-| **R30** | is the down-step penalty direction, or position in the card? | **direction** — it survives traversal reversal | `debugtests/R30-FINDINGS.md` |
-| **R31** | does disabling `BelowAlignSuppress` remove the penalty? | **unanswerable as posed** — `arm=0` selects the v0.67 *form*, not "off"; and `bWt` is identically 0 over the scored window, so `bSup` cannot be the transmission path | `debugtests/R31-FINDINGS.md` |
-| **R32** | does the Darkreach precursor reproduce? | **yes**, in 4 of 5 lanes — and the departure turns out to be an **AoA/authority** defect, not a G defect | `debugtests/R32-FINDINGS.md` |
+| **R29** | do all ten airframes fly, at `0.95x` their own corner? | yes, and the Darkreach departed on card 7 of 10 at 26.9 g — the event this whole thread comes from | `LAW-LEDGER.md` G1–G7, L1 |
+| **R30** | is the down-step penalty direction, or position in the card? | **direction** — it survives traversal reversal | `LAW-LEDGER.md` D2–D4 |
+| **R31** | does disabling `BelowAlignSuppress` remove the penalty? | **unanswerable as posed** — `arm=0` selects the v0.67 *form*, not "off"; and `bWt` is identically 0 over the scored window, so `bSup` cannot be the transmission path | `LAW-LEDGER.md` D8–D12, X12 |
+| **R32** | does the Darkreach precursor reproduce? | **yes**, in 4 of 5 lanes — and the departure turns out to be an **AoA/authority** defect, not a G defect | `LAW-LEDGER.md` K1–K5, P1–P3 |
 
 **Two premises this document rested on were false and are corrected below**: that the game governs G
 (it does not — `ControlsFilter.GLimiter` is dead code), and that the law was *bending airframes*
@@ -58,7 +58,7 @@ entirely after all three fixes. Its `Q0` verdict is the gate on everything below
 > **What this does to the document below:** the fix order (*instrument first, law second*) was
 > **right** and is vindicated — but it was declared finished ~15 batches too early. Any branch below
 > that resolves on a `bankClampActivePct`, a wobble count, or an authority figure needs re-reading
-> against `debugtests/R40-metric-repair.md` and `debugtests/SESSION-2026-08-02.md` §3 first.
+> against the three corpus-wide invalidations at the head of `LAW-LEDGER.md` first.
 > The lesson is working rule (a) in [`ORIENTATION.md`](ORIENTATION.md): **a zero and a
 > never-tested reading are indistinguishable, and we kept reading the zero as a pass.**
 
@@ -115,7 +115,7 @@ R32 are its 31-replicate clean baseline on the same airframe and card. **Only th
 `BelowAlignSuppress` `arm=0` selects the v0.67 *form*, not "off", so the A/B as posed cannot answer
 "does the suppression cause it"; and `bWt` is identically 0 over the scored window, so `bSup` cannot
 be the transmission path. The third card (`oblique-above-c`) is written and unflown
-(`cards/TOMORROW.md` §8), but flying the axis without fixing the arm semantics repeats R31.
+(card `cards/oblique-above-c.json`), but flying the axis without fixing the arm semantics repeats R31.
 
 **And a hard comparability line: v0.96 changed which corner speed a corner-relative card resolves
 against** (#41 — the FBW's, not the AI's; they differ 0.556×–1.417× across the roster). **Every
@@ -253,7 +253,7 @@ Then, still open and unchanged in priority:
 ### The G premise was wrong — twice, and both corrections change what to build
 
 Found 2026-07-30 by reading the 0.34 decompile against R29/R32. Full evidence in
-`debugtests/R32-FINDINGS.md` §1–§2.
+`LAW-LEDGER.md` P1–P3 (the R32 batch).
 
 **1. The game has no G governor.** `ControlsFilter.GLimiter` is dead code: the identifier occurs
 **exactly once in 181 878 lines**, as its own `protected class` declaration; no field of that type
@@ -293,10 +293,10 @@ aircraft gone`).
 
 Everything else found lately was instrument (#29/#30/#37). This one is the control law.
 `GENERALITY-REVIEW.md` finding **18** — that file's finding numbers are a **separate namespace**
-from the backlog's; evidence in `debugtests/R32-FINDINGS.md` §5–§6. **The backlog number is #45 and
+from the backlog's; evidence in `LAW-LEDGER.md` K3 / L3 (the R32 batch). **The backlog number is #45 and
 it means this and only this** — see `LAW-CHARACTERIZATION.md` §7, which is the sole authority on
 what a `#n` means. (The "belowness axis" work briefly also called #45 is not backlog: it is
-experiment **E1**, card `cards/oblique-above-c.json`, runbook `cards/TOMORROW.md` §8.)
+experiment **E1**, card `cards/oblique-above-c.json`; setup in `cards/README.md`.)
 
 **What was measured.** `Darkreach` on `darkreach-05`, 63 captures / 37 868 rows, 18 departures, 3
 dead pilots. At the moment a departure starts the mod commands |`outP`| ≤ 0.24 in the *correct*

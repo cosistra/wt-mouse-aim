@@ -1,9 +1,7 @@
 # Law characterization — the suite, and why it is this one
 
-[`FLIGHT-PROTOCOL.md`](FLIGHT-PROTOCOL.md) validated the **instrument** (gates A–D, all passed
-2026-07-29). This file is what to point the instrument at. It supersedes that document's
-"Experiments" section, which was written when only one card could be flown and assumed a human in
-the seat.
+The **instrument** was validated by gates A–D (R22–R25, all passed 2026-07-29); that record now lives
+in [`LAW-LEDGER.md`](LAW-LEDGER.md) I1–I3. This file is what to point the instrument at.
 
 **Read the first section before the plan.** The plan only makes sense once you accept how little we
 actually know.
@@ -24,7 +22,7 @@ or a query named in place; re-derive rather than trusting this table's age.**
 | disk cards never flown | **4** (was 12) — `e1-below-control`, `e1-below-suppress`, `e1b-align-lead`, `oblique-above-c`. **The whole `e1*` belowness axis is what is left unflown**, and it is §4 Batch 4's E1. Both `alpha-*`, both `rotor-*`, both `stol-*`, `e2` and `e3` have now flown (R39) — but see the ONE-LAW row: flying is not measuring. |
 | captures / scored segments / recorder rows | ~~1 681 / 5 903 / 999 942 across 26 tagged batches R1–R33~~ → **2 576 / 11 015 / 2 117 598** across **31** tagged batches **R1–R40** (2026-08-02). Re-derive with `--stats`; do not trust this cell's age. |
 | airframes ever flown *on a card* | **13** (was 10) — all ten fixed-wing keys plus `AttackHelo1`, `UtilityHelo1`, `QuadVTOL1` since R39 |
-| airframes the ONE-LAW rule names | **4** — **2 of 4 genuinely covered, NOT 3 and not 4.** Both remaining cases now have captures and *still have no valid measurement*: the **hovering helo** flew 48 captures in R39 but `_heloOk` was **false on all 48**, so the v0.58 rotorcraft branch never executed and they measure the pre-v0.58 law (`debugtests/R39-rotor.md` §1a); the **STOL trainer** flew 53 but the card's declared 90 m/s was never held — eight of ten lanes reached **340–381 m/s, 2.1–2.4× corner** (`debugtests/R39-stol.md` §2). The **loaded jet** case has never been flown at all (a card cannot set stores). Both re-flies are gated on Tier 1 code fixes. |
+| airframes the ONE-LAW rule names | **4** — **2.5 of 4 covered as of R41 (v1.0.0).** The **hovering helo** now flies the real v0.58 branch (`heloOk` true on 108,987/108,987 rows, ledger H1) and the law is excellent there — but only **`QuadVTOL1` actually hovered**; the other two rotorcraft never did, so hover rests on one airframe (ledger H5). The **STOL trainer** case is still unmet for the fast jets: the R39 card flew 340–381 m/s (ledger X25) and R41's fixed card holds 85–178, which is the intended condition for `COIN`/`CAS1` but puts `Fighter1`/`Multirole1` at 128 and `FastBomber1` at 160. The **loaded jet** has never been flown at all — a card cannot set stores (backlog #19). See `LAW-LEDGER.md` O9. |
 | segments RAILED corpus-wide | ~~285 of 5 903 = 4.8%~~ → **406 of 8 294 = 4.9%** (non-excluded, 2026-08-02) |
 
 **Saturation is no longer the project's defining constraint — it is a property of five cards.**
@@ -291,7 +289,7 @@ Lanes fly concurrently, so lane count does not cost wall clock; replicates per l
 neither they nor `oblique-above-c` declares an `armToggle`, so a value left in
 `Scenario/ScenarioArmToggle` from a preceding `e*` batch **would be used**, sweeping a knob nobody
 asked to sweep: clear it. Adding `"repeat": 8` to both `alpha-*` cards is the correct fix and breaks
-no comparability — neither has ever been flown. `cards/TOMORROW.md` is the ordered runbook.
+no comparability — neither has ever been flown. Launch/preflight procedure: `cards/README.md`.
 
 | # | knob | card | why that card |
 |---|---|---|---|
@@ -392,7 +390,7 @@ assigned numbers concurrently. Three rules, because all three were broken at onc
    *different* item in every document that already cites it. ~~Highest in use is **#46**.~~
    **STALE — highest in use is #80, in a scheme this table does not carry. See RECONCILIATION below
    before allocating or citing anything.**
-2. **`GENERALITY-REVIEW.md` findings are a SEPARATE namespace.** `R32-FINDINGS.md` cites
+2. **`GENERALITY-REVIEW.md` findings are a SEPARATE namespace.** The R32 batch doc cited
    "`GENERALITY-REVIEW.md` #16" and "#18"; those are that file's finding numbers, not backlog
    numbers, and backlog #16/#18 do not exist. Write the filename with the number or don't write it.
    The backlog items that *correspond* to those findings are **#21** (finding 16) and **#45**
@@ -400,7 +398,7 @@ assigned numbers concurrently. Three rules, because all three were broken at onc
 3. **The #45 collision is resolved as follows: #45 is the AoA-schedule authority failure, and
    nothing else.** The "belowness axis" work that was also being called #45 is **not a backlog item
    and needs no number** — it is experiment **E1** in §4 Batch 4, its card (`cards/oblique-above-c.json`)
-   is already written, and its runbook is `cards/TOMORROW.md` §8. A shipped card with a runbook entry
+   is already written, and its setup is in `cards/README.md`. A shipped card with a runbook entry
    is not backlog. Do not re-number E1 into this table.
 
 ---
@@ -413,8 +411,8 @@ of 2026-08-02. Reconciled by reading every `#n` occurrence in the repo:
 | scheme | range | where it lives | status |
 |---|---|---|---|
 | **A — this table** | #14 … #46, gaps 15–18, 22, 24, 26, 28, 32, 35, 40, 42, 43 retired | `LAW-CHARACTERIZATION.md` §7 | The documented authority. **Behind by ~34 numbers.** |
-| **B — the working task list** | #1 … **#80** | the session task list; cited by `CHANGELOG.md` and `debugtests/SESSION-2026-08-02.md` | Live and in active use. **Not on disk anywhere** except through its citations. |
-| **C — per-document follow-ups** | `#53a–c`, `#54a–e`, `#55a–g` | `R36-FINDINGS.md` (53), `R37-FINDINGS.md` (54), `R39-*.md` (55) | Document-local. The **number is the document**, the letter is the item. Not backlog numbers. |
+| **B — the working task list** | #1 … **#80** | the session task list; cited by `CHANGELOG.md` | Live and in active use. **Not on disk anywhere** except through its citations. |
+| **C — per-document follow-ups** | `#53a–c`, `#54a–e`, `#55a–g` | the retired R36 / R37 / R39 batch docs | Document-local, and **those documents no longer exist** (consolidated 2026-08-02). The number was the document, the letter the item. Never backlog numbers; treat a bare `#53`/`#54`/`#55` as unresolvable. |
 
 **Where A and B disagree — the part that will cause a real misreading:**
 
@@ -423,7 +421,7 @@ of 2026-08-02. Reconciled by reading every `#n` occurrence in the repo:
    halves. In scheme B, #46 is **open**. They are not the same item. Never write a bare `#46`.
 2. **`ledger #51` and `ledger #12` do not exist in this table**, yet both are cited *as ledger numbers*
    in `ARCHITECTURE.md`, `CLAUDE.md`, `CHANGELOG.md`, `cards/ALPHA-CARD-REDESIGN.md`,
-   `debugtests/R37-FINDINGS.md` and `debugtests/SESSION-2026-08-02.md`. They are **scheme B** numbers
+   and `CHANGELOG.md`. They are **scheme B** numbers
    mislabelled "ledger". Their meanings are unambiguous from context and worth recording here:
    - **#51 — the placement part-shed bug.** OPEN and *instrumented, not fixed*; two attempted fixes are
      in the `MoveAssembly` graveyard (v0.96.1 tautological audit; v0.97.0 `Repair`, which killed 32/32
@@ -448,44 +446,108 @@ but that is an inference from the number matching, not a verified mapping. The r
 reset agent knows the count is 20 and that the ledger cannot yet resolve them.
 
 **The substantive open work IS recoverable from disk** even where the numbers are not — it is
-enumerated below and in `debugtests/SESSION-2026-08-02.md` §5, which is the authority on ordering.
+enumerated below, which is the authority on ordering.
 **To repair this properly: the next agent holding the live task list should write its 20 open items
 into the table below with their scheme-B numbers, then delete scheme A or renumber it into B.**
 Two schemes with one overlapping, contradictory number is the worst of the three states.
 
 ---
 
-### Open work, from disk (2026-08-02) — content, ordered; numbers per the caveat above
+### Open work, from disk — content, ordered. UPDATED 2026-08-02 after R41.
 
-Source: `debugtests/SESSION-2026-08-02.md` §5, which carries the dependency argument for the ordering.
+The dependency argument for the ordering is preserved inline below. Evidence for every closed item is
+in `LAW-LEDGER.md` (the finding IDs are given); `debugtests/CAPTURES-DB.md` → *The batch index* maps
+run tags to where their conclusions live.
 
-**Tier 0 — before anything flies.** Deploy v0.99.1 and re-copy `cards/*.json` (every card written
-2026-08-02 pins `Scenario/ScenarioThrottle`, and on v0.98.1 those pins are **process-global** — the
-first lane to finish un-pins them under everyone still flying); delete `e2-rel-turn-lead.json` from the
-game load path; re-run `--with-rows` per batch (`rows` is **empty** after the rebuild); archive R39 out
-of `<game>` before `LogOutput.log` is overwritten.
+**Tier 0 — before anything flies.** ~~Deploy v0.99.1, re-copy `cards/*.json`, delete
+`e2-rel-turn-lead.json`, archive R39.~~ **DONE** — R41 flew on v1.0.0 with the cards re-copied.
+Standing items from it, still true every batch: **re-run `--with-rows` per batch** (a `--rebuild` drops
+every materialized row, so per-row queries silently have nothing to read), and **archive out of
+`<game>` before the next game start** overwrites `LogOutput.log`.
 
-**Tier 1 — code fixes that gate a re-fly.** (a) the **helo probe call order** — re-probe when
-`_collective` changes, not only when the aircraft does; nothing rotorcraft is worth re-measuring until
-this lands. (b) `bankClampActivePct` must not fire on a rotorcraft. (c) `wobble_scan` on the
-`hover_hold` / `bobup` arms — two lines, and it is the entire rotorcraft wobble vocabulary.
-(d) the `qSched` 0.3 floor, before the STOL re-fly. (e) `dmgFrac` — write the row **before** the abort
-check. (f) `ArmOf(0) = 0`.
+**Tier 1 — code fixes that gate a re-fly.**
+- ~~(a) the **helo probe call order**.~~ **CLOSED** — `heloOk = 1` on 108,987/108,987 rotorcraft rows
+  in R41, against `false` on 48/48 in R39 (ledger **H1**). The `heloOk` column landed with it, so what
+  cost R39 a row-by-row reconstruction is now one `select`.
+- ~~(b) `bankClampActivePct` must not fire on a rotorcraft.~~ **CLOSED by the exposure mechanism** —
+  v1.0.0 withdraws the metric on those segments instead of publishing it. Zero railed rotorcraft
+  segments in R41, against R39's spurious `RAILED at 100.0%`.
+- ~~(c) `wobble_scan` on the `hover_hold` / `bobup` arms.~~ **CLOSED** — `wobbleCoherenceAzErr` is
+  populated on every R41 hover segment, where R39 had none.
+- **(d) the `qSched` 0.3 floor, before any STOL re-fly. STILL OPEN.** At a real 90 m/s entry the floor
+  catches **6 of 10** airframes and the re-fly measures the clamp rather than the law. Suggested shape:
+  keep the floor, derive it from `_pitchEff` / measured achieved-vs-commanded rate rather than a
+  literal — the estimator already exists. (This is the same constant as **#45** below.)
+- **(e) `dmgFrac` — write the row BEFORE the abort check. STILL OPEN.** One row before `Abort` makes
+  the column real; today it is a guaranteed constant that has misled four analyses (ledger **X24**).
+  Prefer the fix to deleting the column. Either way, **index the abort's detached ratio as a capture
+  column** — it is currently the only reliable damage signal and it lives in a string.
+- ~~(f) `ArmOf(0) = 0`.~~ **CLOSED BOTH SIDES.** R41 caught it converting a null into an apparent 30%
+  win (ledger **X27**). Analysis side: `compare-runs.py._anchor_replicate_filter`. Law side, v1.0.1:
+  replicate 0 is a **warm-up armed as neither**, so `repeat − 1` must divide by 4 — cards want 4k+1 and
+  `repeat: 8` warns.
 
-**Tier 2 — docs the checker cannot see.** The v0.94 fleet-ABBA safety argument in `CLAUDE.md`; the
-`DroneAltDeckM` default contradiction; two load-bearing corrections to the `MoveAssembly` graveyard;
-`alpha-sweep`'s note miscalling the 5.0-gLimit airframes; the `[card] start` line's wrong derived sweep
-rate; `aoaPeakDeg` / `aoaLimiterActivePct` printed unqualified below ~20 m/s.
+**Tier 2 — docs the checker cannot see.** The v0.94 fleet-ABBA safety argument in `CLAUDE.md` (replace
+with "`frameMs` is a per-row column, so covary or drop"); the `DroneAltDeckM` default contradiction
+(source says 0, it is 3000); two load-bearing corrections to the `MoveAssembly` graveyard — *"always a
+POSITION bug, never a load one"* is wrong (load produces position through joint-solver residual), and
+the sweep-latency reading of 0.114 is wrong (it is subtree size, ledger X24); `alpha-sweep`'s note
+miscalling FastBomber1 and Darkreach "the 5.0 gLimit airframes" (their sidecars read 8.0 and 4.0); the
+`[card] … start` line's derived sweep rate, wrong by 2.7× and the operator's only pre-flight read of the
+demand; **`aoaPeakDeg` / `aoaLimiterActivePct` printed unqualified below ~20 m/s** — R41 measured `aoa`
+swinging −29.7…+77.1° at 3–22 m/s, so on a rotorcraft segment they should be read as *absent*, not as a
+measurement. **New in R41:** rotorcraft capture headers print `# fbw <unavailable>` while `heloOk = 1`
+on every row — cosmetic, but it contradicts the columns of record and will mislead anyone who greps it.
 
-**Tier 3 — design content, not yet decided.** `aoaFade`'s floor should key off the lead overshoot the
-mod already computes (**do not ship without `alpha-pullup` flown twice**); the **roll twin of
-`_pitchEff`** (= `LAW-WEAKNESS-MAP.md` W2, the largest structural ONE-LAW gap); the rotorcraft outer
-loop (`HeliYawScale`, `heliFwd`/`heliHover` and `kHelo` are all absolute constants — `AttackHelo1`
-**can never leave the hover regime at any speed it can fly**).
+**Tier 3 — design content, not yet decided.**
+- **The roll twin of `_pitchEff`** — nothing in the roll/bank/settle path is scheduled against anything
+  the law can measure. This is `LAW-WEAKNESS-MAP.md` W2 and the largest structural ONE-LAW gap.
+  **R41 and the Discord field bundle both promoted it:** the high-q roll limit cycle (ledger **O11**,
+  `GENERALITY-REVIEW.md` finding 5) is exactly this defect, now user-reported on a second airframe.
+- `aoaFade`'s floor should key off the lead overshoot the mod already computes (**do not ship without
+  `alpha-pullup` flown twice** — narrowing the lim-10 fade from 40% to 25% of the limiter risks
+  reintroducing the trainer AoA pump the floor was added to stop). The `Min(6f, …)` cap on `aoaFade`
+  and `Min(4f, …)` on `aoaMargin` have **no stated justification at all** and bind on three of ten
+  lanes while the comment asserts they do not — either the comment or the cap is wrong.
+- **The rotorcraft outer loop.** `HeliYawScale = 2.0` is an absolute stick gain with no reference to the
+  probed `heloMaxAngularVel`; `kHelo = 2.0` assumes a 0.3 s plant lag against a measured **0.59–1.39 s
+  (2.3× across the roster)**, which by its own comment's bound gives 1.13 s⁻¹, *below* the constant; and
+  the hover-blend speeds are absolute m/s, so **`AttackHelo1` can never leave the hover regime at any
+  speed it is capable of flying** (Vmax 100 m/s ⇒ lowest reachable `heliBlend` 0.455) while `QuadVTOL1`
+  reaches full fixed-wing behaviour at its Vmax. Three violations, one consequential and exposed —
+  R41 measured `AttackHelo1` diverging with the bank channel deleted and a saturated pedal (ledger H4).
+
+**Rotorcraft re-fly, in this order (R41).** (1) **Reset `HeliForwardSpeed` to 60 and `HeliHoverSpeed`
+to 20** — the live config holds the v0.43 pair 150 / 40.28, which configured the v0.58 design's central
+mechanism out of the batch. Cheapest item on the list and it gates every other rotorcraft conclusion;
+`rotor-transition` becomes a direct `tiltFrac` readout (ledger **O12**). (2) **Give the hover cards a
+collective** — two of three airframes never hovered (ledger **H5**), so hover rests on `QuadVTOL1`
+alone. (3) Re-fly `rotor-bistab` **only after 1 and 2**: as flown it measured a speed divergence, not
+the disturbance threshold R39 asked for, which is still unmeasured. (4) Extend `rotor-transition` to the
+low band — throttle 0.25 is `MinThrottle` and stalled the deceleration at 68 m/s, so `heliBlend` ∈
+[0.75, 1.0] has no samples.
+
+**Fixed-wing cards, from R41.** Do **not** re-fly `e1-below-suppress` or `e1-below-control` as they
+stand — `bWt` ≈ 0 on the scored window, so neither can see the term regardless of arm (ledger **A2**);
+either score a window where the roll channel is open (t < 3 s) or give `BelowAlignSuppress` a true off
+before sweeping it. **`e1b-align-lead` is answered — retire the card or the knob** (the term fires and
+does nothing; precedent is `RelativeTurnLead`, ledger X22). **`e3-marker-ff` is the one to build on**,
+and the open question is its energy price — it wants a card that scores `deltaEnergyHeightM` *against*
+pointing rather than treating it as a nuisance (ledger **A1**). **Redesign or retire `stol-sweep`** —
+36 of 36 railed on three limits at once, `terminalOffDeg` 61–95°; it saturates the roll/turn channel
+before it measures anything, and no throttle or altitude change reaches that.
 
 **Standing holes.** The **loaded case (ONE-LAW case 2) is still unflown** and a card cannot set stores —
-it needs a hand-flown capture with heavy stores at `alpha-pullup`'s entry condition. Nothing in the
-corpus scores **gun-solution dispersion**, so "1° of nose wander at 0.43 Hz" has no cost attached.
+it needs backlog **#19** or a hand-flown capture with heavy stores at `alpha-pullup`'s entry condition.
+A genuine **STOL** condition is still unmet for the fast jets (corner-relative entry puts them at
+128–160 m/s). Nothing in the corpus scores **gun-solution dispersion**, so "1° of nose wander at
+0.43 Hz" has no cost attached. **`oblique-above-c` is the only never-flown card left in `cards/`** —
+the belowness axis, experiment **E1** in §4 Batch 4.
+
+**And the hole that outranks them all: the corpus has ZERO rows between 250 and 400 m/s.** Every real
+airframe tops out at 221 m/s because cards enter at `startSpeedCorner 1.0×` and never accelerate past
+it. The one field-confirmed law defect in the ledger (**O11**, the ~2 Hz roll limit cycle at 350+ m/s)
+lives in that gap. Two hand-flown captures close it; see O11 for the pass/fail signature.
 
 ---
 
@@ -497,7 +559,7 @@ These are Q4. All four are invisible in a railed regime, which is why the baseli
 
 | # | Defect | Where | Why it waits |
 |---|---|---|---|
-| **#45** | **AoA-schedule AUTHORITY FAILURE — the first genuine LAW defect in a while; everything else found lately was instrument.** `schedFloor = 0.3f` (`ChaseController.cs:1255`) terminates the AoA-utilization schedule's range at the same **absolute** place for a 27° ceiling on an 8.7 t `Fighter1` and a 10° ceiling on a 105 t `Darkreach` — a hardcoded constant deciding an outcome, i.e. the ONE-LAW smell. Measured in R32 (63 captures, 37,868 rows, 18 departures, 3 pilots killed): `qSched` is exactly **0.300 on 100.0%** of the 2,314 rows past \|AoA\| 20°, against **0.0%** on all 31 clean pre-onset replicates of the same card and airframe. At the floor the law still commits 30% of its P demand into a plant delivering **7.7×** the commanded rate in the **opposite** direction (median on departed captures; p90 13.0×, max 28.2×; clean captures 1.56×). Sibling constants: `:1296` `Max(0.3f, aoaGateUp)` is the same shape; `:1152` is defensible because it mirrors the game's own `:65034` clamp. **The deeper statement:** the law's entire response to a non-responding plant is **five terms that each REDUCE authority** — the two `qSched` floors, the `omegaMax` floor, `pErrTerm *= _pitchEff` below `PEffRevThresh` (`:1927`), and `aoaRecover *= _pitchEff` (`:1557`), which scales the one term documented at `:1543` as "the term that flies the nose back INSIDE the envelope" by an estimator reading 0.036–0.144 for the whole departure. **Nothing in `Apply` increases authority or changes strategy.** On nine of ten airframes the airframe's own stability covers the gap; on the Darkreach it does not and the aircraft descends 3,000 m. | `ChaseController.Apply` (AoA-utilization schedule) | **HIGH, but SEQUENCED — do not fix the floor first.** R32 §4 shows the railing is downstream of a precursor: 34–56° of `targetBank` at \|`azErr`\| < 5° on a card whose largest step is 0.35°, on 0 of recs 01–31 and 12 of recs 32–63, appearing 1–2 replicates before the departure in every lane. Finding 16 (`lateralHold` rails ⇒ `blendWeight` = 1) is the standing candidate — i.e. **#21**. Fixing the stand-down first would make *some* departures survivable, which is worse than a departure that is legible. Fly in this order — **§4 Batch 4 rows E4 then E5**: (1) a precursor-isolation card on the `darkreach-05` geometry with the roll channel as the arm — recs 01–31 give it a 31-replicate clean baseline on the same airframe and card; (2) then an A/B on `schedFloor` expressed **relative to a probed quantity** (`omegaMax`, `_fbwMaxPitchVel`, or the alpha ceiling `aoaUtil` already normalises by); (3) cheap side-check: `EW1` shares `assist=0`, `maxPitchAngVel` 0.3 and `alphaLimiter` 10 at a quarter of the mass and has never flown this card. **Explicitly NOT the fix: a mod-side G-limiter.** It protects nothing (the airframe cannot be over-G'd — see below), it masks the defect (the high-G row is the readout, not the cause), and it would be a **sixth** de-authorizing term on a law whose problem is that it already has five. `GENERALITY-REVIEW.md` finding 18; `debugtests/R32-FINDINGS.md` §5–§6. |
+| **#45** | **AoA-schedule AUTHORITY FAILURE — the first genuine LAW defect in a while; everything else found lately was instrument.** `schedFloor = 0.3f` (`ChaseController.cs:1255`) terminates the AoA-utilization schedule's range at the same **absolute** place for a 27° ceiling on an 8.7 t `Fighter1` and a 10° ceiling on a 105 t `Darkreach` — a hardcoded constant deciding an outcome, i.e. the ONE-LAW smell. Measured in R32 (63 captures, 37,868 rows, 18 departures, 3 pilots killed): `qSched` is exactly **0.300 on 100.0%** of the 2,314 rows past \|AoA\| 20°, against **0.0%** on all 31 clean pre-onset replicates of the same card and airframe. At the floor the law still commits 30% of its P demand into a plant delivering **7.7×** the commanded rate in the **opposite** direction (median on departed captures; p90 13.0×, max 28.2×; clean captures 1.56×). Sibling constants: `:1296` `Max(0.3f, aoaGateUp)` is the same shape; `:1152` is defensible because it mirrors the game's own `:65034` clamp. **The deeper statement:** the law's entire response to a non-responding plant is **five terms that each REDUCE authority** — the two `qSched` floors, the `omegaMax` floor, `pErrTerm *= _pitchEff` below `PEffRevThresh` (`:1927`), and `aoaRecover *= _pitchEff` (`:1557`), which scales the one term documented at `:1543` as "the term that flies the nose back INSIDE the envelope" by an estimator reading 0.036–0.144 for the whole departure. **Nothing in `Apply` increases authority or changes strategy.** On nine of ten airframes the airframe's own stability covers the gap; on the Darkreach it does not and the aircraft descends 3,000 m. | `ChaseController.Apply` (AoA-utilization schedule) | **HIGH, but SEQUENCED — do not fix the floor first.** R32 §4 shows the railing is downstream of a precursor: 34–56° of `targetBank` at \|`azErr`\| < 5° on a card whose largest step is 0.35°, on 0 of recs 01–31 and 12 of recs 32–63, appearing 1–2 replicates before the departure in every lane. Finding 16 (`lateralHold` rails ⇒ `blendWeight` = 1) is the standing candidate — i.e. **#21**. Fixing the stand-down first would make *some* departures survivable, which is worse than a departure that is legible. Fly in this order — **§4 Batch 4 rows E4 then E5**: (1) a precursor-isolation card on the `darkreach-05` geometry with the roll channel as the arm — recs 01–31 give it a 31-replicate clean baseline on the same airframe and card; (2) then an A/B on `schedFloor` expressed **relative to a probed quantity** (`omegaMax`, `_fbwMaxPitchVel`, or the alpha ceiling `aoaUtil` already normalises by); (3) cheap side-check: `EW1` shares `assist=0`, `maxPitchAngVel` 0.3 and `alphaLimiter` 10 at a quarter of the mass and has never flown this card. **Explicitly NOT the fix: a mod-side G-limiter.** It protects nothing (the airframe cannot be over-G'd — see below), it masks the defect (the high-G row is the readout, not the cause), and it would be a **sixth** de-authorizing term on a law whose problem is that it already has five. `GENERALITY-REVIEW.md` finding 18; `LAW-LEDGER.md` K3 / L3 (the R32 batch). |
 | **#20** | `PEffRevThresh` floor branch: the `>=` makes it unreachable **from the v0.67 self-probe path** | `ChaseController.Apply` | **PREMISE CORRECTED (v0.96); re-scoped from experiment to hygiene.** "Unreachable" is true only of the self-probe path — the latch-breaker LPFs toward 0.15 from below and asymptotes, so `>=` never trips *from there*. It must NOT be read as "`_pitchEff` never goes below 0.15": measured over all **1,032** archived captures (627,110 rows, R28–R32), **28,209 rows = 4.50%** sit below the threshold, min **0.000**, across **89** captures on **two** fixed-wing airframes (`Darkreach` 27,622, `FastBomber1` 587). Those are genuine reversed-plant measurements where the no-floor branch is the CORRECT behaviour. (This also retires the "5.2% / 8 captures / three airframes" figure, which reproduces against no batch.) The defect's real signature is stronger than the occupancy number: **2,811 rows read exactly `0.150` and only 8 read anything above it up to 0.152** — the LPF parked on its own target, exactly as the closed form predicts. So `>=` → `>` is worth doing and cannot regress anything, but it moves **0.45%** of corpus rows, all at the boundary. **Ship it as hygiene behind its own checkbox — do not plan an experiment around it**; an A/B written as "unlock a dormant branch" will report a null, and that null will read as "the diagnosis was wrong" when it is not. |
 | **#21** | `lateralHold` rails at 7.5° and zeroes the whole bank pipeline | `ChaseController.Apply` | Bank pipeline is ~93% dead in the sweep family, so an A/B there measures nothing. |
 | **#14** | `predFloor` hard 0.30 step → wants a continuous lead-confidence blend | `ChaseController.Apply` | ONE-LAW smell (a constant, not a probed quantity), but not yet shown to cost anything. |
