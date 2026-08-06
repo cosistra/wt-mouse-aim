@@ -20,7 +20,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "1.0.3";
+        public const string PluginVersion = "1.0.4";
 
         internal static ManualLogSource Log;
 
@@ -465,8 +465,17 @@ namespace NuclearOptionMouseAim
                 if (s.RunCount > runN) runN = s.RunCount;
                 if (s.SuiteSecondsLeft > left) left = s.SuiteSecondsLeft;
             }
+            // BATCH FIRST, CARD SECOND (v1.0.4). `left` is the current fleet's clock only, and on a
+            // queued run that is a small fraction of what the operator is waiting for — reading it as
+            // the whole run is the specific mistake this line exists to stop. Measured current fleet
+            // plus estimated remainder, because the estimate is only ever needed for fleets that have
+            // not flown yet.
+            string batch = TestDrone.BatchCount > 1
+                ? $"   fleet {TestDrone.BatchIndex}/{TestDrone.BatchCount}   "
+                  + $"~{ScenarioPlayer.Clock(left + TestDrone.BatchAheadSeconds())} batch"
+                : "";
             BoardLine(0, BoardGreen,
-                $"HARNESS  {n} flying   run {runI}/{runN}   {ScenarioPlayer.Clock(left)} left");
+                $"HARNESS  {n} flying   run {runI}/{runN}   {ScenarioPlayer.Clock(left)} left{batch}");
 
             for (int i = 0; i < shown; i++)
             {
@@ -517,7 +526,11 @@ namespace NuclearOptionMouseAim
                 return;
             }
 
-            BoardPanel(4);
+            // HOW BIG IS THIS RUN, before the key is pressed (v1.0.4). Read straight off the setting,
+            // because `_batch` is not armed until RequestLaunch — so this is the one panel that can
+            // answer it while the operator can still change his mind.
+            string[] q = TestDrone.BatchPreview(out float qs);
+            BoardPanel(q.Length > 1 ? 5 : 4);
             BoardLine(0, BoardGreen, head);
             BoardLine(1, BoardDim,
                 $"  card  {p.Name}{(p.Cards > 1 ? $" (+{p.Cards - 1} more)" : "")}  x{p.Repeat} runs   "
@@ -551,6 +564,15 @@ namespace NuclearOptionMouseAim
                 // down, so an operator who learned that rule still believes he must fly A/Bs one at a
                 // time. This line is where he finds out he no longer does.
                 : $"  A/B   {p.ArmKnob}   ABBA per aircraft, by run index   (from {p.ArmSrc})");
+            // AMBER, and it names entry 1: with a queue armed the four rows above preview
+            // Scenario/ScenarioCardSet, which RequestLaunch is about to OVERWRITE with the queue's
+            // first entry — so on a queued run those rows describe a card that may not be the one
+            // that flies. Naming it here is the cheap half of the fix; the rows correct themselves a
+            // second after launch, once the entry is armed.
+            if (q.Length > 1)
+                BoardLine(4, BoardAmber,
+                    $"  queue {q.Length} fleets   ~{ScenarioPlayer.Clock(qs)} per drone total   "
+                  + $"entry 1 '{q[0]}' flies first — the rows above preview ScenarioCardSet, which it replaces");
         }
 
         private static string Src(bool fromCard) => fromCard ? "[from card]" : "[from F1]";

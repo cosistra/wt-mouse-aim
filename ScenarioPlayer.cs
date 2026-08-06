@@ -962,6 +962,32 @@ namespace NuclearOptionMouseAim
             return p;
         }
 
+        // PER-DRONE SECONDS FOR A CARD-SET STRING, answered with no aircraft in hand and without
+        // touching the config. `Preview` already computes this, but only ever for the selection that
+        // is currently armed — and a batch queue's whole problem is the other thirteen entries, which
+        // are just strings until they are launched. Same two inputs Preview uses (`Card.Duration`
+        // summed over the selection, times `ResolveRepeat` of sel[0]), so the two cannot disagree
+        // about one entry; see SelectRaw for why sel[0] decides the replicate count for the queue.
+        //
+        // ponytail: PER-DRONE, deliberately — the lanes fly in parallel, so this is an entry's wall
+        // clock minus the spawn stagger, and every caller labels it that way. The ceiling is that a
+        // misspelled card name contributes 0 rather than refusing; SelectRaw already warns about
+        // those at launch, and a preflight that silently under-reports is better than one that
+        // throws while the operator is reading it.
+        internal static float SecondsOf(string cardSet)
+        {
+            if (string.IsNullOrEmpty(cardSet)) return 0f;
+            float all = 0f; Card first = null;
+            foreach (var raw in cardSet.Split(','))
+            {
+                var c = ByName(raw.Trim());
+                if (c == null) continue;
+                if (first == null) first = c;
+                all += c.Duration;
+            }
+            return first == null ? 0f : all * ResolveRepeat(first, out _);
+        }
+
         // Replicate count for a selection. The FIRST card's own `repeat` wins over Cfg.ScenarioRepeat,
         // because the card is the test and the number of replicates is part of it — an operator who
         // ticks a card designed for 8 runs and leaves the global at 1 gets a batch with no statistics

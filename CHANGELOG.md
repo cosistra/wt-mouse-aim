@@ -3,6 +3,38 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 1.0.4 — the run board counts the whole batch, not just the fleet in the sky
+
+> Harness only. **No control-law change, no recorder columns added, moved or removed.** Board and
+> log text only; nothing that decides what a run measures moved.
+
+`Scenario/ScenarioBatchQueue` has been able to fly N fleets off one key press since v1.0.0, but the
+run board only ever knew about the fleet currently airborne. On R44's 14-entry queue that meant the
+header read `38s left` while ninety minutes of flying was still queued behind it — the operator's
+only progress instrument was reporting 1/14th of the run and saying nothing about the rest.
+
+Three places now carry the batch, all off one new resolver:
+
+* **`ScenarioPlayer.SecondsOf(cardSet)`** — per-drone seconds for a card-set *string*, with no
+  aircraft in hand and no config write. Same two inputs `Preview` uses (`Card.Duration` summed over
+  the selection × `ResolveRepeat` of `sel[0]`), so the pre-launch panel and the queue estimate cannot
+  disagree about an entry. An unknown card name contributes 0 — `SelectRaw` already warns about
+  those, and a panel that throws while it is being read is worse than one that under-reports.
+* **The run board header** gains `fleet k/N   ~M:SS batch` whenever a queue is armed: the *measured*
+  clock for the fleet flying plus an estimate for the entries behind it (`TestDrone.BatchAheadSeconds`,
+  which adds each fleet's `max(3 s, stagger)` gap).
+* **The pre-launch panel** gains an amber row — `queue N fleets  ~M:SS per drone total  entry 1 'x'
+  flies first`. That last clause is a standing lie the panel had been telling: with a queue armed, the
+  four rows above it preview `Scenario/ScenarioCardSet`, which `RequestLaunch` overwrites with the
+  queue's first entry a moment later. The row now names what actually flies first.
+
+The launch log prints the same total before the first fleet spawns, for the reason it already prints
+the entry list: nobody watches an unattended queue, so a wildly wrong estimate is only findable if it
+sits in the log beside the elapsed time that disproves it.
+
+Estimates are **per drone** throughout — lanes fly in parallel, so an entry's wall clock is one
+drone's plus the spawn stagger, and every caller says so rather than quietly padding.
+
 ## 1.0.3 — the test card is the single source of truth for every run parameter
 
 > Harness only. **No control-law change, no recorder columns added, moved or removed.** Builds on

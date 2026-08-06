@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 1.0.3 -->
+<!-- ARCH-VERSION: 1.0.4 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps

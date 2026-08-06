@@ -230,6 +230,35 @@ namespace NuclearOptionMouseAim
         // null = nothing saved, so EndBatch is a no-op and a queue-less launch never touches the setting.
         private static string   _cardSetSaved;
 
+        // THE QUEUE, FOR THE RUN BOARD (v1.0.4). `_batch` was visible only in the log, so an operator
+        // watching the board saw one card's clock ticking down and had no way to tell whether that was
+        // the whole run or the first of fourteen fleets. On an unattended batch that is the difference
+        // between "it's nearly done" and "it has an hour and a half left".
+        internal static int    BatchIndex => _batch.Length > 0 ? _batchIdx + 1 : 0;   // 0 = no queue armed
+        internal static int    BatchCount => _batch.Length;
+
+        // Seconds still owed by the entries AFTER the one flying — per drone, plus the inter-fleet gap
+        // each one costs (the same `max(3, stagger)` AdvanceBatch waits, which is the only overhead
+        // between fleets big enough to notice). The CURRENT entry is not counted here: the board adds
+        // `SuiteSecondsLeft`, which is the live measurement of it and always better than an estimate.
+        internal static float BatchAheadSeconds()
+        {
+            if (_batch.Length == 0) return 0f;
+            float gap = Mathf.Max(3f, StaggerSec(_plan)), s = 0f;
+            for (int i = _batchIdx + 1; i < _batch.Length; i++) s += ScenarioPlayer.SecondsOf(_batch[i]) + gap;
+            return s;
+        }
+
+        // The queue as it WOULD launch, for the panel drawn BEFORE the key is pressed: `_batch` is not
+        // armed until RequestLaunch, so the preflight has to read the setting the same way that will.
+        internal static string[] BatchPreview(out float seconds)
+        {
+            var b = SplitBatch(Cfg.ScenarioBatchQueue.Value);
+            seconds = 0f;
+            for (int i = 0; i < b.Length; i++) seconds += ScenarioPlayer.SecondsOf(b[i]);
+            return b;
+        }
+
         // Semicolon-separated, because an ENTRY is itself a comma list of card names.
         private static string[] SplitBatch(string spec)
         {
@@ -328,7 +357,12 @@ namespace NuclearOptionMouseAim
             if (_batch.Length > 1)
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[drone] batch queue: {_batch.Length} fleets — '{string.Join("' -> '", _batch)}'. "
-                    + "The despawn key cancels the rest.");
+                    // THE TOTAL, IN THE ARTIFACT, before the first fleet flies — same argument as
+                    // printing the entry list itself: nobody is watching an unattended queue, and an
+                    // estimate that is wildly off is only findable if it sits in the log next to the
+                    // elapsed time that disproves it.
+                    + $"~{ScenarioPlayer.Clock(ScenarioPlayer.SecondsOf(_batch[0]) + BatchAheadSeconds())} "
+                    + "per drone, plus each fleet's spawn stagger. The despawn key cancels the rest.");
             ArmBatchEntry();
             LaunchFleet();
         }
