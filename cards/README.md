@@ -41,6 +41,67 @@ essentially nothing in the corpus sits there. Micro/fine segments are below the 
 every sustained capture ever taken is above the third. **That gap is where this grid puts its
 weight**: `oblique-6` and `sweep-slow` are the two cards aimed straight at it.
 
+## Sizing a card: throughput is `count`, never `repeat`
+
+The two fields look interchangeable and are not. **`repeat` is serial and floored; `count` is
+parallel and nearly free.** Get this backwards and you either quadruple the wall clock for the same
+n, or you fly a card that scores nothing at all.
+
+| field | what it buys | what it costs | floor / ceiling |
+|---|---|---|---|
+| `repeat` | replicates **in series**, on one aircraft — the A/B is *within* a lane (`ArmOf(_qi / _block)`, ABBA) | full card duration, every time | **must be `4k+1`** (5, 9, 13) — see below |
+| `count` | lanes **in parallel**, one aircraft each, roster wrapped | the spawn stagger, and ring radius | 1..**16**, clamped in four places |
+
+**`repeat: 1` scores zero captures.** Ledger `X27`: replicate 0 of every lane is *anchor-capturing*
+— it flies from the spawn point with `snapBackM ≈ 0` while every sibling arrives teleported — so it
+is armed as **neither** arm (`arm=-1`) and no A/B reaches it. One replicate per lane means the only
+replicate is the warm-up. It is `repeat − 1` that must divide by 4, hence 4k+1, hence **5 is the
+minimum that scores anything**: 1 warm-up + 2 per arm.
+
+So the way to multiply n is to raise `count` and leave `repeat` at 5. `rotor-weathervane-35` shipped
+with no `count` at all — falling back to its 2-key roster — for 4 scored captures per arm. At
+`count: 10` (5 copies per airframe, lanes wrap) it is 5× the n **in the same 15.5 minutes**.
+
+### The one real cost of more lanes, and when it applies
+
+Lanes sit on a ring sized so neighbours are `LaneM` apart, so `R = (LaneM/2) / sin(π/N)` — **2 → 10
+lanes moves the ring from 3.0 km to 9.7 km** from the world origin. That matters because R35
+measured `r(origDist, gJitterG) = 0.948`, log-log slope 0.885, matching the `d·1.2e-7` float-grain
+prediction: **distance from the origin drives measurement jitter.** Taken naively that kills the
+idea — noise ×2.8 against n ×5 is `2.8/√5 = 1.25×` *worse* standard error.
+
+It does not kill it, because the coupling is not uniform across metrics. `gJitterG` is a **second**
+derivative of position, which is where float grain bites hardest. Pooled over the corpus
+(168 non-excluded segments joined to `rows.origDist`):
+
+| metric | r(log origDist, log metric) | slope |
+|---|---|---|
+| `gJitterG` | **+0.542** | +0.488 |
+| `terminalOffDeg` | −0.146 | −0.359 |
+| `fixedWindowOffDeg` | −0.789 | −9.436 |
+
+R35's coupling reproduces on `gJitterG` (weaker, because this pools across cards instead of holding
+one). On **pointing** residual there is no positive coupling at all. So:
+
+- **Pointing / angular readouts** (`terminalOffDeg`, `fixedWindowOffDeg`) — raise `count` freely.
+- **Binary outcomes** (does the placement kill the aircraft?) — raise it freely; jitter cannot reach
+  a survive/die verdict.
+- **G-derived readouts** (`gJitterG`, and anything differentiating velocity twice) — the radius is a
+  real confound. Hold `count` where the comparison arms sit at the *same* radius, or use the 2-deck
+  layout, which cuts the ring for the same lane count.
+
+> **This is observational, not designed** — pooled across cards, n=168, and that −9.4 slope on
+> `fixedWindowOffDeg` is card identity confounding rather than physics. It supports *"no evidence
+> pointing degrades with radius"*, not *"proven free"*. A card that varies **only** `count` would
+> settle it, and does not exist yet.
+
+Decks are cheaper than they look since **X32**: `DroneAltDeckM` sets only the *spawn* altitude and
+placement teleports every lane to the card's `startAlt` anyway, so a deck split now buys ring radius
+with no experimental side effect at all. It used to cost an altitude confound.
+
+`check-card.py` prints the whole trade for a card — seconds/replicate, lanes, wall clock,
+drone-minutes and total captures — so size a card by running it, not by arithmetic here.
+
 ## The grid
 
 Duration is one replicate, wall clock, excluding the ~1 s placement tick. "Band" is where the card
@@ -303,7 +364,7 @@ the AI table's 180) — a different flight, not a more portable spelling of this
 Written together against R43's results (`LAW-LEDGER.md` O11 / X32) and one rotorcraft investigation.
 They are four families and each decides something; none of them re-runs what R43 already did.
 
-#### A — the placement-speed ladder (7 cards, ≤ 27.5 min)
+#### A — the placement-speed ladder (7 cards, ≤ 31 min, 420 captures)
 
 R43 left a bracket with nothing inside it: `FastBomber1` **placed** at 440 m/s died at `t=0` on 3 of 3
 attempts (`abort: aircraft gone`, 1 sample), while `Fighter1`/`Multirole1`/`SmallFighter1` placed at
@@ -322,10 +383,10 @@ varies speed and nothing else.
 | `place-300` | 300 m/s | the four R43 keys | fills the empty **275–324** band (0 of 3098 captures); also the 4000 m midpoint of family B |
 | `place-375` | 375 m/s | the four R43 keys | fills the empty **375–424** band, and is **the highest speed the whole roster can be placed at** — `Fighter1`'s gate ceiling is 0.95 × Vmax = 381.3 |
 | `place-390` | 390 m/s | `Multirole1, SmallFighter1, FastBomber1` | the **only** card that puts a non-bomber above 381 m/s (their ceilings are 395.9 / 394.5). A death here says the ceiling is speed, not airframe |
-| `place-400` | 400 m/s | `FastBomber1` ×2 lanes | the bisection's first cut: alive ⇒ 400–440, dead ⇒ 352–400 |
-| `place-420` | 420 m/s | `FastBomber1` ×2 lanes | the upper cut. 400 alive + 420 dead brackets it to 20 m/s in one batch |
-| `place-440` | 440 m/s | `FastBomber1` ×2 lanes | R43's exact kill, re-flown at n=10 as the **with-teleport arm** of the isolator |
-| `place-440-noteleport` | 440 m/s | `FastBomber1` ×2 lanes | **the isolator** — same everything, `DroneAltDeckM: 0` |
+| `place-400` | 400 m/s | `FastBomber1` ×12 lanes | the bisection's first cut: alive ⇒ 400–440, dead ⇒ 352–400 |
+| `place-420` | 420 m/s | `FastBomber1` ×12 lanes | the upper cut. 400 alive + 420 dead brackets it to 20 m/s in one batch |
+| `place-440` | 440 m/s | `FastBomber1` ×12 lanes | R43's exact kill, re-flown at n=60 as the **with-teleport arm** of the isolator |
+| `place-440-noteleport` | 440 m/s | `FastBomber1` ×12 lanes | **the isolator** — same everything, `DroneAltDeckM: 0` |
 
 **PASS = the lane survives placement and writes a full capture; FAIL = `abort: aircraft gone`, 1
 sample, `dur=0.0`, and `LANE n IS OUT` on the run board.** A FAIL is the measurement, not a wasted
@@ -336,7 +397,7 @@ PASS side on purpose**. A placement carries two things at once — the entry spe
 teleport, because per X32 a lane spawns at `startAlt ± DroneAltDeckM/2` and is then moved to
 `startAlt`. `DroneAltDeckM` is a **spread about `startAlt`, not an offset** (`TestDrone.DeckSpreadM`),
 so `0` collapses the fleet onto one deck at exactly `startAlt` and the vertical displacement is zero;
-the ring radius does not move with it, because at 2 lanes both the one- and two-deck formulas are bound
+the ring radius does not move with it, because at these lane counts both the one- and two-deck formulas are bound
 by the `AbeamM` 5000 m floor. Lanes **survive** ⇒ the teleport is a necessary co-factor and every rung
 above is measuring *speed × 1500 m*; lanes **die anyway** ⇒ speed alone is sufficient and the rungs mean
 what they say. Fly it with `place-440` or not at all.
@@ -348,7 +409,7 @@ what they say. Fly it with `place-440` or not at all.
 > column and re-cut them.** The `t=0` placement verdict is valid regardless of what the throttle did
 > afterwards.
 
-#### B — the dynamic-pressure pair (2 cards, 8 min)
+#### B — the dynamic-pressure pair (2 cards, 8.8 min, 120 captures)
 
 `GENERALITY-REVIEW.md` finding 5 (roll constants unnormalised by q) is confirmed in *direction*
 within an airframe — Spearman(q, `outR` sd) = +0.891 `Multirole1`, +0.638 `Fighter1`, +0.141
@@ -383,8 +444,8 @@ cross-batch comparison in the queue above (notably `place-440` against R43's 3 d
 |---|---|---|---|
 | `rotor-weathervane-35` | 35 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | the control arm — **below** `yawWeathervaneMinSpeed` = 40. Both models predict 0.00–0.1° |
 | `rotor-weathervane-60` | 60 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | **the tie-break.** Weathervane ⇒ ~13× the R42 residual or a railed pedal; heliBlend ⇒ the residual vanishes |
-| `rotor-tilt-hold` | 120 m/s, 3000 m, thr **1.00** | `QuadVTOL1` ×2 lanes | the **O13 pre-fix baseline** |
-| `rotor-tilt-hold-lo` | 120 m/s, 3000 m, thr **0.25** | `QuadVTOL1` ×2 lanes | its control — separates the throttle input from the speed input |
+| `rotor-tilt-hold` | 120 m/s, 3000 m, thr **1.00** | `QuadVTOL1` ×8 lanes | the **O13 pre-fix baseline** |
+| `rotor-tilt-hold-lo` | 120 m/s, 3000 m, thr **0.25** | `QuadVTOL1` ×8 lanes | its control — separates the throttle input from the speed input |
 
 `rotor-weathervane-*` is the highest-value card in the batch because it **discriminates between two
 candidate fixes** rather than confirming one. `H7`'s deterministic 1.5–2.4° residual is now traced to
