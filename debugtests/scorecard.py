@@ -533,6 +533,94 @@ def settle_time_95(t, offs, terminal):
     return t[j] - t[0]
 
 
+def _turning_points(xs, h):
+    """Values of the zigzag turning points of `xs` under hysteresis `h`, last sample appended.
+
+    A move counts as a reversal only once it has gone `h` against the running extreme, so dither
+    under `h` produces NO turning points at all. That is the whole reason the retreat metrics below
+    can be summed over hundreds of samples without accumulating the recorder's own grain: at
+    h = OFF_FLOOR_DEG a 900-row segment of pure quantisation noise yields an empty list, where a
+    naive sum of positive first-differences would have yielded ~0.02 deg x half the samples.
+    # ponytail: sample-wise, no interpolation of the extreme. Same ceiling as signed_overshoot ---
+    # ~16 Hz and the 0.0198 deg measurement quantum --- and the same reason not to fix it.
+    """
+    if not xs:
+        return []
+    tp, lo, hi, li, hi_i, d = [], xs[0], xs[0], 0, 0, 0
+    for i, x in enumerate(xs):
+        if d >= 0 and x > hi:
+            hi, hi_i = x, i
+        if d <= 0 and x < lo:
+            lo, li = x, i
+        if d != 1 and x - lo >= h:
+            tp.append(lo); d, hi, hi_i = 1, x, i
+        elif d != -1 and hi - x >= h:
+            tp.append(hi); d, lo, li = -1, x, i
+    if tp:
+        tp.append(xs[-1])
+    return tp
+
+
+def retreat_metrics(offs):
+    """(metrics, skipped) — backlog #33, Pillar 1: does the nose ever move AWAY from the commanded
+    direction, or approach and then recede? Derived from `off` alone; no new CSV column.
+
+      retreatDeg        - THE RETREAT INTEGRAL. Total degrees `off` GREW, summed over every confirmed
+                          rise after the nose first arrives. Degrees, so it scales with the step --
+                          read monotonicityIndex for the scale-free version.
+      retreatEpisodes   - how many separate times it grew. 0 = every movement after arrival was
+                          toward the target.
+      monotonicityIndex - net progress / gross path over the whole segment's zigzag, in [-1, 1].
+                          1.0 = the error only ever decreased. ~0 = it moved as far away as it moved
+                          closer (a limit cycle). NEGATIVE = it ended further out than it started,
+                          which is the divergence settleTime95 misreports as 0.0 (CAPTURES-DB
+                          gotcha 13) -- on R41's rotor-bistab AttackHelo1 legs this is negative on
+                          46 of 56 while R42's converging twins are +0.22..+0.69.
+
+    HOW THE ENTRY TRANSIENT IS EXCLUDED, since that is the whole difficulty and the previous attempt
+    in this file got it wrong: **the leading run of SHRINKING rises is dropped.** A transient is by
+    definition a decay, so if each excursion away from the target is smaller than the one before it,
+    the nose is still ringing down from the step and none of it is retreat; counting starts at the
+    first rise that does NOT continue the decay. Nothing is tuned -- "smaller than the previous one
+    by more than the resolution floor" reuses OFF_FLOOR_DEG, and the rule reads the segment's own
+    shape rather than a batch's leg length.
+      * measured on a synthetic ring-down (8 deg, 2 s time constant, 11 crossings of the target):
+        11 raw rises collapse to ONE, worth 0.04 deg. On a sustained cycle of the same amplitude:
+        30 episodes, 118 deg. On a GROWING oscillation: 29 episodes, 441 deg.
+      * measured on the corpus: all 15 archived `elUp` legs -- the mirror step that converges --
+        score exactly 0.0 deg / 0 episodes, against 3.09 +- 3.12 deg on their 15 `elDn` twins
+        (`LAW-LEDGER.md` S5).
+    Two rules that were tried and are WORSE, recorded so they are not retried: settled_from()'s
+    envelope (wobble_scan's rule) returns index 0 on a sustained cycle -- every bin is the same size
+    -- so it hands the entry straight back, which is X21's failure mode on the exact shape this
+    metric exists to catch; and "start at the first arrival at the segment's own closest approach"
+    excludes nothing on a ring-down that crosses the target (every crossing is an arrival) while
+    halving the real elDn signal, 3.95 -> 1.97 deg.
+
+    READ retreatDeg WITH monotonicityIndex, never alone. A single monotone divergence is ONE rise
+    with nothing before it, so it cannot be shown to be non-decaying and scores retreatDeg 0.0 with 0
+    episodes -- the index (negative) is then the only one of the three that carries the finding.
+    """
+    m, skipped = {}, {}
+    tp = _turning_points(offs, OFF_FLOOR_DEG)
+    if len(tp) < 2:
+        why = ("`off` never reversed by more than the resolution floor (%.4f deg), so the segment "
+               "has no measurable approach to retreat FROM" % OFF_FLOOR_DEG)
+        for k in ("retreatDeg", "retreatEpisodes", "monotonicityIndex"):
+            skipped[k] = NOT_EXPOSED + why
+        return m, skipped
+    rises = [tp[k + 1] - tp[k] for k in range(len(tp) - 1) if tp[k + 1] > tp[k]]
+    k = 0
+    while k + 1 < len(rises) and rises[k + 1] < rises[k] - OFF_FLOOR_DEG:
+        k += 1                                   # still decaying: still the entry transient
+    rises = rises[k + 1:]
+    m["retreatDeg"] = sum(rises)
+    m["retreatEpisodes"] = len(rises)
+    gross = sum(abs(tp[k + 1] - tp[k]) for k in range(len(tp) - 1))
+    m["monotonicityIndex"] = (offs[0] - offs[-1]) / gross if gross > 0 else None
+    return m, skipped
+
+
 def pointing_metrics(t, rows, cols):
     """Pointing-error metrics computed for EVERY segment type (not just fine_track). Same shape as
     aoa_g_metrics: (metrics, skipped).
@@ -566,6 +654,12 @@ def pointing_metrics(t, rows, cols):
                             at 100% the segment sat on the recorder's resolution and rms/min/terminal
                             are all grain. Numeric on purpose -- filter on this, not on the warning
                             prose.
+      retreatDeg /
+      retreatEpisodes /
+      monotonicityIndex   - see retreat_metrics(). "Did the nose ever move AWAY" — the one question
+                            here that is about the SHAPE of the approach rather than a level, and the
+                            only one a limit cycle cannot hide from (a sustained oscillation about a
+                            small mean scores well on every level metric above).
       overshootAzDeg /
       overshootElDeg      - signed_overshoot() of azErr / elevErr (None = never crossed)
       entryAzSign         - sign of azErr in the FIRST sample. Exists for `astern`: that segment
@@ -599,9 +693,13 @@ def pointing_metrics(t, rows, cols):
                     "under the `off` column's resolution floor (%.4f deg)" % OFF_FLOOR_DEG)
             else:
                 m["fixedWindowOffDeg"] = w
+        rm, rs = retreat_metrics(offs)      # backlog #33 — see retreat_metrics()
+        m.update(rm)
+        skipped.update(rs)
     else:
         skipped["rmsPointingErrorDeg"] = skipped["minOffDeg"] = skipped["terminalOffDeg"] = \
             skipped["offFloorPct"] = skipped["settleTime95"] = skipped["fixedWindowOffDeg"] = \
+            skipped["retreatDeg"] = skipped["retreatEpisodes"] = skipped["monotonicityIndex"] = \
             "missing column: off"
     if "azErr" in cols:
         az = [r.get("azErr", 0.0) for r in rows]
@@ -1007,6 +1105,35 @@ def saturation_metrics(rows, cols, cfg, fbw):
                                                    if abs(r.get(axis, 0.0)) >= STICK_RAILED) / n
                                        if n else 0.0)
 
+    # THE PITCH-EFFECTIVENESS ESTIMATOR, for the PitchEffRelax A/B (v1.0.5). `_pitchEff`'s
+    # else-branch is Max(_pitchEff, PEffRevThresh), which returns _pitchEff unchanged for anything
+    # above the threshold -- a LATCH, not a floor -- and the measuring gate is open on ~5% of rows,
+    # so the estimator holds one transient sample for the rest of the flight and runs the pitch P
+    # term at 0.47-0.80 of demand. Two numbers, because the arm changes both halves:
+    #   pEffEntry    - the FIRST sample. This leg's initial condition, which under a latch is the
+    #                  PREVIOUS leg's terminal value: it is the measurement that says a per-leg
+    #                  metric on this card is not independent of the leg before it (the arm window
+    #                  latches ~0.749 before the first scored leg begins). Cut any comparison by leg
+    #                  direction, never pooled -- latched values differ DOWN vs UP on the same
+    #                  capture (Multirole1 0.465 vs 0.740, SmallFighter1 0.519 vs 0.760).
+    #   pEffTrendPerS - least-squares slope over the leg, per second. THE GUARD ON ARM B: inside a
+    #                  rail-to-rail relay the gate reopens at every zero crossing (~0.1 s against the
+    #                  1.0 s release tau), so a relaxing estimator can RATCHET UP during an
+    #                  oscillation instead of between legs. Positive here on a leg with a high
+    #                  stickFlipRateP is that signature, and it means the arm is adding energy to a
+    #                  cycle rather than removing a de-rating. Read the two together; neither alone
+    #                  distinguishes a ratchet from an honest recovery.
+    if {"pEff", "t"} <= cols and n >= 2:
+        pe = [r.get("pEff", 0.0) for r in rows]
+        t = [r.get("t", 0.0) for r in rows]
+        m["pEffEntry"] = pe[0]
+        mt = statistics.fmean(t)
+        stt = sum((ti - mt) ** 2 for ti in t)
+        m["pEffTrendPerS"] = (sum((ti - mt) * (v - statistics.fmean(pe))
+                                  for ti, v in zip(t, pe)) / stt) if stt else 0.0
+    # (no `skipped` entry when the column is absent -- same rule as stickRailPct above: pEff is a base
+    #  recorder column, so its absence is a synthetic/pre-v0.67 row set, not a capture with a story.)
+
     # EXPOSURE. bankTR is computed UPSTREAM of `tBankE *= (1 - heliBlend)` (ChaseController.cs:1875),
     # so at heliBlend = 1 the law throws the entire bank demand away before it reaches the plant.
     # Measured: |bankTR| p95 76-86 deg against a 72 deg clamp while |tBankE| p95 is 0.00 and |outR|
@@ -1196,7 +1323,8 @@ def alpha_metrics(rows, cols, fbw):
     """Did the card reach the AoA ceiling, and what did the law do there? (metrics, skipped).
 
     This block was written on the premise that `aoaLimiterActivePct` was 0 in EVERY segment of every
-    card ever run (INSTRUCTOR-LOOP.md §3). THAT PREMISE IS FALSE and was corrected 2026-07-31: the
+    card ever run (the claim now filed as `LAW-LEDGER.md` **X7**; see `LAW-CHARACTERIZATION.md` §6
+    for the axis list this belongs to). THAT PREMISE IS FALSE and was corrected 2026-07-31: the
     metric is non-zero on 66 (run, airframe, tag) cells, 23 of them with no railed segment anywhere,
     topped by R33 `Darkreach.obDR6` at 100.0% on 4 unrailed replicates (aoaPeakDeg 7.4-7.6 vs a 10
     limiter, at a 95 m/s entry). See LAW-CHARACTERIZATION.md 1.
@@ -1438,6 +1566,17 @@ WOBBLE_MIN_CYCLES = 4.0
 # so aw.episodes' frequency floor cannot be published as a measurement. 6 crossings = 2.5 cycles.
 WOBBLE_MIN_CROSS = 6
 
+# ...and the window's own spread must clear this many of the COLUMN'S PRINT STEPS (aw.PRINT_QUANTUM)
+# before a shape is fitted to it. The same rule as OFF_FLOOR_DEG one level up: below it there is no
+# waveform, only the quantiser, and an autocorrelation will happily find a period in a signal that
+# dithers between two codes. 3 quanta because a sd of 1-2 is what a signal pinned on one code with
+# occasional neighbours reads (R44's outR: sd 1.18 quanta, ~34% of samples exactly 0.000 -- and it
+# still published a frequency on 15.1% of segments, the second-highest rate of ANY signal, above
+# every physical one. That inversion is the tell). Applies to freq/coherence, not to episodes: an
+# episode has to clear its dead-band, which is 30-50 quanta, so a 0 there is already the honest
+# reading (CAPTURES-DB gotcha 18) rather than a fitted one.
+WOBBLE_MIN_QUANTA = 3.0
+
 
 def _detrend(xs):
     """xs minus its least-squares line. Removes both the DC term and any residual ramp -- a drift
@@ -1569,12 +1708,18 @@ def osc_mode(t, xs):
     return (f if ok else None), h
 
 
-def wobble_scan(t, rows, cols, dur):
+def wobble_scan(t, rows, cols, dur, skipped=None):
     """Per-signal settled-window oscillation metrics, plus the per-axis stick sign-flip rate.
 
       stickFlipRate{P,R,Y}  - crossings/s of the raw command over the WHOLE segment (unchanged: it is
-                              a rate, not an episode, and the transient's flips are part of it).
-      wobbleFreqHz{Sig}     - osc_mode()'s frequency. ABSENT when the evidence does not support one.
+                              a rate, not an episode, and the transient's flips are part of it). KEPT
+                              on the stick columns even though the settled-window family below is
+                              not: a crossing has to clear a 0.05 dead-band, which is 50 print
+                              quanta, so this one is amplitude-gated well clear of the floor. What it
+                              cannot do is resolve BETWEEN two quiet segments -- R44's two cards both
+                              scored 0.0564 to four decimals, i.e. 1-2 sign changes in 20 s.
+      wobbleFreqHz{Sig}     - osc_mode()'s frequency. ABSENT when the evidence does not support one,
+                              which now includes "the window is under WOBBLE_MIN_QUANTA print steps".
       wobbleCoherence{Sig}  - osc_mode()'s autocorrelation peak height. THE DENOMINATOR: read the
                               frequency only with this beside it, the way rollYawOpposedPct is read
                               with bothActivePct.
@@ -1583,24 +1728,40 @@ def wobble_scan(t, rows, cols, dur):
                               is what an episode is), so a 0 here with a coherent wobbleFreqHz beside
                               it means "a real mode, under the dead-band" -- the exact case that used
                               to read as "no mode".
+
+    Signals come from aw.SETTLED_SIGNALS, NOT aw.WOBBLE_SIGNALS: the stick channels outR/outP are
+    quantiser noise in a settled tail and were replaced there (rollRate for outR; nothing for outP,
+    whose rate twin is no better resolved). See that constant for the measurement and the retraction
+    it comes from. `skipped` is mutated in place when a window is withheld -- passed in rather than
+    returned because six call sites do `metrics.update(wobble_scan(...))` and one extra argument is a
+    shorter diff than six tuple-unpackings.
     """
     m = {}
     for axis, lbl in (("outP", "P"), ("outR", "R"), ("outY", "Y")):
         if axis in cols:
             cnt = len(aw.crossings(None, [r.get(axis, 0.0) for r in rows], 0.05))
             m[f"stickFlipRate{lbl}"] = cnt / dur if dur > 0 else 0.0
-    for name, dead in aw.WOBBLE_SIGNALS:  # the detector's own dead-bands, not a copy of them
+    for name, dead in aw.SETTLED_SIGNALS:  # the detector's own dead-bands, not a copy of them
         if name not in cols:
             continue
         xs = [r.get(name, 0.0) for r in rows]
-        f, h = osc_mode(t, xs)
-        if h is not None:
-            m[f"wobbleCoherence{_cap(name)}"] = h
-        if f is not None:
-            m[f"wobbleFreqHz{_cap(name)}"] = f
         i0 = settled_from(t, xs)
+        win = xs[i0:]
+        q = aw.PRINT_QUANTUM.get(name)
+        resolved = q is None or (len(win) >= 2 and statistics.pstdev(win) >= WOBBLE_MIN_QUANTA * q)
+        if resolved:
+            f, h = osc_mode(t, xs)
+            if h is not None:
+                m[f"wobbleCoherence{_cap(name)}"] = h
+            if f is not None:
+                m[f"wobbleFreqHz{_cap(name)}"] = f
+        elif skipped is not None:
+            skipped[f"wobbleCoherence{_cap(name)}"] = skipped[f"wobbleFreqHz{_cap(name)}"] = (
+                NOT_EXPOSED + "the settled window of `%s` spans under %.0f print quanta (%.4f), so "
+                "any period found in it is the quantiser" % (name, WOBBLE_MIN_QUANTA,
+                                                             WOBBLE_MIN_QUANTA * q))
         m[f"wobbleEpisodes{_cap(name)}"] = len(
-            aw.episodes(t[i0:], xs[i0:], dead, min_cross=WOBBLE_MIN_CROSS))
+            aw.episodes(t[i0:], win, dead, min_cross=WOBBLE_MIN_CROSS))
     return m
 
 
@@ -1642,7 +1803,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
                 skipped["riseTime90"] = "missing column: off"
 
         elif seg_type == "fine_track":
-            metrics.update(wobble_scan(t, rows, cols, dur))   # rmsPointingErrorDeg: pointing_metrics above
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))   # rmsPointingErrorDeg: pointing_metrics above
 
         elif seg_type in ("sustained_turn", "alpha_hold"):
             if "headingRateFilt" in cols:
@@ -1674,7 +1835,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             pa = aw.pitch_authority(rows)  # the relay/reversal signature (fbwTgtPR/fbwPR — base cols)
             if pa:
                 metrics["pitchAuthorityMedian"], metrics["pitchAuthorityAntiPhaseFrac"], _ = pa
-            metrics.update(wobble_scan(t, rows, cols, dur))
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))
 
         elif seg_type == "hover_hold":
             if {"posX", "posY", "posZ"} <= cols:
@@ -1682,7 +1843,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
                                               [r["posY"] for r in rows], [r["posZ"] for r in rows]))
             else:
                 skipped["positionRMSM"] = skipped["driftRateMS"] = "missing column(s): posX/posY/posZ"
-            metrics.update(wobble_scan(t, rows, cols, dur))   # see the note on the bobup branch
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))   # see the note on the bobup branch
 
         elif seg_type in ("translate", "bobup"):
             if {"posX", "posY", "posZ"} <= cols:
@@ -1717,7 +1878,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             # It stays honest about the answer: 4 cycles of 0.11 Hz is 36 s against 12-15 s segments,
             # so osc_mode will correctly publish NULL for the frequency on most of them -- the
             # evidence is wobbleCoherence* beside it, and stickRailPctY from saturation_metrics.
-            metrics.update(wobble_scan(t, rows, cols, dur))
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))
 
         elif seg_type == "transition":
             if "alt" in cols:
@@ -1730,7 +1891,7 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             # the envelope for a hand-off oscillation, and this was the one arm with no detector on
             # it. osc_mode still gates itself, so a leg too short for four periods publishes NULL
             # rather than a number.
-            metrics.update(wobble_scan(t, rows, cols, dur))
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))
         # "unknown" (incl. "unsegmented"): AoA/G discipline above is the whole generic set.
 
         # Disk-card extras, ON TOP of the step/turn block the chain above already ran for them (an
@@ -1740,12 +1901,12 @@ def compute_segment(tag, seg_type, rows, cols, ctx=None):
             m, s = allocation_metrics(rows, cols)
             metrics.update(m)
             skipped.update(s)
-            metrics.update(wobble_scan(t, rows, cols, dur))   # the reversal rate, per axis
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))   # the reversal rate, per axis
         elif seg_type in ("alpha_step", "alpha_hold"):
             m, s = alpha_metrics(rows, cols, ctx.get("fbw", {}))
             metrics.update(m)
             skipped.update(s)
-            metrics.update(wobble_scan(t, rows, cols, dur))   # incl. wobbleEpisodesAoa: the relay
+            metrics.update(wobble_scan(t, rows, cols, dur, skipped))   # incl. wobbleEpisodesAoa: the relay
             # ...but the relay question is only ASKED where the guard acted. C2 of
             # cards/ALPHA-CARD-REDESIGN.md 5 names gateMinUp = 1.000 as its not-exposed reading: a
             # gate that never moved cannot have chattered, so a 0 there is the card missing the
@@ -2052,6 +2213,87 @@ def selftest():
     # (6) a segment too short to hold WOBBLE_MIN_CYCLES gives None, not a number.
     stub = [{"t": i * dt, "azErr": math.sin(2 * math.pi * 0.4 * i * dt)} for i in range(40)]
     assert osc_mode([r["t"] for r in stub], [r["azErr"] for r in stub])[0] is None
+
+    # (7) THE PRINT-QUANTUM GUARD (v1.0.5). A perfectly coherent 0.4 Hz mode whose amplitude is ~1.5
+    # print steps of its column: every other test in here would pass it (the ACF peak is textbook),
+    # and it must still be withheld, because at that amplitude the column cannot tell this sine from
+    # the quantiser. This is R43's +0.891 in miniature -- the estimator was never wrong about the
+    # shape, it was wrong that there was a signal to have a shape.
+    def _rr(amp, key="rollRate"):
+        rr = [{"t": i * dt, key: amp * math.sin(2 * math.pi * 0.4 * i * dt)} for i in range(1200)]
+        sk = {}
+        return wobble_scan([r["t"] for r in rr], rr, {key}, rr[-1]["t"], sk), sk
+    thin, tskip = _rr(1.5 * aw.PRINT_QUANTUM["rollRate"])
+    assert "wobbleFreqHzRollRate" not in thin and "wobbleCoherenceRollRate" not in thin, thin
+    assert tskip["wobbleFreqHzRollRate"].startswith(NOT_EXPOSED), tskip
+    fat, _ = _rr(20.0 * aw.PRINT_QUANTUM["rollRate"])       # same mode, 20 quanta: measurable
+    assert abs(fat["wobbleFreqHzRollRate"] - 0.4) < 0.02, fat
+    # ...and the withheld one is withheld for the QUANTUM, not for being small: identical waveform in
+    # a column with a 10x finer quantum resolves fine.
+    assert aw.PRINT_QUANTUM["azErr"] == 0.01
+    # (8) the stick channels are OUT of the settled-window family and rollRate is IN. Named
+    # explicitly so a re-added outR entry fails here rather than silently returning to the corpus.
+    names = [n for n, _ in aw.SETTLED_SIGNALS]
+    assert "rollRate" in names and "outR" not in names and "outP" not in names, names
+    assert all(k not in fat for k in ("wobbleFreqHzOutR", "wobbleCoherenceOutR")), fat
+    # stickFlipRate* survives on the raw stick columns: its 0.05 dead-band is 50 quanta.
+    assert "stickFlipRateP" in wm and 0.05 == 50 * aw.PRINT_QUANTUM["outP"]
+
+    # --- retreat integral, backlog #33 -----------------------------------------------------------
+    rdt = 1.0 / 16.0          # the recorder's own ~16 Hz, so these shapes are the corpus's shapes
+    # (a) a monotone approach: nothing ever moved away, whatever its shape.
+    decay = [8.0 * math.exp(-i * rdt / 2.0) for i in range(600)]
+    rm, rs = retreat_metrics(decay)
+    assert rm["retreatDeg"] == 0.0 and rm["retreatEpisodes"] == 0, rm
+    assert abs(rm["monotonicityIndex"] - 1.0) < 1e-9, rm
+    # (b) THE ENTRY TRANSIENT IS NOT AN EPISODE, and this is the case that decides the definition: a
+    # decaying ring-down through the target, 11 crossings of it. Every rise here is a genuine
+    # "approach then recede" and all but the last are the step still ringing down, so the decaying
+    # prefix must swallow them -- 11 raw rises, at most one survivor, and that one worth ~0.04 deg.
+    ring = [abs(8.0 * math.exp(-i * rdt / 2.0) * math.sin(2 * math.pi * 0.5 * i * rdt))
+            for i in range(480)]
+    raw = _turning_points(ring, OFF_FLOOR_DEG)
+    assert sum(1 for k in range(len(raw) - 1) if raw[k + 1] > raw[k]) >= 10, "need a real ring-down"
+    rr, _ = retreat_metrics(ring)
+    assert rr["retreatEpisodes"] <= 1 and rr["retreatDeg"] < 0.1, rr
+    # ...and a single overshoot rebound is the same thing with one cycle: still the step response.
+    over = [8.0, 6.0, 4.0, 2.0, 0.2, 1.4, 2.1, 1.0, 0.3] + [0.30] * 200
+    ro, _ = retreat_metrics(over)
+    assert ro["retreatEpisodes"] == 0 and ro["retreatDeg"] == 0.0, ro
+    # (c) A SUSTAINED LIMIT CYCLE -- the S5 elDn shape, and the case settled_from() cannot window
+    # (every envelope bin is the same size, so it would hand back index 0 and re-count the entry).
+    # The rises stop shrinking, so the prefix rule keeps nearly all of them.
+    cyc = [10.0 - i * 0.1 for i in range(80)] + \
+          [4.0 + 2.0 * math.sin(2 * math.pi * 0.4 * i * rdt) for i in range(1200)]
+    rc, _ = retreat_metrics(cyc)
+    assert rc["retreatEpisodes"] >= 8, rc
+    assert rc["retreatDeg"] > 30.0, rc
+    assert abs(rc["monotonicityIndex"]) < 0.15, rc
+    # ...a GROWING oscillation is the same shape with the decay reversed: nothing is dropped.
+    grow = [abs(0.5 * math.exp(i * rdt / 6.0) * math.sin(2 * math.pi * 0.5 * i * rdt))
+            for i in range(480)]
+    assert retreat_metrics(grow)[0]["retreatEpisodes"] >= 25, retreat_metrics(grow)
+    # (d) MONOTONE DIVERGENCE -- gotcha 13's shape, where settleTime95 reads 0.0 and means the
+    # opposite. One rise with nothing before it cannot be shown to be non-decaying, so retreatDeg is
+    # 0 and the index is the only one of the three that carries the finding. Read-together, and this
+    # assert is what makes that documented pairing enforceable.
+    div = [0.5 + i * 0.02 for i in range(400)]
+    rd, _ = retreat_metrics(div)
+    assert rd["retreatDeg"] == 0.0 and rd["retreatEpisodes"] == 0, rd
+    assert rd["monotonicityIndex"] < -0.99, rd
+    # (e) DITHER AT THE RESOLUTION FLOOR IS NOT RETREAT. 900 rows alternating between the two lowest
+    # rungs the column can print: a naive sum of positive first-differences would return ~9 deg of
+    # "retreat". Nothing is exposed here at all.
+    dither = [0.0 if i % 2 else 0.02 for i in range(900)]
+    _, rsk = retreat_metrics(dither)
+    assert set(rsk) == {"retreatDeg", "retreatEpisodes", "monotonicityIndex"}, rsk
+    assert all(v.startswith(NOT_EXPOSED) for v in rsk.values()), rsk
+    # ...and the same series through the naive definition, stated so the number is on the record.
+    assert sum(max(0.0, dither[i] - dither[i - 1]) for i in range(1, 900)) > 8.9
+    # (f) wired into pointing_metrics for every segment type, not just steps.
+    pmr = pointing_metrics(list(range(len(cyc))), [{"t": float(i), "off": o}
+                                                   for i, o in enumerate(cyc)], {"t", "off"})[0]
+    assert pmr["retreatEpisodes"] == rc["retreatEpisodes"], pmr
 
     # hover_metrics — pure linear drift (no jitter): drift rate is exact; positionRMS is the RMS
     # deviation from the mean of a 0..10 ramp, i.e. sqrt(mean([-5,-3,-1,1,3,5]^2)) = sqrt(70/6).

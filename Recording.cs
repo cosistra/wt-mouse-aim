@@ -104,7 +104,15 @@ namespace NuclearOptionMouseAim
         // flight-assist toggle, 0/1 — closes the "was assist on?" ambiguity in every report) and the
         // FBW's own target/actual pitch rate (rad/s, GAME frame: + = nose down) for direct law fits.
         private const string Header =
-            "t,off,azErr,elevErr,phi,bigTurn,bank,targetBank,outP,outR,outY," +
+            // COLUMN 8 IS DEAD AND IS NAMED SO. `targetBank` is the shared yawWeak-gated linear/atan blend,
+            // which NO LIVE LAW HAS FLOWN SINCE v0.60 removed Legacy — `tBankE` (col 35) is what the roll
+            // servo actually flies. Measured disagreement: 17.6% of `place-390` rows have targetBank < 0.05
+            // while tBankE > 2 deg (place-375 11.7%, oblique-6-c 11.3%), which has already produced one wrong
+            // inference in a field report. RENAMED, NOT DELETED, and that is the whole point: deleting it
+            // would shift every column index in 3,098 archived captures, whereas a rename makes stale offline
+            // code fail LOUDLY (no such column) instead of silently reading a live column by its old offset.
+            // Still written, so the column count stays 72 and old captures stay index-compatible.
+            "t,off,azErr,elevErr,phi,bigTurn,bank,targetBankDead,outP,outR,outY," +
             "pitchRate,yawRate,rollRate,yawEff,yawWeak,spd,aoa,g,phase,flyLevel,engP,engR,engY,controlLaw," +
             "heliBlend,vFwd,rollRateF,iPitch,iYaw,bankTR,bankBlend,headingRateFilt,azErrPred,tBankE," +
             "assist,fbwTgtPR,fbwPR," +

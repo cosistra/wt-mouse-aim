@@ -445,6 +445,22 @@ no repeated scored tag, track arrays long enough, every tag resolves to a known 
 
 ## 8. Unrelated: ledger #51 placement-forensics pair
 
+> **§8 IS STALE — audited 2026-08-05, and it is the only stale part of this file. §1–§7 and §9 stand.**
+> Three of its premises have since been refuted or overtaken, so **do not commission `place-noop` /
+> `place-deflect` off this section without re-reading them first:**
+> - *"The Darkreach damage failure fires at placement 4–5"*, as a rule the cards would rank —
+>   **refuted, `LAW-LEDGER.md` X26.**
+> - *"Placement above ~400 m/s destroys an aircraft"* — **refuted, `X33`**; R44's speed ladder kills it
+>   at both ends. The surviving kill is `I12`: a **non-zero ANCHOR displacement on a variable-geometry
+>   airframe**, which is neither speed nor placement count.
+> - The mechanism half of `I12` was **traded away by design** on 2026-08-05 — `TestDrone.cs` now
+>   collapses `DroneAltDeckM` to 0 whenever a card declares `startAlt`, deleting the only card-side
+>   route to a non-zero anchor. **The pre-fix arm can no longer be flown at all.** See `LAW-LEDGER.md`
+>   **O15** for what that costs and for the corpus query that partly covers the residual.
+>
+> The collinearity argument below (placement count vs card-run count) is still sound reasoning and is
+> why the section is annotated rather than cut.
+
 Separate experiment, requested alongside. **Not an alpha card, and it shares nothing with §1–§7.**
 
 **What it separates.** Under v0.96+, 7 of 7 Darkreach lanes scheduled ≥5 replicates died — 6 at

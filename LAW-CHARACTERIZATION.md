@@ -20,6 +20,7 @@ actually know.
 | which airframe can fly what | [3. The airframe roster](#3-the-airframe-roster-and-the-constraint-nobody-has-hit-yet) | 181 |
 | **what to fly next, batch by batch** | [4. The suite](#4-the-suite) | 214 |
 | the rules every batch obeys | [6. Standing rules for every batch](#6-standing-rules-for-every-batch) | 377 |
+| **the bar a batch is scored against** (the `flightscore` physics, the noise floor / ratchet, **the cone trap**) | [6. → The bar a batch is scored against](#the-bar-a-batch-is-scored-against-and-where-it-came-from) | 377 |
 | **what a `#n` means / the backlog** | [7. The numbered backlog](#7-the-numbered-backlog) → its own item index | 398 |
 
 Airframe envelopes are in [`AIRFRAMES.md`](AIRFRAMES.md); findings are in
@@ -392,6 +393,74 @@ to a rotorcraft), so it wants someone watching the first one. **Do not run it un
   general claim** — it does not on a heavy, low-authority airframe. Full entry: §7 #23.
 - One card = one test. Tags unique per card. Adding or renaming a segment tag means updating
   `ScenarioPlayer.cs` **and** `scorecard.py` in the same change.
+- **State what a null does NOT cover.** Two narrow, individually-correct nulls compose into a wrong
+  belief and no bucket rule catches it — the worked case is `_pitchEff` (ledger header; `L16`).
+- **A turn-rate-path A/B must be flown on a SUSTAINED-TURN card.** The `azTR` presence gate
+  `Clamp01((|azErr| − 0.5)/1.5)` is **shut on 84–100% of scored rows on every fine-tracking card in
+  the corpus** — `alpha-pullup` **100.0%**, `rotor-tilt-hold-lo` 96.7%, `q-lo-300` 95.6%, `place-300`
+  94.4%. Arm such a knob on a fine card and the contrast is a coin-flip on a handful of rows. The
+  sweeps (`e2-rel-turn-lead`, `e3-marker-ff`) hold the gate open on 99.6–99.7% and are the right home.
+- **A dilution or power figure is only meaningful on the card the contrast ACTUALLY FLEW.** Gate
+  occupancy is a property of a *stimulus*, statistical power of an *experiment*; check they refer to
+  the same captures before multiplying. Ledger `X36` is the worked failure — correct arithmetic,
+  empty referent, and it reached this file before anyone checked `armToggle`.
+
+### The bar a batch is scored against, and where it came from
+
+*Rescued 2026-08-05 from `INSTRUCTOR-LOOP.md` before that file was deleted. `debugtests/TOOLS.md`
+documents how to run `flightscore.py`; this is why its numbers mean anything.*
+
+**The achievable rate.** Every normalizer comes from the probed sidecar plus live state — no
+hand-tuned constant — which is what makes a light jet, a loaded jet, a STOL trainer and a helo
+comparable. It is the offline mirror of the ONE-LAW rule:
+
+```
+q_ratio     = (rho/RHO0) * (V/cornerSpeed)^2        # cornerSpeed is a SEA-LEVEL number
+n_avail     = max(1.05, aircraftGLimit * min(1, q_ratio))
+omega_turn  = deg(9.81 * sqrt(n_avail^2 - 1) / V)
+omega_avail = min(omega_turn, omega_pitch_cap)
+```
+
+Two corrections found while building it, both still load-bearing:
+
+- **The density term is not optional.** Omitting it claims n = 9.0 at 180 m/s at 4 km where the truth
+  is 6.4 — **40% high**, which silently reclassifies slow-at-altitude ticks as *airframe-limited* and
+  hides real law defects behind "the plane couldn't". With `rho` in, the shortcut agrees with a full
+  `n = q·S·Cl(alphaLimiter)/(m·g)` computation off the sidecar's Cl curve **to within 0.5%** — the
+  game defines `cornerSpeed` consistently with its own aero, so this is exact, not a fit.
+- **`maxPitchAngularVel` is the ASSIST-OFF cap** and never binds on any capture on file. With assist
+  on the game uses `gLimit·9.81/max(V, 0.75·fbwCornerSpeed)` — note `fbwCornerSpeed`, the FBW's, which
+  is the same trap `#41` and `AIRFRAMES.md` trap 6 record. Cross-check at R21's sustained point: that
+  branch yields **19.26 °/s** against `omega_turn`'s **19.14**.
+
+**The demand** is `omega_target = min(omega_avail, off / tau_feel)` with `tau_feel = 0.25 s` — the
+*one* human-anchored number in the whole metric, and a CLI flag precisely so it is recalibrated rather
+than argued about. **The score** is `e = edot / omega_target`. A tick is `ON_TARGET` (`off <= 1°`, not
+scored), `AIRFRAME_LIMITED` (`turn_rate >= 0.85·omega_avail` — *there was no better way*, law work here
+is wasted), or `SCORED`. That split is the whole value of the thing: it turns "the mod feels bad here"
+into either *the plane can't* or *the law won't*.
+
+**Three acceptance levels, in increasing order of honesty.** (a) **Absolute** — a segment averaging
+`A >= 0.7` with no `REGRESSING` mass is flying well; this bar is a hypothesis until someone scores a
+capture the maintainer judges as feeling good. (b) **Noise floor** — no A/B claim is admissible below
+`≈ 2.8·sd/sqrt(n)`, and this is why replicates are **staggered**: identical segments flown at the same
+wall-clock instant share a frame hitch and fake a *tighter* floor. (c) **Ratchet** — the champion run
+per (airframe × card) cell; a change must beat it by more than the floor to land.
+
+**The metric's own acceptance test, kept because it is the reason to trust it:** it must reproduce a
+defect we already understand. In the R21 sweep the marker leads the nose by a standing ~9.4° that never
+closes while `aoa` is 7.3° against a 27° limiter and `g` is 5.73 against 9. A correct metric scores
+those ticks **`SCORED` + `STALLED`**, never `AIRFRAME_LIMITED`. If it says airframe-limited, the metric
+is wrong, not the recording.
+
+> **THE CONE TRAP — this one bites tonight.** `micro1..10` and `fine` are **entirely sub-degree**, so
+> at the default 1° cone they read 100% `ON_TARGET` and **score nothing at all**. The maintainer's
+> actual complaint — fine aim, small movements — was invisible to measurement *by construction* until
+> someone passed `--cone 0.2`, where the same segments turn in 0.58–0.92 with **11–29% REGRESSING** and
+> **1.1–1.7 command reversals/sec** against 0.1 in a sustained turn. **Either size the segment to the
+> cone or state the cone as part of the card.** A fine-aim result quoted without its cone is not a
+> result. (Related and already established: `S6` — the fine-cone regression scales with *step size*,
+> not with gate activity, so a cone change moves what you can see, not what the law does.)
 
 ---
 
@@ -556,6 +625,10 @@ every materialized row, so per-row queries silently have nothing to read), and *
   repeat with pylons (a card cannot set stores; R43's FS-12 was clean at 13.57 t). If both are clean,
   O11 moves to REFUTED for v1.0.3 and the roll work is justified on structure alone, not on a field
   report. Ledger **O11**, `GENERALITY-REVIEW.md` finding 5.
+- **(h) SHIPPED v1.0.4 — closed by (i)'s option 1.** `TestDrone.DeckSpreadFlown` collapses the deck to
+  one ring whenever the card declares `startAlt`, and the false claim is out of `TestDrone.cs`'s design
+  comment and `ARCHITECTURE.md` L1.6. The deck keeps its lane-packing job on a card that declares no
+  `startAlt`, which is the only case where it ever reached the flight. Original text follows.
 - **(h) NEW (R43) — `DroneAltDeckM` does not do what the harness says it does.** The deck sets the
   drone's **spawn** altitude; the card's placement then teleports every lane to its declared
   `startAlt`, so `entry_alt_to` has exactly one distinct value per card across R41/R42/R43 and the
@@ -566,6 +639,17 @@ every materialized row, so per-row queries silently have nothing to read), and *
   a card. **Either** make placement offset by the lane deck **or** delete the claim and keep the deck
   as the lane-packing device `RingRadius` needs. Until then a card's only q lever is speed, and speed
   is confounded with airframe. Related: the Tier 2 `DroneAltDeckM` default contradiction below.
+- **(i) SHIPPED v1.0.4 — OPTION 1, and only option 1.** `TestDrone.DeckSpreadFlown(Preflight)` returns
+  0 whenever `Card.Declared(p.StartAlt)`; `LaunchFleet` resolves `_laneDeckM` through it, so the deck
+  count, ring radius, `DeckOf` and `deckOff` all collapse together and the anchor placement's `dPos` is
+  exactly (0,0,0). **The `sc_wingAngleMaxDeg` refusal gate (option 2) was NOT shipped** — one or the
+  other, per this item. The confirmation card is `cards/place-anchor.json`; **its entry speed is
+  corner-relative, not the `startSpeed: 250` specified below**, because 250 is above `QuadVTOL1`'s
+  0.95×Vmax gate ceiling of 141.2 m/s and would have refused both of its lanes pre-spawn. Two things
+  this item asked for are now unobtainable and that is the intended outcome: there is no card-side
+  route to a non-zero anchor displacement any more, so **the pre-fix arm cannot be re-flown** and the
+  open half of `I12` (does `QuadVTOL1` die through `TiltWingController.RotatorLinkage`?) is
+  unfalsifiable in-harness. Original text follows.
 - **(i) NEW (R44) — refuse the ANCHOR placement, don't fix the teleport.** A card that pins a non-zero
   `DroneAltDeckM` spends its whole first placement moving the lane off the deck, and on a
   variable-geometry airframe that is **100% fatal** (ledger **I12**, 31/31; the R43 speed premise is
@@ -586,6 +670,57 @@ every materialized row, so per-row queries silently have nothing to read), and *
     geometry controller and has never been given a non-zero anchor. Pass after the fix: 30 of 30
     captures complete, `entry_alt_from == entry_alt_to` on every replicate 1. Fail: any
     `abort: aircraft gone` at 0.0 s.
+
+**Tier 1b — FOUR analyses that need ZERO flying, added 2026-08-05. Do these before anything is flown,
+because three of them change how an existing batch reads.** Numbers deliberately not allocated — see
+the RECONCILIATION above; cite them by ledger ID.
+
+- **The two mid-run `aircraft gone` aborts** (ledger **O15**). SQL:
+  `airframe='FastBomber1' AND entry_snapBackM>0 AND stop LIKE '%aircraft gone%'` — 2 of 357. If either
+  landed during a wing slew, `O15` becomes a finding and tonight's placement fix has a sibling still
+  live; if both are ordinary departures, `O15` closes NO and the variable-geometry story is finished.
+  **Cheapest item on this page and it is the one that can still surprise us.**
+- ~~**Presence-gate power accounting**~~ **— DONE, and it came back NULL. See ledger `X36`.** The
+  premise had an **empty referent**: `oblique-6-c` is `armToggle: "none"` with `arm` NULL on all 304
+  captures, so no A/B was ever diluted by its gate. Measured dilution on the cards the contrasts
+  actually flew (`e2-rel-turn-lead`, `e3-marker-ff`, gate open 99.6–99.7%): **1.004×**. `X22` and `A1`
+  stand unmoved. **The salvageable half is a STANDING RULE, now in §6: any turn-rate-path A/B must be
+  flown on a sustained-turn card.**
+- **Carry-over vs energy** (ledger **L18** vs **L8**). Twelve filter states cross segment boundaries
+  unreset; `iGate` is a sawtooth locked to the boundary. One SQL pass with the **preceding** segment
+  tag as a covariate separates them, because carry-over predicts the same position effect as energy
+  accumulation *and predicts it will not track energy*. `L8` rests on n=3 and should not be cited
+  unqualified until this runs.
+- **Read `stol-steps`' `elDn40`/`elUp40` pair — the free half of the `S5` re-fly** (ledger **S5**,
+  `LAW-WEAKNESS-MAP` **W11**). `S5` is the repo's primary characterisation of the maintainer's
+  number-one complaint and was **demoted from ESTABLISHED to PLAUSIBLE on 2026-08-05**: 15 `elDn`
+  segments, **13 on one airframe**, last flown **R19 / mod 0.77.0** — eight releases *before*
+  `BelowAlignSuppress` shipped to fix the very loop it describes. `oblique-28` is the proper re-fly,
+  but `stol-steps` already carries a **modern mirrored ±40° elevation pair, 75 + 75 segments across
+  R39–R41**, and nobody has ever read it for this question. It is `X25`-compromised as *STOL* data;
+  the **mirror geometry** may still be readable, and if it is, it is a hemisphere contrast on the
+  current code base for the cost of one query. Do this **before** `oblique-28` flies, so that batch
+  is a test rather than a confirmation.
+- **Re-read `O11`'s field diagnosis against `tBankE`, not `targetBank`.** `targetBank` has been dead
+  since v0.60 and is still CSV column 8; on `place-390`, 17.6% of rows read it < 0.05° while `tBankE`
+  reads > 2°. The ~2 Hz cycle stands; *"the outer loop was commanding nothing"* does not, until re-read.
+
+**Tier 1d — ONE crossed order pair at a different geometry and roster** (ledger **D14**). `D14` — *a
+leg's score depends on the DIRECTION of the leg before it, independent of position and of accumulated
+energy* — is ESTABLISHED off `oblique-12-fwd`/`-rev`, which is the corpus's **only order-crossed
+design** and is reusable far beyond this question. But it is one card pair, **3 airframes, 12°
+geometry, one law version**. A second fwd/rev pair at a different step size and a wider roster is the
+single measurement that lifts `D14` from "established for that design" to unconditional, and it costs
+one batch. **Do not spend a batch on the filter attribution (`L18`) instead** — nothing in a crossed
+order design isolates a filter, because bank, the integrator and energy all cross a boundary too.
+
+**Tier 1c — the one card this adds, and it is an AMPLITUDE card, not a speed card** (ledger **L17**,
+`LAW-WEAKNESS-MAP` **W10**). `OutputSlew = 6.0` is the law's only nonlinearity, sits in series with all
+three axes, and has never been varied in 3,327 captures across 35 batches. Its describing-function
+onset is `R/(2πA)`: **1.91 Hz** at the field's ±0.5 stick, **~80 Hz** at R43's 0.012 — so R43 was
+*structurally incapable* of exciting it, which is why it could fly 407–505 m/s and settle nothing.
+The card must put the **stick** where the onset is; speed is not the axis. Fly the amplitude card
+before anyone proposes changing the 6.0.
 
 **Tier 2 — docs the checker cannot see.** The v0.94 fleet-ABBA safety argument in `CLAUDE.md` (replace
 with "`frameMs` is a per-row column, so covary or drop"); the `DroneAltDeckM` default contradiction
@@ -801,7 +936,7 @@ These are Q4. All four are invisible in a railed regime, which is why the baseli
 
 | # | Item | State |
 |---|---|---|
-| **#33** | **Pillar 1**: retreat integral — `retreatDeg`, `retreatEpisodes`, monotonicity index. Does the nose ever move *away* from the commanded direction, or approach and then recede? | Not started. No new CSV column needed — it is derivable from `off`. |
+| **#33** | **Pillar 1**: retreat integral — `retreatDeg`, `retreatEpisodes`, monotonicity index. Does the nose ever move *away* from the commanded direction, or approach and then recede? | **SHIPPED v1.0.4** (`scorecard.retreat_metrics`, off `off`, no CSV change). The entry transient is excluded by dropping the leading run of *shrinking* rises — a transient is a decay — which is the half that decides whether the metric means anything: a synthetic ring-down collapses 11 raw rises to 1 worth 0.04°, while a sustained cycle keeps 30 worth 118°. Validated on **S5**: all 15 archived `elUp` legs score exactly 0.000° / 0 episodes against **3.09 ± 3.12°** on their `elDn` twins, and on R41-vs-R42 `rotor-bistab` the index is **−0.061 (negative on 46/56)** vs **+0.411 (6/56)** where `settleTime95` reads exactly backwards. **Read `retreatDeg` with `monotonicityIndex`** — `CAPTURES-DB.md` gotcha 23. |
 | **#36** | **Pillar 2 rework**: authority *used* vs authority *needed*. v0.92's `authorityUsedFrac` answers "used", which is why its SLACK branch had to be gated to two card types — a 0.5° step legitimately uses 4% of authority. The normalizer wanted is `omega_target = min(omega_avail, off/tau)`. | Gated stopgap shipped; the real version blocked on nothing but time. |
 | **#38** | Card **altitude budget** unchecked at preflight. Measured on R27: `oblique-below` loses 4323 m worst-replicate, `sweep-lowq` 3069 m — both would finish **below sea level** from a 1500 m start. `FastBomber1` is the heaviest sinker on every card. | Same shape as v0.92's speed gate; no per-airframe bound exists, so the check is card-vs-floor, not card-vs-airframe. |
 | **#39** | `startSpeed: 0` means **both** "hover" and "not specified". | **Blocks the rotorcraft phase.** Fix with a nullable `float?` — Newtonsoft distinguishes absent from explicit 0, which `JsonUtility` could not. Do it together with the hover entry condition. |

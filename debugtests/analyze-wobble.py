@@ -7,11 +7,30 @@ Stdlib only (no pandas). Usage:
     python analyze-wobble.py --digest --verbose <many.csv>    # full timelines past 10 captures
     python analyze-wobble.py --selftest                       # in-memory asserts, no file needed
 
-WOBBLE SCORE (default) — the metrics from the 2026-07 wobble investigation (see WOBBLE-FINDINGS.md):
+WHAT THIS TOOL IS FOR, AND WHAT IT MUST NO LONGER BE READ AS (v1.0.5). It implements the metrics of
+the 2026-07 wobble investigation, and `LAW-LEDGER.md` **X35** now REFUTES that investigation
+wholesale: its central artifact was `targetBank` square-waving 0<->cap, and no live law has written
+that column since v0.60 (see gotcha 20 and the two readers repaired below); its episode counts came
+from the ancestor of a detector that was counting ENTRY TRANSIENTS (318 corpus episodes -> 5 after
+the R40 repair, X21); its authority numbers were `authorityUsedFrac`-class, deleted rather than
+rescaled. Its conclusion -- *"unstable at every speed 70-390 m/s, speed only scales amplitude"* --
+is refuted by R43 flying that condition at 407-505 m/s clean 12 of 12, `wobbleEpisodesOutR` 0 on
+48 of 48.
+  **So the wobble is NOT a high-speed phenomenon and NOT an outer-loop one.** The single sustained
+  roll limit cycle the corpus has actually measured is `S5`'s `elDn`: BELOW-NOSE, at ordinary speed,
+  while the mirror step in the upper hemisphere converges to 0.03 deg. **Hemisphere, not speed.**
+  The `--digest` mode and the raw per-signal episode/lag/model-fit numbers below are all still
+  sound -- they report what the recorder wrote. What is refuted is the CONCLUSION that was drawn
+  from them, so treat this tool as a per-capture readout and take verdicts from `LAW-LEDGER.md`.
+  See also `LAW-CHARACTERIZATION.md` §6: at the default cone the sub-degree regime this
+  investigation never looked at is where the complaint actually lives.
+
+WOBBLE SCORE (default) — the per-capture readout:
   - oscillation episodes: sustained sign-alternation windows on bank / azErr / outR / outP / outY,
     with zero-crossing frequency, peak-to-peak amplitude, amplitude trend (grow/steady/decay)
-  - outR rail % (|outR| > 0.98) and targetBank clamp % (|targetBank| >= MaxBank-0.5)
-  - bank-vs-targetBank cross-correlation lag (the measured ~0.7 s actuation lag)
+  - outR rail % (|outR| > 0.98) and bank-demand clamp % (|bankTR| >= MaxBank-0.5)
+  - bank-vs-tBankE cross-correlation lag (the measured ~0.7 s actuation lag). Both of these read
+    `targetBank` no longer — that column is dead; see the block at the reading site.
   - corr(azErr, bankTR) (the P-only outer-loop fingerprint; ~+0.9 pre-fix)
   - v0.55 model fit: pitchRate ~ -outP*G*9.81/V (the decompiled FBW g-command law), split at the
     airframe's corner speed (from the # fbw header when present, else 170 m/s). High-q corr should
@@ -371,6 +390,41 @@ MIN_ROWS = 20
 WOBBLE_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05),
                   ("aoa", 2.0))
 
+# --- THE RECORDER'S PRINT QUANTUM, per column (Recording.cs:589-596) ------------------------------
+# The step between two adjacent values a column can EVER hold. Not a tolerance and not a guess: it is
+# the format string. `off`/`azErr`/`aoa` are "{0.00}", `bank` is "{0.0}", and every stick/rate column
+# is "{0.000}" -- but a stick channel is +-1 of full deflection while a rate column is rad/s, so the
+# same three decimals buy very different resolution per unit of physical motion.
+#
+# WHY THIS EXISTS AS A TABLE. R43 published Spearman +0.891 for "roll activity rises with q" off the
+# sd of `outR` in settled tails, and R44 retracted it: in those tails outR holds 14-32 distinct codes
+# with ~34% of samples exactly 0.000, so the sd being compared -- 0.0010-0.0021 -- was ONE TO TWO
+# print steps (LAW-LEDGER X34, CAPTURES-DB gotcha 18). An estimator that does not know a column's
+# quantum will fit the quantiser and report it with four confident decimals. Measured over the 700-ish
+# settled windows of R40+R44, sd in units of this quantum: outR 1.18, outP 1.47, pitchRate 1.41,
+# bank 2.49, yawRate 3.39, azErr 3.62, rollRate 4.88, outY 5.46, aoa 44.3.
+PRINT_QUANTUM = {"off": 0.01, "azErr": 0.01, "elevErr": 0.01, "aoa": 0.01, "bank": 0.1,
+                 "targetBank": 0.1, "outP": 0.001, "outR": 0.001, "outY": 0.001,
+                 "pitchRate": 0.001, "rollRate": 0.001, "yawRate": 0.001, "rollRateF": 0.001}
+
+# The subset of WOBBLE_SIGNALS that survives being asked a SETTLED-WINDOW question -- which is a
+# different question from the one WOBBLE_SIGNALS answers and needs a different signal list. This
+# module's own death-wobble scan is amplitude-gated (an outR episode must clear a 0.05 dead-band = 50
+# quanta, and the FAIL rule wants pp > 1.2, i.e. rail-to-rail), so quantisation cannot reach it. A
+# settled-tail oscillation estimator is the opposite regime by construction: it looks at what is left
+# AFTER the transient, which on these cards is a few print steps of stick.
+#   * outR is OUT and `rollRate` replaces it -- the achieved roll rate is a physical measurement,
+#     4x better resolved (21 distinct codes per settled window against outR's 6), and it is the one
+#     signal that moved coherently in R44's crossed-q pair.
+#   * outP is OUT with no replacement: `pitchRate` measures 1.41 quanta, no better than outP's 1.47,
+#     so the pitch axis has NO adequately resolved settled-window signal. It is not left uncovered --
+#     `aoa` (44 quanta) is in this list and pitch_authority() answers the relay question.
+#   * outY STAYS: 5.46 quanta, the best-resolved stick channel in the corpus, because these cards put
+#     the command in the yaw channel (median |outY| 0.032 against |outR| 0.004).
+# scorecard.wobble_scan gates each of these per-segment on PRINT_QUANTUM anyway; this list is the
+# static half of the same judgement, so a signal that can never resolve is never asked.
+SETTLED_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("rollRate", 0.05), ("outY", 0.05), ("aoa", 2.0))
+
 
 def analyze(path):
     meta, rows = load(path)
@@ -397,11 +451,27 @@ def analyze(path):
         print(f"  config: {' '.join(w for w in cfg.split() if w.startswith(('law=', 'trGain', 'leadT', 'aOffP')))}")
 
     rail = 100.0 * sum(1 for x in col("outR") if abs(x) > 0.98) / max(1, len(auto))
-    tb = col("targetBank")
-    clamp = 100.0 * sum(1 for x in tb if abs(x) >= 71.5) / max(1, len(auto))
-    lag, lc = xcorr_lag(ts, tb, col("bank"))
-    print(f"  outR railed {rail:.1f}%   targetBank clamped {clamp:.1f}%   "
-          f"bank lags targetBank by {lag:.2f}s (corr {lc:+.2f})   corr(azErr,bankTR) {corr(col('azErr'), col('bankTR')):+.2f}")
+    # `targetBank` (CSV column 8) IS DEAD and both numbers below used to be read off it. It is the
+    # REMOVED Legacy law's bank target: ApplyEvolvedLegacy, the only fixed-wing law since v0.60, has
+    # never read it and flies its own tBankE = Clamp(bankTR, +-MaxBank). scorecard.py moved
+    # bankClampActivePct off it in R40 and its docstring carries the full three-regime proof that it
+    # is NOT SALVAGEABLE; this is the same repair on this module's two remaining readers.
+    #   * the clamp % is the DEMAND against the wall, so it reads `bankTR` -- the same quantity
+    #     scorecard's bankClampActivePct reads, deliberately, so the two tools cannot disagree.
+    #   * the actuation lag is bank against the target actually flown, so it reads `tBankE`.
+    # Measured disagreement on the corpus (rows where the dead column reads < 0.05 deg while the live
+    # one reads > 2 deg): place-390 17.6%, place-375 11.7%, oblique-6-c 11.3%, place-300 7.7%. That
+    # artefact is what ledger O11's "the outer loop was commanding nothing" was reading.
+    have = set(rows[0])
+    tgt = "tBankE" if "tBankE" in have else None
+    dem = "bankTR" if "bankTR" in have else None
+    clamp = (100.0 * sum(1 for x in col(dem) if abs(x) >= 71.5) / max(1, len(auto))) if dem else None
+    lag, lc = xcorr_lag(ts, col(tgt), col("bank")) if tgt else (None, None)
+    print(f"  outR railed {rail:.1f}%   "
+          + (f"bankTR clamped {clamp:.1f}%   " if clamp is not None else "bankTR clamped n/a   ")
+          + (f"bank lags tBankE by {lag:.2f}s (corr {lc:+.2f})   " if lag is not None
+             else "bank-vs-tBankE lag n/a (pre-tBankE capture)   ")
+          + f"corr(azErr,bankTR) {corr(col('azErr'), col('bankTR')):+.2f}")
 
     corner = fbw_corner(meta)
     mf = model_fit(auto, corner)
@@ -443,10 +513,27 @@ def analyze(path):
     # hard maneuvering, the same pp on a 10-deg Trainer is a blow-through cycle.
     lim = fbw.get("alphaLimiter") or 12.5
     pump_pp, pump_pp_grow = max(10.0, 0.8 * lim), max(6.0, 0.5 * lim)
+    # WHICH HEMISPHERE (v1.0.5). The one sustained roll limit cycle the corpus has actually measured
+    # is below-nose (`LAW-LEDGER.md` S5: `elDn` mean off 6.92 deg, bank half-amplitude 43.3 deg, while
+    # the LARGER mirror step `elUp` settles to 0.03 deg / 0.11 deg). Nothing in this tool read
+    # `elevErr` before, so every episode it has ever printed was hemisphere-anonymous -- and X35's
+    # retraction of "unstable at every speed" leaves hemisphere as the live discriminator. One column
+    # on the episode line; no verdict keys off it, because which way that cuts is still open.
+    # Sign convention VERIFIED against the card's own mirror pair rather than assumed: on
+    # fixedwing-v2 R19-01, `elDn` reads elevErr mean -11.02 (min -49.98) and `elUp` +3.52 (max
+    # +29.94), so NEGATIVE elevErr = marker BELOW the nose (`ChaseController.cs:1847`, asin of
+    # aimDir.y). Reported as a PERCENTAGE, not a below/above label, because this module's episode
+    # scan is whole-file and its windows straddle segment boundaries -- a categorical label would
+    # average two hemispheres into one confident wrong word. ~50% means the episode crossed.
+    elev = col("elevErr")
+    def hemi(t0, t1):
+        w = [e for ti, e in zip(ts, elev) if t0 <= ti <= t1]
+        return 100.0 * sum(1 for e in w if e < 0) / len(w) if w else 0.0
     for name, dead in WOBBLE_SIGNALS:
         for e in episodes(ts, col(name), dead):
             print(f"  [{name:7s}] t {e['t0']:.1f}-{e['t1']:.1f} ({e['dur']:.1f}s) "
-                  f"{e['freq']:.2f} Hz  pp {e['pp']:.2f}  {e['trend']}")
+                  f"{e['freq']:.2f} Hz  pp {e['pp']:.2f}  {e['trend']}  "
+                  f"below-nose {hemi(e['t0'], e['t1']):3.0f}%")
             # 0.25-2.0 Hz: covers both the v0.50 slow outer-loop cycle (0.3-0.85 Hz) and the
             # v0.51 fast lead-loop chatter (1.1-1.35 Hz) — the band was 0.3-0.9 and PASSed the latter.
             if name == "bank" and e["dur"] > 4 and 0.25 <= e["freq"] <= 2.0 and e["pp"] > 15:

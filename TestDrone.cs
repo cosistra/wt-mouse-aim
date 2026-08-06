@@ -70,18 +70,24 @@ namespace NuclearOptionMouseAim
         // instead of shrinking. Absolute heading is not a confound in exchange: the control law reads
         // no absolute heading anywhere, and the range mission pins the wind.
         //
-        // ALTITUDE DECKS (`Cfg.DroneAltDeckM`, default 0 = off), and why they are worth a knob. The
-        // ring is radius-bound by the chord: at N=16 on ONE deck, `2R*sin(pi/16) >= 6 km` forces
-        // R = 15.4 km. Split the fleet over two decks and the IN-DECK chord constraint only has to
-        // hold over 8 lanes, and R falls to 7.84 km — vertical separation buying horizontal packing,
-        // on the axis that was measured to matter. Read `RingRadius` before setting the knob though:
-        // that full gain arrives only at a spread of LaneM or more, because the cross-deck pairs
-        // have to reach LaneM in 3-D too and a token spread leaves them 3.06 km apart. The second
-        // return is bigger than the packing: with each airframe flying BOTH decks (see DeckOf's
-        // Latin-square diagonal — the obvious `k % 2` confounds deck with airframe outright), altitude
-        // becomes a BALANCED experimental factor crossed with airframe instead of a nuisance, and
-        // rho(3 km)/rho(6 km) = 1.38 makes it a cleaner dynamic-pressure lever than throttle (R39:
-        // one throttle setting straddled the fleet, CAS1 decelerating while Darkreach gained 1.67x).
+        // ALTITUDE DECKS (`Cfg.DroneAltDeckM`), and what they are ACTUALLY worth — this paragraph used
+        // to claim a second return it does not have, and that claim got into a card. The ring is
+        // radius-bound by the chord: at N=16 on ONE deck, `2R*sin(pi/16) >= 6 km` forces R = 15.4 km.
+        // Split the fleet over two decks and the IN-DECK chord constraint only has to hold over 8
+        // lanes, and R falls to 7.84 km — vertical separation buying horizontal packing, on the axis
+        // that was measured to matter. Read `RingRadius` before setting the knob though: that full gain
+        // arrives only at a spread of LaneM or more, because the cross-deck pairs have to reach LaneM
+        // in 3-D too and a token spread leaves them 3.06 km apart.
+        //
+        // THE PACKING IS THE WHOLE RETURN. This comment used to go on to promise that "altitude becomes
+        // a BALANCED experimental factor crossed with airframe", rho(3 km)/rho(6 km) = 1.38 and all —
+        // and it is false, measured (ledger X32). The deck sets the SPAWN altitude; the card's first
+        // placement then teleports every lane to `c.startAlt`, so across R41+R42+R43 `entry_alt_to` has
+        // exactly ONE distinct value per card and no capture in the corpus was ever flown at a deck
+        // altitude. `hs-hold` was designed around the factor this sentence promised and measured
+        // something else. The Latin-square diagonal in `DeckOf` is still right for what it does — it
+        // keeps deck from being confounded with airframe *at spawn* — it just never reaches the flight.
+        // See `DeckSpreadFlown`, which is where the contradiction is now deleted rather than warned about.
         //
         // ponytail: TWO decks maximum, no altitude re-check and no re-check that a lane is clear. The
         // range mission (`harness/WTM-Range`) is deliberately empty, which is what makes the last two
@@ -434,7 +440,11 @@ namespace NuclearOptionMouseAim
             // per lane would let a mid-stagger change move the ring under the lanes already on it,
             // and a ring whose radius moved is exactly the distance spread this layout removes.
             _laneN        = _pending;
-            _laneDeckM    = DeckSpreadM(pre);
+            // FLOWN, not asked (v1.0.4): a card declaring `startAlt` collapses the deck — see
+            // DeckSpreadFlown. Everything downstream keys off this one number (the deck count, the ring
+            // radius, DeckOf, deckOff and the operator's line), so the collapse is one assignment and
+            // cannot be half-applied.
+            _laneDeckM    = DeckSpreadFlown(pre);
             _laneDecks    = _laneDeckM > 0f ? 2 : 1;
             _lanesPerRing = (_laneN + _laneDecks - 1) / _laneDecks;      // ceil
             _laneRadius   = RingRadius(_lanesPerRing, _laneDecks, _laneDeckM);
@@ -452,20 +462,23 @@ namespace NuclearOptionMouseAim
                 $"[drone] launching {_pending} x '{string.Join(",", AirframeList())}' (by lane, wrapping) at {SpawnAlt():0} m / "
                 + $"{SpeedText(pre)}, {StaggerSec(pre):0.#}s apart, {ringPart}, each heading outward along its own radius"
                 + $"{deckPart}.");
-            // LEGAL, BUT SAY IT OUT LOUD — AND SAY WHO ASKED (v1.0.2). The deck spread lands on top of
-            // whatever altitude the card asked for, so a card that declares startAlt flies at NEITHER
-            // of the two numbers it names. That is fine when the CARD declared the spread (it is then
-            // one experiment, and `hs-hold`'s density contrast is exactly it) and it is the old
-            // never-refuses mismatch when the spread is just a knob left set from a previous session.
-            // Same line, different verdict, so the source is named rather than assumed.
-            if (_laneDecks > 1 && ScenarioPlayer.Card.Declared(pre.StartAlt))
+            // THE DECK WAS DROPPED — SAY SO, AND SAY WHO HAD ASKED FOR IT (v1.0.4). This is the same
+            // line the v1.0.2 warning occupied and the opposite verdict: the spread is no longer
+            // "applied ON TOP OF the card's startAlt", it is ignored, because that is the placement kill
+            // (ledger I12). Info either way — a card pinning the deck is not doing anything wrong, it is
+            // asking for an experiment the placement has never been able to deliver (X32) — but never
+            // silent: a fleet that flies one ring where the operator pinned two decks has to say so.
+            float deckAsked = DeckSpreadM(pre);
+            if (deckAsked > 0f && _laneDeckM <= 0f)
             {
                 bool fromCard = ScenarioPlayer.DeclaredText(pre.Config, "Drone/DroneAltDeckM") != null;
-                WTMouseAimPlugin.Log.Log(fromCard ? BepInEx.Logging.LogLevel.Info : BepInEx.Logging.LogLevel.Warning,
-                    $"[drone] DroneAltDeckM = {_laneDeckM:0} m [{(fromCard ? "from card" : "FROM F1")}] is applied ON TOP OF "
-                    + $"the card's own startAlt {pre.StartAlt:0} m — the decks are at {pre.StartAlt - _laneDeckM * 0.5f:0} and "
-                    + $"{pre.StartAlt + _laneDeckM * 0.5f:0} m and no lane flies {pre.StartAlt:0}."
-                    + (fromCard ? "" : " The card does not declare it — pin 'Drone/DroneAltDeckM' in its config[] so the run is repeatable."));
+                WTMouseAimPlugin.Log.LogInfo(
+                    $"[drone] DroneAltDeckM = {deckAsked:0} m [{(fromCard ? "from card" : "from F1")}] is IGNORED on this "
+                    + $"launch — the card declares startAlt {pre.StartAlt:0} m and its first placement teleports every lane "
+                    + $"there anyway (ledger X32), so the deck's only effect was to make that placement a "
+                    + $"{deckAsked * 0.5f:0} m vertical move, which is 100% fatal on a variable-geometry airframe (I12). "
+                    + $"The whole fleet spawns at {pre.StartAlt:0} m on one ring. Drop startAlt from the card if you want "
+                    + "the decks back.");
             }
             // WHO DECIDED, ITEM BY ITEM. This is the operator's ONLY confirmation that the card drove
             // the spawn — "4000 m" alone looks the same whether the card asked for it or the knob just
@@ -634,6 +647,45 @@ namespace NuclearOptionMouseAim
         internal static float StaggerSec(ScenarioPlayer.Preflight p) =>
             Mathf.Max(0f, ScenarioPlayer.DeclaredFloat(p.Config, "Drone/DroneStaggerSec", Cfg.DroneStaggerSec.Value));
         // --- CARD-OWNS-SPAWN END ---
+
+        // THE DECK YIELDS TO A DECLARED `startAlt` (v1.0.4 — ledger I12, and the fix for X32). One line
+        // of policy; the reason it is a deletion and not a fourth guard is worth the paragraph.
+        //
+        // `DeckSpreadM` above answers "what spread was ASKED for". This answers "what spread the fleet
+        // FLIES", and the two differ in exactly one case: a card declaring `startAlt` while a deck is
+        // set. There the deck was never an altitude factor to begin with — `PlaceOnCondition` teleports
+        // every lane to `c.startAlt` on its FIRST placement — so its only surviving effect on the
+        // flight is that it turns that first placement from a no-op into a +/- spread/2 VERTICAL MOVE.
+        // On a variable-geometry airframe that move is 100% fatal: **31 of 31 dead at dz = +/-1500 m
+        // against 0 of 32 at dz = 0**, across 230-440 m/s, Fisher p = 4.1e-5 on the airframe co-factor.
+        // `SwingWingController.RotatorInput.Animate` (:68680-68703) writes `transform.Rotate(...)` on an
+        // unparented `AeroPart` every fixed step the wing is slewing, and the wing IS still slewing when
+        // the anchor placement lands — a Transform write on a body mid-teleport, which is the exact act
+        // the `MoveAssembly` graveyard names. This is the one path that hands it a non-zero move.
+        //
+        // WHY COLLAPSING AND NOT REFUSING. With the spread at 0 the fleet is one deck at exactly
+        // `startAlt`, `deckOff` below is identically zero, and the anchor placement's `dPos` is exactly
+        // (0,0,0) — the aircraft is not moved at all, only levelled and given its entry velocity. R44
+        // already flew this exact configuration by hand: `place-440-noteleport` is `place-440` with
+        // `DroneAltDeckM: 0` pinned, and it wrote 10 of 10 complete captures at 440 m/s where its twin
+        // died 3 of 3 (X33). A pre-spawn refusal would have been a fourth thing to keep in sync and
+        // would have left the contradiction in place; this deletes it.
+        //
+        // AND THE RING PACKS HONESTLY AFTERWARDS, which is the half a refusal would have got wrong.
+        // `RingRadius` charges its cross-deck term for reaching LaneM in 3-D *using the spread* — but
+        // the placement deletes the spread, so a card-driven two-deck fleet ended up
+        // `sqrt(LaneM^2 - spread^2)` apart horizontally and NOTHING apart vertically at the altitude it
+        // was actually measured at (5.20 km at a 3 km spread, ~LaneM/2 at 6 km). Collapsing here feeds
+        // `RingRadius` the geometry the fleet really flies, so the radius grows back to the single-ring
+        // value and neighbours are a true LaneM apart in the plane they fly in.
+        //
+        // A CARD THAT DECLARES NO `startAlt` IS UNTOUCHED, and that is where the knob keeps its job:
+        // the placement then targets `alt0`, the aircraft's own current altitude, so every lane's
+        // placement is already dz = 0 and the two decks are both real and safe for the whole run.
+        // Outside the CARD-OWNS-SPAWN markers deliberately — this is not a config read, it is what the
+        // harness does with one, and `test-card-owns.py` compiles that region against a stub Preflight.
+        internal static float DeckSpreadFlown(ScenarioPlayer.Preflight p) =>
+            ScenarioPlayer.Card.Declared(p.StartAlt) ? 0f : DeckSpreadM(p);
 
         // The decks as the OPERATOR needs to read them, for the launch log and the run board — the
         // same shared-wording rule as SpeedText, and for the same reason: those two lines are his

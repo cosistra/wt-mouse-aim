@@ -1,6 +1,6 @@
 # Architecture — WT Mouse Aim
 
-<!-- ARCH-VERSION: 1.0.4 -->
+<!-- ARCH-VERSION: 1.0.5 -->
 
 The system diagram for this mod. **L0** is the at-a-glance map; **L1** sections zoom into each box.
 Every box carries a stable node id (`aim_rig`, `chase_apply`, …) — the [Node index](#node-index) maps
@@ -68,13 +68,13 @@ flowchart TB
         plugin["<b>plugin</b><br/>WTMouseAimPlugin<br/>lifecycle · hotkeys · HUD overlay<br/>v0.90: + harness run board (pre-gate:<br/>drawn with no aircraft and with the overlay off)"]
         cfg["<b>cfg</b><br/>Cfg<br/>~80 live-tunable binds"]
         aim_rig["<b>aim_rig</b><br/>AimRig<br/>world-locked aim marker<br/>+ cursor regime"]
-        chase["<b>chase</b><br/>ChaseController<br/>the instructor: marker → stick<br/>ONE INSTANCE PER AIRCRAFT (v0.82)<br/>get it via ChaseController.For(ac)<br/>v0.94: the 5 A/B levers are read as Arm(Cfg.X) —<br/>a PER-AIRCRAFT arm that survives Forget, so a<br/>whole fleet sweeps concurrent A/Bs"]
+        chase["<b>chase</b><br/>ChaseController<br/>the instructor: marker → stick<br/>ONE INSTANCE PER AIRCRAFT (v0.82)<br/>get it via ChaseController.For(ac)<br/>v0.94: the 7 A/B levers are read as Arm(Cfg.X) —<br/>a PER-AIRCRAFT arm that survives Forget, so a<br/>whole fleet sweeps concurrent A/Bs"]
         seam["<b>seam</b><br/>PilotPlayerStatePatch<br/>own/skip the native stick"]
         seam_thr["<b>seam_thr</b><br/>PilotThrottlePatch<br/>own the throttle axis<br/>(card only, Update-time)"]
         campatch["<b>campatch</b><br/>Camera patches ×3<br/>view follows the marker"]
         telem["<b>telem</b><br/>ManeuverRecorder · AnomalyLog<br/>instrumentation sinks"]
         scenario["<b>scenario</b><br/>ScenarioPlayer<br/>test cards: play · record · select<br/>re-establishes the entry condition per replicate<br/>(anchor: pos + heading + speed + alt + fuel,<br/>demand written, controller dropped)<br/>A/B arms interleaved ABBA<br/>v0.90: a card carries its OWN run config<br/>(repeat · armToggle · pinned Cfg overrides)<br/>and Preview() answers 'what would fly?'<br/>with no aircraft in hand<br/>v0.91: + the FLEET (count · airframe LIST),<br/>so a batch needs nothing set in F1<br/>v0.93: entry speed may be startSpeedCorner,<br/>a multiple of THAT LANE's corner speed<br/>v0.94: the A/B schedule is PER AIRCRAFT —<br/>it writes chase, not cfg, so N lanes each<br/>run their own ABBA at the same time<br/>v0.96: a SECOND safety abort beside the altitude<br/>floor — any part detachment ends the replicate<br/>(off unless a card is running)<br/>v0.99.1: an abort ends the REPLICATE, not the lane<br/>(Finish nulls _queue and _queue IS the replicate<br/>expansion — 13 of 40 captures on the STOL batch);<br/>card config pins are REFCOUNTED across the fleet"]
-        drone["<b>drone</b><br/>TestDrone · Drone<br/>uncrewed aircraft: spawn · fly · despawn<br/>N at once, staggered launch<br/>v0.87: each starts its own card and flies it<br/>through the REAL law (chase), not the level-hold<br/>v0.90: the CARD picks the airframe/alt/speed,<br/>and a drone with no card running despawns itself<br/>v0.90.1: one step per AIRCRAFT, not per pilot —<br/>a two-seater ran everything twice per fixed step<br/>v0.91: the card picks HOW MANY and WHICH —<br/>airframe is a per-lane LIST, count defaults to it<br/>v0.92: a lane whose airframe CANNOT fly the card's<br/>entry speed is refused BEFORE it spawns<br/>v0.96: that check uses the FBW's cornerSpeed,<br/>not the AI's — they differ by up to 2.2x<br/>v0.99: lanes fly a RING, each heading OUTWARD along<br/>its own radius, so origDist (a measured noise axis,<br/>r = 0.948 with gJitterG) is matched across lanes at<br/>EVERY instant, not just at spawn.<br/>+ optional two altitude decks — packing, and<br/>altitude as a factor crossed with airframe<br/><b>the COLLECTIVE: on a rotorcraft lane whose card<br/>declares a hover, the harness holds the altitude<br/>on the throttle axis</b> — a PI whose integrator<br/>LEARNS that airframe's hover collective, because<br/>one fixed throttle is not a hover for more than<br/>one airframe (R41: 0.60 climbed two rotorcraft and<br/>sank the third at −25 m/s into 16 of 16 aborts)<br/>(off unless DroneEnabled)"]
+        drone["<b>drone</b><br/>TestDrone · Drone<br/>uncrewed aircraft: spawn · fly · despawn<br/>N at once, staggered launch<br/>v0.87: each starts its own card and flies it<br/>through the REAL law (chase), not the level-hold<br/>v0.90: the CARD picks the airframe/alt/speed,<br/>and a drone with no card running despawns itself<br/>v0.90.1: one step per AIRCRAFT, not per pilot —<br/>a two-seater ran everything twice per fixed step<br/>v0.91: the card picks HOW MANY and WHICH —<br/>airframe is a per-lane LIST, count defaults to it<br/>v0.92: a lane whose airframe CANNOT fly the card's<br/>entry speed is refused BEFORE it spawns<br/>v0.96: that check uses the FBW's cornerSpeed,<br/>not the AI's — they differ by up to 2.2x<br/>v0.99: lanes fly a RING, each heading OUTWARD along<br/>its own radius, so origDist (a measured noise axis,<br/>r = 0.948 with gJitterG) is matched across lanes at<br/>EVERY instant, not just at spawn.<br/>+ optional two altitude decks — LANE PACKING ONLY<br/>(X32: the placement teleports every lane to the<br/>card's startAlt, so the deck never reached a<br/>capture — it was never an altitude factor)<br/>v1.0.4: a card declaring startAlt COLLAPSES the<br/>deck (DeckSpreadFlown), because the anchor<br/>placement's ±spread/2 move is 100% fatal on a<br/>variable-geometry airframe — 31/31 (ledger I12)<br/><b>the COLLECTIVE: on a rotorcraft lane whose card<br/>declares a hover, the harness holds the altitude<br/>on the throttle axis</b> — a PI whose integrator<br/>LEARNS that airframe's hover collective, because<br/>one fixed throttle is not a hover for more than<br/>one airframe (R41: 0.60 climbed two rotorcraft and<br/>sank the third at −25 m/s into 16 of 16 aborts)<br/>(off unless DroneEnabled)"]
         drone_seam["<b>drone_seam</b><br/>TestDronePatch<br/>write a DRONE's ControlInputs<br/>(no-op for every other aircraft)"]
         sandbox["<b>sandbox</b><br/>PlayerSpawn<br/>v0.95: put the OPERATOR airborne on one key,<br/>to hand-fly the law with no mission built.<br/>In an aircraft ⇒ PLACE it (alt/speed/level,<br/>position + heading KEPT — no anchor, no card).<br/>Not in one ⇒ SPAWN one WITH player + HQ<br/>and let the game seat you.<br/>Reuses scenario's safe-teleport pair;<br/>never touches the drone registry"]
     end
@@ -322,15 +322,15 @@ The crewed path cannot reach any of it, and that is structural rather than argue
 enter through `Spawn`, which asserts `ac.Player == null`. `check-architecture.py` enforces the two
 link conditions (one writer, one calling file) because neither fails to compile.
 
-**One config read in this pipeline is not a config read: the A/B lever (v0.94).** Four `Cfg` bools are
+**One config read in this pipeline is not a config read: the A/B lever (v0.94).** Seven `Cfg` bools are
 marked `(A/B lever)` — the knobs an attribution card sweeps — and the law now reads each of them as
 **`Arm(Cfg.X)`**, not `Cfg.X.Value`. `Arm` returns *this aircraft's* assigned arm when the schedule is
 sweeping that entry and the live config value otherwise, so N aircraft can fly N different arms in the
 same instant; before this, the knob was a process-global `ConfigEntry` the law read globally and
 `scenario` had to stand the whole schedule down whenever a second aircraft was mid-card, making every
-A/B a one-drone serial run. Exactly **five** sites are converted — the four levers, with
+A/B a one-drone serial run. Exactly **eight** sites are converted — the seven levers, with
 `MarkerRateFeedForward` counted twice because it is added at both lockstep `omega` sites
-(`RelativeTurnLead` was the fifth lever and the sixth site until **v0.99.1** deleted it: R39-D spent
+(`RelativeTurnLead` was a lever and a site until **v0.99.1** deleted it: R39-D spent
 its A/B, so the knob went and the term hardwired to its shipped default) — and nothing
 else is: this is the sweep seam, not a general indirection layer over `cfg`. **A new A/B lever must be
 read through `Arm()` to be sweepable**; `Cfg.X.Value` compiles, flies, and is simply invisible to the
@@ -360,7 +360,7 @@ flowchart TB
         e2["azErr — world azimuth error<br/>+ vertical deprojection (v0.58)"]
         e3["heading-rate LPF (v0.51)<br/>nose-only, so lead can't fight a mouse flick<br/>v0.78: + MARKER azimuth-rate LPF, signed,<br/>same tau (one shared const) — the demand rate,<br/>Atan2/DeltaAngle so the ±180° wrap is a no-op<br/>v0.85: + BEARING-rate LPF (d phi/dt), same tau —<br/>the align channel's own derivative. TOTAL rate<br/>(roll + pitch/yaw closure + marker motion), so the<br/>lead tracks a sweeping marker instead of braking it.<br/>Dropped + invalidated under the atan2 conditioning<br/>floor, where phi is junk"]
         e4["yaw-weakness estimate (v0.35)<br/>is the rudder actually CLOSING the error?"]
-        e5["hover blend heliBlend (v0.43)<br/>fwd airspeed + AutoHover + tilt angle"]
+        e5["hover blend heliBlend (v0.43)<br/>fwd airspeed + AutoHover + tilt angle<br/><b>O13 (v1.0.5): the tiltwing branch was INVERTED</b><br/>(angle−lo)/(hi−lo) recovers the GAME'S tilt command,<br/>where 1 = wing-borne and the hover end is pinned at<br/>0.18 — the opposite sense to the nozzle twin, which<br/>already carries the 1− (swivelPosition = 1−customAxis1).<br/>So heliBlend read 1.0000 (sd 0, 9,602/9,602 rows) in the<br/>MOST wing-borne state, and tBankE *= (1−heliBlend)<br/>deleted bank-to-turn outright. Now InverseLerp(1, 0.18, ·)"]
         e1 --> e2 --> e3 --> e4 --> e5
     end
 
@@ -371,7 +371,7 @@ flowchart TB
     end
 
     subgraph LAW["4 · CONTROL LAW (one law — EvolvedLegacy; Unified removed v0.65)"]
-        l1["<b>ApplyEvolvedLegacy</b> ← the only law<br/>v0.96: its unused off/targetBank parameters are<br/>GONE (dead since v0.60 removed Legacy); Apply still<br/>holds both as locals, for DetectAnomalies' over-roll<br/>check and the tBankE recorder column<br/>speed-aware bank target · slew limit<br/>v0.64: pErrTerm scaled by measured _pitchEff,<br/>reversal-gated floor v0.65 C1, latch-fixed v0.67<br/>(fixed-wing only — rotorcraft untouched)<br/>q + AoA demand schedules · helo rate normalisation<br/>(forced for all rotorcraft)<br/>v0.65 B2: sub-0.5° fine-settle micro-bank; v0.67:<br/>turn demand RAMPS in over [0.5°,2°] (no gate-exit step)<br/>v0.67: down-hemisphere roll-to-align suppressed →<br/>bounded pushover closes below-targets (no 90° hang)<br/><b>v0.85: that suppressor was itself a feedback path</b> —<br/>keyed on BODY-frame belowness (so roll erased it) and<br/>multiplied by (1−lateralHold), i.e. gated on the azimuth<br/>error roll-to-align itself generates: 51% of the intended<br/>suppression removed, corr(|azErr|,blendWeight) = +0.918,<br/>elDn 6.92° standing error at ±43° bank vs elUp 0.03°.<br/>Now keyed on alignFracH and the (1−lateralHold) factor<br/>is DELETED — belowness is already a continuous taper<br/>and bigTurn already returns roll-and-pull for big<br/>reorientations. Gated by Cfg.BelowAlignSuppress.<br/><b>v0.85: eAlign gets a rate lead</b> — phi + RollDamping ×<br/>measured d phi/dt before the /90 map (was pure P against<br/>a plant with roll inertia). Stands down in the ±180 wrap<br/>region, where the anti-relay slew owns the dynamics.<br/>Gated by Cfg.AlignRateLead"]
+        l1["<b>ApplyEvolvedLegacy</b> ← the only law<br/>v0.96: its unused off/targetBank parameters are<br/>GONE (dead since v0.60 removed Legacy); Apply still<br/>holds both as locals — `off` for DetectAnomalies, and<br/>targetBank for CSV column 8 ALONE<br/><b>v1.0.5: DetectAnomalies no longer takes a bank target.</b><br/>Its over-roll test and its trail's tgtBank both read<br/>_tBankFlown now. targetBank is 0 on 11-18% of rows where<br/>the servo flies real bank (place-390 17.6%), so the test<br/>was manufacturing events from two different signals.<br/>Column 8 is RENAMED targetBankDead, not deleted —<br/>a rename fails stale offline code loudly, a deletion<br/>would silently shift 3,098 archived captures<br/>speed-aware bank target · slew limit<br/>v0.64: pErrTerm scaled by measured _pitchEff,<br/>reversal-gated floor v0.65 C1, latch-fixed v0.67<br/>(fixed-wing only — rotorcraft untouched)<br/>q + AoA demand schedules · helo rate normalisation<br/>(forced for all rotorcraft)<br/>v0.65 B2: sub-0.5° fine-settle micro-bank; v0.67:<br/>turn demand RAMPS in over [0.5°,2°] (no gate-exit step)<br/>v0.67: down-hemisphere roll-to-align suppressed →<br/>bounded pushover closes below-targets (no 90° hang)<br/><b>v0.85: that suppressor was itself a feedback path</b> —<br/>keyed on BODY-frame belowness (so roll erased it) and<br/>multiplied by (1−lateralHold), i.e. gated on the azimuth<br/>error roll-to-align itself generates: 51% of the intended<br/>suppression removed, corr(|azErr|,blendWeight) = +0.918,<br/>elDn 6.92° standing error at ±43° bank vs elUp 0.03°.<br/>Now keyed on alignFracH and the (1−lateralHold) factor<br/>is DELETED — belowness is already a continuous taper<br/>and bigTurn already returns roll-and-pull for big<br/>reorientations. Gated by Cfg.BelowAlignSuppress.<br/><b>v0.85: eAlign gets a rate lead</b> — phi + RollDamping ×<br/>measured d phi/dt before the /90 map (was pure P against<br/>a plant with roll inertia). Stands down in the ±180 wrap<br/>region, where the anti-relay slew owns the dynamics.<br/>Gated by Cfg.AlignRateLead"]
     end
 
     subgraph COND["5 · CONDITION"]
@@ -531,11 +531,14 @@ one-caller pair, because neither fails to compile.
 
 #### v0.94 — the A/B sweep seam
 
-The four `(A/B lever)` bools are read as `Arm(Cfg.X)` rather than `Cfg.X.Value` at exactly five
+The seven `(A/B lever)` bools are read as `Arm(Cfg.X)` rather than `Cfg.X.Value` at exactly eight
 sites (`MarkerRateFeedForward` counts twice — both lockstep `omega` sites), so a swept aircraft
 flies *its* arm and everything else reads the live config. (Five levers / six sites until
 **v0.99.1** retired `RelativeTurnLead` — a spent A/B lever is deleted outright, knob and branch,
-rather than left defaulted.) Before this the knob was a process-global `ConfigEntry` read globally,
+rather than left defaulted; four / five until **v1.0.5** added `AoaSchedFloorRelative` (#45),
+`LeadFloorContinuous` (#14) and `PitchEffRelax`. **Both of those default OFF**, unlike the four graduated levers, which
+default ON: a graduated lever's default is the shipped behaviour *because it won its A/B*, whereas a
+hypothesis lever's default has to reproduce today's behaviour bit-for-bit until one does.) Before this the knob was a process-global `ConfigEntry` read globally,
 so `scenario` had to stand the whole schedule down under concurrency and every A/B was a one-drone
 serial run. **A new lever must be read through `Arm()` to be sweepable** — `Cfg.X.Value` compiles
 and flies, it is just invisible to the schedule. The assignment lives in a static map **keyed by
@@ -578,6 +581,52 @@ and also asserts those three source properties, none of which fails to compile
   new measured `_phiRateFilt` (same `HdgRateTau`, zeroed **and invalidated** under `EAlignLatGate`)
   times `Cfg.RollDamping` as the lead time, stood down inside `phiWrapGate` where the two-rate
   anti-relay slew owns the dynamics.
+
+- **v1.0.5 adds the first two levers that default OFF**, because they carry *hypotheses* rather than
+  fixes. (a) `Cfg.AoaSchedFloorRelative` (backlog #45) — the AoA-utilization schedule's **input** is
+  relative (`aoaUtil` normalises by this airframe's probed ceiling) while its **output** terminates
+  at an absolute `schedFloor = 0.3f`, the same number for a 27° ceiling on an 8.7 t `Fighter1` and a
+  10° ceiling on a 105 t `Darkreach`. ON substitutes `aoaFade / aoaCeil` — the share of the
+  airframe's usable AoA range its own fade band occupies, both terms degrees off the same probe, so
+  the ratio is dimensionless with no invented reference (0.26 at lim 27, 0.47 at lim 10). The two
+  rate probes were rejected on a hard ground: `omegaMax / _fbwMaxPitchVel` is the only dimensionless
+  combination available and it is **exactly 1** in the raw-law regime, which would switch the
+  schedule off entirely on the one airframe #45 is about. Not a G-limiter and deliberately not a
+  sixth de-authorizing term — see `LAW-LEDGER.md` `K3`/`P1`. (b) `Cfg.LeadFloorContinuous` (#14) —
+  the turn-lead's proportional floor is a **corner**, not a value: as a ratio the shipped clamp is
+  `clamp(1 − r, predFloor, 1)`, whose slope jumps from −1 to 0 at `r = 1 − predFloor`, inside a loop
+  whose whole failure catalogue is relaying on discontinuities (R21: binding on 100.0% of a settled
+  turn). ON is `predFloor + (1 − predFloor)·exp(−r/(1 − predFloor))` — same endpoints, `f'(0) = −1`
+  so a small lead is unchanged to first order, and the floor becomes an asymptote it never reaches.
+  The v0.52 relay guarantee is preserved *by construction* rather than by clamping: `f ∈ [predFloor,
+  1]`, so the prediction keeps `azErr`'s sign and can never exceed it.
+
+- **(c) `Cfg.PitchEffRelax` — the `_pitchEff` else-branch is a LATCH, not a floor, and it owns ~95% of
+  every flight.** `Max(_pitchEff, PEffRevThresh)` *is* `_pitchEff` for any estimate at or above the
+  threshold, so `pitchEffInst == _pitchEff`, so `pTau` takes the release branch (it is not `<`) and
+  the filter update is `+= k·0`. Frozen, and the only reset is `_pitchEff = 1f` on engage. The
+  measuring gate `|cmd| > 0.05` is open on **5.3%** of rows (R44 `oblique-6-c`, 48,085 rows, 10
+  airframes). **And what it freezes is a lag sample, not an authority measurement**: `cmd` is the
+  setpoint this tick while `ach` trails it by the airframe's pitch time constant, so `ach/cmd` climbs
+  0→1 through any step *on a healthy airframe*, and the 0.10 s attack is faster than any airframe's
+  pitch response — the filter captures the bottom of the transient and the gate shuts on it. `pEff <
+  0.95` on **97.4%** of rows; latched at 0.465–0.786 by airframe **and by leg direction**; one leg
+  freezes at 0.606 while `|fbwPR|/|fbwTgtPR|` reads **1.048**. ON hands the filter `1f` when the gate
+  is closed, which selects `pEffRel` and so *is* a first-order relax toward 1 at the existing release
+  tau — no second tau, no new state. Strictly subsumes the v0.67 C1 latch-breaker (relaxing toward 1
+  passes through `revThresh` on the way). **It cannot restore authority in a departure**: `cmd` is the
+  FBW setpoint, proportional to the mod's own commanded stick (`:65032`), so a departure — a
+  large-command regime by definition — holds the gate OPEN with the signed ratio live and the 0.10 s
+  attack tau on it. The one closed-gate window inside a rail-to-rail relay is the zero crossing, which
+  is short against the 1.0 s release tau. Also moves every scored leg's **initial condition**, not
+  just its steady state.
+
+- **#21 (`lateralHold` rails at 7.5°) needed no new knob and got none.** The rail point already *is*
+  `Cfg.EvolvedAlignHoldDeg` — `lateralHold = clamp01((|azErr| − FineBankDeadzone)/EvolvedAlignHoldDeg)`,
+  so 2.5 + 5.0 is the measured 7.5°, and it is a plain `Control` float any card pins through
+  `config[]`. The A/B is the shipped two-cards-one-selection idiom (`oblique-6-dwell-t040` /
+  `-t100`), which interleaves as a block exactly like `armToggle` does — `armToggle` resolves to a
+  `ConfigEntry<bool>` and cannot carry a float anyway.
 
 - `For(ac)` seeds a freshly built controller from the map (`SeedArm`); **`Forget` must NOT clear
   it**; exactly two things do — the suite's own `Finish` and `TestDrone.ForgetState` on despawn.
@@ -997,9 +1046,10 @@ cached frame is the two basis rays `_laneRight`/`_laneFwd` (directions, so an or
 translation — leaves them alone, exactly as before).
 
 **Altitude decks (`Drone/DroneAltDeckM`, default 3000 — CARD-OWNED since v1.0.2, read through
-`TestDrone.DeckSpreadM(Preflight)`, see L1.7).** The fleet splits over two decks at
-`startAlt ± spread/2` — 3000 under a card declaring 4500 m gives decks at 3000 and 6000 m, the band
-the roster is characterised over; 0 reproduces the plain single ring exactly. `DeckOf` is a
+`TestDrone.DeckSpreadM(Preflight)`, see L1.7; **what the fleet actually flies is
+`DeckSpreadFlown`, below**).** The fleet splits over two decks at `startAlt ± spread/2` — 3000 under
+a card declaring 4500 m gives decks at 3000 and 6000 m; 0 reproduces the plain single ring exactly.
+`DeckOf` is a
 **Latin-square diagonal** over (roster pass, airframe), `((k / A) + (k % A)) & 1`, and both obvious
 rules are wrong: `k % 2` confounds deck with **airframe** at every even-length airframe list (airframe
 is `k % A`, so an even `A` fixes the parity of `k` within an airframe — and no function of `k` alone
@@ -1010,13 +1060,49 @@ lane's index within its own deck is counted rather than derived, since the diago
 At `A = 2` the sequence is `0,1,1,0…`, the same shape as `ArmOf`'s ABBA — a coincidence of shape, not
 a confound, because deck is indexed by lane-within-fleet and arm by replicate-across-run; the test
 asserts the 2×2 stays balanced. The two rings are offset half a step in azimuth so they interleave
-instead of stacking. It buys (a) **packing** — the in-deck chord spans half the lanes, N=16 falls
-15.4 → 7.8 km — and (b) **altitude as a balanced experimental factor crossed with airframe**, where
-ρ(3 km)/ρ(6 km) = 1.38 makes it a cleaner dynamic-pressure lever than throttle (R39: one throttle
-setting straddled the fleet, CAS1 decelerating while Darkreach gained 1.67×). `AbeamM` drops **8 → 5
-km** in the same change: every lane now flies *away* from the observer from t=0, so the bound is the
-drone's own 4.14 km turn circle rather than "far enough to not be in the way" — and it matters,
-because with decks at N=8 the chord only asks 4.24 km.
+instead of stacking. It buys **packing and nothing else** — the in-deck chord spans half the lanes,
+N=16 falls 15.4 → 7.8 km. It used to be documented as also buying *"altitude as a balanced
+experimental factor crossed with airframe"* (ρ(3 km)/ρ(6 km) = 1.38, a cleaner q lever than
+throttle); **that second return does not exist and never did — ledger X32**, and the claim reached a
+shipped card (`hs-hold` was designed around it). `AbeamM` drops **8 → 5 km** in the same change:
+every lane now flies *away* from the observer from t=0, so the bound is the drone's own 4.14 km turn
+circle rather than "far enough to not be in the way" — and it matters, because with decks at N=8 the
+chord only asks 4.24 km.
+
+**v1.0.4 — the deck YIELDS to a declared `startAlt`, and that is the placement-kill fix
+(`DeckSpreadFlown`).** The deck sets the **spawn** altitude; `PlaceOnCondition` then teleports every
+lane to the card's `startAlt` on its **first** placement. So with a card declaring `startAlt` the
+deck was never an altitude factor (X32: `entry_alt_to` has exactly one distinct value per card across
+R41+R42+R43) — its only surviving effect on the flight was to turn that first placement from a no-op
+into a **± spread/2 vertical move**, and on a variable-geometry airframe that move is **100% fatal**:
+31 of 31 dead at dz = ±1500 m against 0 of 32 at dz = 0, over 230–440 m/s, Fisher **p = 4.1 × 10⁻⁵**
+on the airframe co-factor (**I12**; speed is refuted as a factor at both ends, **X33**).
+`SwingWingController.RotatorInput.Animate` (`:68680-68703`) writes `transform.Rotate(…)` on an
+unparented `AeroPart` every fixed step the wing is slewing — a `Transform` write on a body
+mid-teleport, the exact act the [`MoveAssembly` graveyard](#v0972--moveassembly-is-a-rigid-transform-and-nothing-else-the-graveyard)
+names — and the anchor placement is the one that lands while the wing is still slewing off the spawn
+state. **`LaunchFleet` therefore resolves the spread through `DeckSpreadFlown`, which returns 0
+whenever `Card.Declared(p.StartAlt)`**, so the fleet is one ring at exactly `startAlt`, `deckOff` is
+identically zero and the anchor placement's `dPos` is exactly (0,0,0) — the aircraft is levelled and
+given its entry velocity without being *moved*. R44 flew this configuration by hand:
+`place-440-noteleport` is `place-440` with `DroneAltDeckM: 0` and wrote **10 of 10** complete captures
+at 440 m/s where its twin died 3 of 3. Three consequences worth holding onto:
+- **It is a deletion, not a fourth guard.** The rejected alternative (§7 Tier 1 (i) option 2) was a
+  pre-spawn refusal keyed on `sc_wingAngleMaxDeg`, i.e. a second gate beside `EntrySpeedFlyable` and
+  the contradiction left standing behind it. This closes §7 **(h)** in the same line.
+- **The ring packs more honestly afterwards, not less.** `RingRadius`'s cross-deck term charges for
+  reaching `LaneM` in 3-D *using the spread* — but the placement deleted the spread, so a card-driven
+  two-deck fleet actually flew with cross-deck neighbours `sqrt(LaneM² − spread²)` apart horizontally
+  and **nothing** apart vertically (5.20 km at a 3 km spread; ~`LaneM`/2 at 6 km). Collapsing feeds
+  `RingRadius` the geometry the fleet really flies, so the radius returns to the single-ring value.
+- **A card with no `startAlt` is untouched** — the placement then targets `alt0`, the aircraft's own
+  current altitude, so every lane is already dz = 0 and both decks are real and safe for the whole
+  run. That is where `DroneAltDeckM` keeps its packing job. The launch log says which happened, and
+  the run board reads the same `DeckSpreadFlown` so it cannot promise a spread the spawn will not use.
+- **Not reachable from a card any more:** a non-zero *anchor* displacement now has no card-side route
+  at all, which also makes the open half of I12 (does `QuadVTOL1` die the same way through
+  `TiltWingController.RotatorLinkage`, `:70141-70146`?) unfalsifiable in-harness. Correct price;
+  `cards/place-anchor.json` is the regression card and says so.
 
 **`RingRadius` has three terms and the third is not optional.** The half-step offset puts a lane of
 one deck *between* two lanes of the other, so cross-deck neighbours are **half** a step apart and
@@ -1174,7 +1260,7 @@ flowchart TB
     tick["🟨 plugin.FixedUpdate → drone.FixedTick"]
     tick --> ft["FrameDt is sampled in plugin.Update, NOT here<br/>(TestDrone.SampleFrameTime — v0.92.1: read from<br/>FixedUpdate, Time.unscaledDeltaTime returns<br/>fixedUnscaledDeltaTime, a CONSTANT)<br/>log '[drone] frame hitch' on the RISING edge<br/>(one stall spans several frames — edge-gate<br/>or a 300 ms hitch prints fifteen identical lines)"]
     tick --> due{"pending > 0 and<br/>Time.time >= nextAt ?"}
-    due -->|yes| sp["spawn ONE on the RING (v0.99): lane k at azimuth<br/>2pi*k/M, radius RingRadius(M, decks, spread),<br/>heading OUTWARD along its own radius — |pos| is a<br/>function of t alone, so origDist (r = 0.948 with<br/>gJitterG) is MATCHED across lanes at every instant.<br/>One shared heading would smear it 16 -> 47 km<br/>mid-card, which is why each lane has its own<br/>LookRotation and there is no _laneRot.<br/>LaneM 6 km is now the CHORD (v0.90.1's reason<br/>unchanged: a 360 at the 72 deg clamp sweeps a<br/>4.1 km circle); AbeamM 5 km is the floor —<br/>the drone's own turn circle, since every lane<br/>flies AWAY from the observer from t=0.<br/>DroneAltDeckM (default 3000) ⇒ two decks, assigned<br/>on a LATIN-SQUARE DIAGONAL ((k/A)+(k%A))&amp;1 so every<br/>airframe flies BOTH — k%2 confounds deck with<br/>airframe at even roster lengths, (k/A)&amp;1 confounds<br/>it with azimuth sector. Half-step offset between<br/>the rings; RingRadius is CHARGED for the resulting<br/>cross-deck half-chord, so the packing scales with<br/>the spread (N=16: 15.4 km at 0, 13.3 at 3 km,<br/>7.8 at 6 km)<br/>slot past _live.Count wraps the ring, so slot/N<br/>pushes each wrap out one LaneM — azimuth alone<br/>would aim a new lane at a live one's ray<br/>airframe = the CARD's list if it names one<br/>(v0.90: it overrides the WHOLE Cfg list, never one<br/>lane. v0.91: that list is itself COMMA-SEPARATED,<br/>so a mixed fleet is declared IN the card),<br/>else DroneAirframe[slot % list], wrapping<br/>(v0.86: a comma list ⇒ a MIXED batch)<br/>alt/speed likewise card-first<br/>nextAt += DroneStaggerSec"]
+    due -->|yes| sp["spawn ONE on the RING (v0.99): lane k at azimuth<br/>2pi*k/M, radius RingRadius(M, decks, spread),<br/>heading OUTWARD along its own radius — |pos| is a<br/>function of t alone, so origDist (r = 0.948 with<br/>gJitterG) is MATCHED across lanes at every instant.<br/>One shared heading would smear it 16 -> 47 km<br/>mid-card, which is why each lane has its own<br/>LookRotation and there is no _laneRot.<br/>LaneM 6 km is now the CHORD (v0.90.1's reason<br/>unchanged: a 360 at the 72 deg clamp sweeps a<br/>4.1 km circle); AbeamM 5 km is the floor —<br/>the drone's own turn circle, since every lane<br/>flies AWAY from the observer from t=0.<br/>DroneAltDeckM (default 3000) ⇒ two decks, assigned<br/>on a LATIN-SQUARE DIAGONAL ((k/A)+(k%A))&amp;1 so every<br/>airframe flies BOTH — k%2 confounds deck with<br/>airframe at even roster lengths, (k/A)&amp;1 confounds<br/>it with azimuth sector. Half-step offset between<br/>the rings; RingRadius is CHARGED for the resulting<br/>cross-deck half-chord, so the packing scales with<br/>the spread (N=16: 15.4 km at 0, 13.3 at 3 km,<br/>7.8 at 6 km)<br/><b>v1.0.4: the spread comes from DeckSpreadFlown,<br/>which is 0 whenever the card DECLARES startAlt</b><br/>— the placement teleports every lane there anyway<br/>(X32), so the deck only made the ANCHOR placement<br/>a ±spread/2 move, 31/31 fatal on a variable-<br/>geometry airframe (I12). One ring at startAlt,<br/>dPos exactly (0,0,0). No startAlt ⇒ decks as before<br/>slot past _live.Count wraps the ring, so slot/N<br/>pushes each wrap out one LaneM — azimuth alone<br/>would aim a new lane at a live one's ray<br/>airframe = the CARD's list if it names one<br/>(v0.90: it overrides the WHOLE Cfg list, never one<br/>lane. v0.91: that list is itself COMMA-SEPARATED,<br/>so a mixed fleet is declared IN the card),<br/>else DroneAirframe[slot % list], wrapping<br/>(v0.86: a comma list ⇒ a MIXED batch)<br/>alt/speed likewise card-first<br/>nextAt += DroneStaggerSec"]
     tick --> prune["prune drones the game removed<br/>(shot down, hit the sea, mission cleanup) —<br/>Unity reports a destroyed object as null WITHOUT<br/>throwing, so a stale dict entry is silent.<br/>+ v0.90 AUTO-DESPAWN: no card running for<br/>IdleDespawnSec (5 s) ⇒ despawn. ONE rule covers<br/>suite-complete / aborted / refused / never-started;<br/>the window is the NextCard→StartCard gap, so a<br/>drone is never dropped between its own replicates.<br/>BOTH removal paths (this and Despawn) call<br/>ONE ForgetState(id): scenario + telem + chase.<br/>One function, so the next per-aircraft registry<br/>cannot be forgotten on one of the two paths"]
 
     sp --> flyable{"<b>v0.92 — CAN THIS AIRFRAME FLY IT?</b><br/>EntrySpeedFlyable(key, <b>SpeedOfLane(plan, key)</b>)<br/>v0.93: the LANE's resolved speed, not the batch's —<br/>a startSpeedCorner card places each lane at its own<br/>multiple of corner speed, and gating on one number<br/>would check a speed no lane is ever placed at.<br/>Still live under v0.93: it now also catches a card<br/>declaring a bad MULTIPLE (2.0x corner is over Vmax<br/>on most of the roster) — checked against<br/>Encyclopedia.Lookup — NO aircraft instance, because<br/>refusing after the spawn has already made the unit.<br/>band = 1.10x Vstall … 0.95x Vmax, from aircraftInfo<br/>(KM/H, ÷3.6) — NOT aircraftParameters.maxSpeed,<br/>a normalizer reading a flat 600 for every jet.<br/>Fail-soft: an UNKNOWN envelope never refuses.<br/>Refused ⇒ one log line with speed + violated bound,<br/>then the SAME skip-or-cancel path as a bad jsonKey"}
@@ -1906,7 +1992,7 @@ only increment, and the value goes back when the last one releases. The case a r
 resolve — two concurrently flying cards wanting one knob at two values — is refused by name, first
 value standing, because a process-global entry has room for exactly one answer. That boundary is
 where per-aircraft config would have to start, and it is the same boundary `Arm()` already crosses
-for the five A/B levers; nothing else has needed it yet.
+for the seven A/B levers; nothing else has needed it yet.
 
 **The A/B arm is NOT a writer of this config (v0.94), and that is the release.** It used to be — the
 schedule flipped a `Cfg` bool and the law read it globally, which is exactly why only one aircraft
@@ -1935,6 +2021,11 @@ reached half the run:
 | --- | --- | --- |
 | **per tick** (every `Control` lever, `ScenarioThrottle`, `ScenarioEntryFuel`) | `ApplyOverrides` **pins** the entry at card start, releases at card end | the entry *is* what the law reads; pinning it is the whole mechanism |
 | **pre-spawn** (`DroneAltDeckM`, `DroneStaggerSec`, the `ScenarioForceEntry` entry gate) | `ScenarioPlayer.DeclaredFloat` / `DeclaredBool` read the card's array **directly** | the fleet is laid out *before* any card starts, so there is no pin to read yet — this is exactly where `hs-hold` fell through |
+
+`DeckSpreadM` is what the card *asked for*; since v1.0.4 the launch and the run board both go through
+`DeckSpreadFlown`, which is what the fleet *flies* — 0 whenever the card declares `startAlt` (L1.6,
+ledger I12). The ownership rule is unchanged and the marked region is untouched: the collapse is not a
+config read, it is what the harness does with one, so it sits **outside** `CARD-OWNS-SPAWN`.
 
 Both paths share one grammar (`SplitSpec`), so a card writing `HeliHoverSpeed` and a call site asking
 for `Control/HeliHoverSpeed` are the same key. Both are fail-soft: an unparseable literal falls back

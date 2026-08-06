@@ -43,7 +43,9 @@ Then, in order:
 | **W5** | ~~The SLACK detector has been structurally dead since R28~~ **CLOSED WONTFIX v0.99.1 — the detector and the metric under it were DELETED.** The gap it named ("nothing detects the law leaving authority on the table") is real and now has **no** detector at all | instrument gap | design a real one; do **not** restore SLACK |
 | **W6** | `terminalOffDeg` + the whole g family are lane-distance artifacts and are still un-caveated | instrument gap | docstrings only, ~20 lines |
 | **W7** | FastBomber1 runs 4–10x hotter in steady-state pitch than the fleet, in every batch, for six mod versions | open, unexplained | re-measure on the t-cards |
-| **W8** | The `_pitchEff` estimator's noise gate is an absolute rad/s constant | ONE-LAW smell, measured inert | one line in `GENERALITY-REVIEW.md` |
+| **W8** | ~~The `_pitchEff` estimator's noise gate is an absolute rad/s constant~~ **REFRAMED 2026-08-05 — W8 measured the duty cycle and filed a null; the question was what the estimator HOLDS while gated. It is a LATCH, and it runs pitch demand at 0.47–0.80 permanently** | **was "measured inert" — now the largest live law suspect** | ledger **L16**; being armed as an A/B |
+| **W11** | **NEW 2026-08-05** — `BelowAlignSuppress` is a **shipped, default-ON** law change justified by one experiment (`S5`: 15 segments, 13 on one airframe, last flown 8 releases before the knob) and validated by a different one that could not see the effect | **shipped code resting on unreproduced evidence** | ledger `S5`/`A2`; fly `oblique-28`; free pre-check in `stol-steps`' `elDn40`/`elUp40` |
+| **W10** | **NEW 2026-08-05** — `OutputSlew = 6.0` is the law's **only** nonlinearity, in series with all three axes, and is the one lever **never varied in 3,327 captures across 35 batches** | structural, binds on shipped cards | ledger **L17**; fly an **amplitude** card before touching the constant |
 | **W9** | **NEW 2026-08-02** — `_iYaw`/`_iPitch` **leak**, so they have finite DC gain and cannot null a standing external bias; the game's rotorcraft weathervane supplies exactly such a bias above 40 m/s | structural, measured (R42, closed-form) | code, but **not yet** — the discriminating card is `LAW-CHARACTERIZATION.md` §7 rotorcraft (d); ledger **H7** |
 
 And the standing hole that dwarfs all of them: **two of the four airframe cases the ONE-LAW rule names
@@ -481,7 +483,25 @@ fraction is 85–99% on every airframe in every batch, so it is not a discrimina
 capture that shows the duty cycle actually splitting — a gain change with no measured motivation is how
 per-plane tuning gets in.
 
-**Status.** OPEN as documentation only.
+**Status.** ~~OPEN as documentation only.~~ **W8 MEASURED THE RIGHT ROWS AND ASKED THE WRONG QUESTION —
+corrected 2026-08-05, and this correction is worth more than the finding was.**
+
+W8 asked whether the gate's **duty cycle** differs across airframes, found 3.28–4.94% with no relation
+to the cap, and filed a null. The null is correct. But its own supporting sentence — *"the gated
+fraction is 85–99% on every airframe in every batch"* — **is the finding it walked past**: the question
+is not how often the gate is open, it is **what the estimator holds during the 85–99% of frames it is
+shut.** The answer (ledger **L16**) is that the else-branch `Max(_pitchEff, PEffRevThresh)` returns
+*exactly* `_pitchEff` for any value at or above the threshold, so the filter update is `+= k·0` — a
+**hard latch, not a floor** — and it is latched onto a *lag* sample, not an authority measurement.
+Measured consequence: `pEff < 0.95` on **97.4%** of 48,085 rows across 10 airframes, latched at
+0.465–0.844, i.e. the law runs fixed-wing pitch demand at **0.47–0.80 permanently**.
+
+**Why this went unseen for so long is the reusable part, and it is now a standing warning in the ledger
+header.** W8 correctly measured one small thing about `_pitchEff` and correctly concluded "small".
+`GENERALITY-REVIEW.md` finding 14 correctly narrowed the `>=` defect to a boundary case and correctly
+concluded "small". **Neither was wrong; composed, they closed the file on a term cutting a quarter to a
+half of pitch demand.** Two narrow correct nulls made a wrong belief. The rule that falls out: **when
+filing a null, state what the null does not cover.**
 
 ---
 
@@ -510,6 +530,56 @@ the cap is not what binds; it is 3× above where the term settles.
 
 **Status.** OPEN, structural, one batch. Rank: below W2, above W8 — it has a measured effect size and a
 closed form, but the fix touches an integrator every axis shares.
+
+---
+
+## W10 — `OutputSlew = 6.0` is the law's ONLY nonlinearity, it is in series with all three axes, and it has never once been varied
+
+**Claim.** Every gain in this law is linear; `OutputSlew` is not. It rate-limits the final stick output
+on roll, pitch and yaw alike, which makes it the single term capable of setting a limit-cycle frequency
+independently of any gain. The describing-function onset is `f_onset = R/(2πA)`: at the field's reported
+±0.5 stick that is **1.91 Hz**, against a field limit cycle reported at ~2 Hz.
+
+**Why it is a weakness and not just a constant.** `slew = 6.0` appears in **all 3,327 captures across
+all 35 batches** — never varied, not once — and is mentioned **nowhere** in ~500 KB of standing docs. It
+is not inert while it sits there: it binds on shipped cards (**284 fully-railed intervals of 241,729**;
+`Darkreach place-deflect` **10.3%** of intervals above 2 stick/s).
+
+**The blind spot has a shape, and the shape is the point.** Every A/B this project has ever run swept a
+**gain** or a **boolean**. Not one swept the nonlinearity. That is why `O11` could be flown at
+407–505 m/s and come back clean and still not settle anything: at R43's 0.012 stick amplitude the onset
+formula gives **~80 Hz**, so **R43 was structurally incapable of exciting the term** — it answered
+"does it self-sustain from nothing", when the live question was "does it sustain once excited".
+
+**Status.** OPEN. Ledger **L17**. The cheap first move is not a code change but an **amplitude** card —
+a stimulus large enough to put the stick where the onset actually is — before anyone touches the 6.0.
+
+---
+
+## W11 — `BelowAlignSuppress` is a shipped, default-ON control law change justified by ONE experiment and validated by a DIFFERENT one that could not see the effect
+
+**Claim.** The knob's own `Cfg.cs:382` description quotes ledger `S5` verbatim — *"6.9 degrees of
+standing error with the wings rolling ±43 degrees at 0.3 Hz, where the mirror step in the UPPER
+hemisphere converges to 0.03 degrees"*. That is the justification, and it is the **only** measurement
+of the stimulus. `S5` rests on **15 `elDn` segments**, **13 of them one airframe** (`Multirole1`), from
+cards last flown at **R19 / mod `0.77.0`** — and `BelowAlignSuppress` shipped in **v0.85**, eight
+releases later. **The knob has never been measured against the stimulus that produced it.**
+
+**What was measured instead.** The `e1-below-*` A/Bs flew it on **6° obliques**, where belowness does
+nothing detectable. Side by side, `oblique-below-c` vs `oblique-6-c`: `rollYawOpposedPct` 19.8 / 19.5,
+`bothActivePct` 36.2 / 36.4, `stickFlipRateR` 0.174 / 0.177, `blendRailPct` 0.0 on both. Ledger `A2`
+records the resulting three nulls, two of them *structurally* incapable of being anything else.
+
+**Why this is a weakness and not just a gap.** It is the `X12` shape recurring on a different knob —
+there, a whole batch was commissioned on *"`arm=0` disables the suppression"* when it selected the
+v0.67 **form**; here, a default-ON law change is defended by an A/B run against a stimulus that cannot
+exercise it. **A null from a stimulus that cannot produce the effect is not evidence the fix works.**
+Note the direction carefully: nothing here says the knob is wrong. It says **nobody knows**, and the
+docs read as though somebody does.
+
+**Status.** OPEN. Ledger `S5` (now PLAUSIBLE), `A2`, `O6`. Closed by `oblique-28` — 10 airframes,
+horizon-centred so `obDL28`/`obUR28` are an exact within-card mirror. **Free pre-check nobody has run:**
+`stol-steps` already carries a modern mirrored `elDn40`/`elUp40` pair (75 + 75 segments, R39–R41).
 
 ---
 
@@ -753,6 +823,57 @@ reconstructed `beta` (from `outY`, via H7's closed form), never `off` alone. The
 it is the twin of R24's: **a disturbance term's gain is not its effect when the disturbance is itself
 a closed-loop equilibrium — scaling the gain tells you nothing until you know what happens to the
 state it multiplies.**
+
+---
+
+### R27. "The `iGate` sawtooth at every segment boundary is evidence of filter carry-over"
+**Proposed and withdrawn on the same day (2026-08-05), before it could be built on.** `iGate` was read
+as collapsing to 0.29–0.32 at each leg start and climbing to 0.97 by each leg end — a sawtooth locked
+to the boundary, which looks exactly like a state that survives the boundary.
+
+**It is a tautology of the card.** `iGate = Max(fineBlend, _stallFilt)`, and `fineBlend` tracks the
+**current** error magnitude — so it collapses at *any* boundary where a step is commanded, whether or
+not anything carries over. A card whose legs each begin with a step will produce this sawtooth from a
+controller with no memory at all. The measured values are also wrong as reported: **0.97 → 0.05–0.11**,
+not 0.29–0.32.
+
+**Carry-over is still real and still the live mechanism candidate** — `ChaseController.cs:783-787`
+resets the filters on engage only, and `pEff` takes one filter step rather than a reset at every R44
+boundary (ledger `L18`). What is refuted is *this signal as evidence for it*. The phenomenon is
+established separately and by a crossed design (`D14`); do not re-derive it from `iGate`.
+
+**The lesson is `S4`'s, arrived at from a third direction:** a quantity that moves when the error moves
+will always look correlated with events that happen when the error moves. Ask what the *null* card
+would produce before reading a pattern as a mechanism.
+
+---
+
+### R26. "Cap the gain in the fine cone at high speed — that is where the wobble is"
+**Built, replayed, and rejected on evidence in July 2026; recovered here 2026-08-05 from
+`WOBBLE-FINDINGS.md` before that file was deleted, because it is the single most obvious thing anyone
+looking at a high-speed wobble will propose next, and it is the one thing already known not to work.**
+
+A static fine-cone / high-V gain cap was implemented first, ahead of the fix that shipped. Open-loop
+replay over the 8-recording v0.57 round: it cut the pathological file **×3.9** — and **squashed the
+healthy high-speed standing turns ×2.1–5.2**. Those turns are not a side effect to be tuned away; a
+jet legitimately holds 30–60° of bank off a 1–2° standing error at that speed, and a threshold that
+cannot tell that from a limit cycle will always take both. **The discriminator was never speed and was
+never the cone — it was geometry**: the pathological captures were near-vertical (reconstructed
+`cos(pitch)` ≈ 0.132 and 0.014, i.e. nose 82° and 89° up) where horizontal-plane `azErr` inflates by
+`1/cos(pitch)`, and every clean file sat at 0.99–1.00. The shipped fix multiplies the bank-path errors
+by `hdgConf = cos(pitch)` — exact, threshold-free, ×7–12 cut on the two pathological files and ≤0.5°
+change on every clean one (`ChaseController.cs:1029/1081/1476`).
+
+**The general lesson, and the reason this is in this section rather than the changelog:** *a threshold
+that fires on the same signal the healthy case produces is not a fix, it is a tax on the healthy case.*
+The sham-gate discipline in ledger `S4` is the same lesson arrived at from the other direction.
+
+**The one rung of that ladder never climbed** is motion-profile shaping —
+`ω_des = min(ω_max, √(2·err·decel))`, a no-overshoot profile instead of a damped proportional command.
+It was parked in July as the third fallback behind the lead term and the `hrTau` raise, both of which
+shipped and held, so it has never been needed or tested. Recorded so it is a known-untried option
+rather than a rediscovery; it is **not** backlog, and `L17` (the slew limiter) should be understood
+before anyone reaches for it.
 
 ---
 

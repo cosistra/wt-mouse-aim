@@ -20,7 +20,7 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "1.0.4";
+        public const string PluginVersion = "1.0.5";
 
         internal static ManualLogSource Log;
 
@@ -544,7 +544,11 @@ namespace NuclearOptionMouseAim
             // promise a spread the spawn does not use.
             // v1.0.2: the spread is card-first now, so its marker is RESOLVED rather than hardcoded —
             // "[from F1]" on a value the card declared is the same lie this panel exists to prevent.
-            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadM(p));
+            // v1.0.4: `DeckSpreadFlown`, not `DeckSpreadM` — a card declaring `startAlt` collapses the
+            // deck (ledger I12), and this line has to show the ring the launch will build, not the one
+            // the knob asked for. Same reason it goes through DeckText at all: it cannot promise a
+            // spread the spawn does not use. Decks off ⇒ empty string ⇒ this line says nothing at all.
+            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadFlown(p));
             if (deck.Length > 0)
                 deck = "   " + deck + " " + Src(ScenarioPlayer.DeclaredText(p.Config, "Drone/DroneAltDeckM") != null);
             BoardLine(2, BoardDim,

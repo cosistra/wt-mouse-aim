@@ -8,7 +8,7 @@ Its durable half — the cross-fight measurement — was folded into flightscore
 `xfightPct` (off the shared `flightscore.opposed()`), which is what a routine batch should use;
 this tool survives so §5a's numbers can be regenerated from the same captures.
 
-Tests INSTRUCTOR-LOOP.md §5: "Apply allocates the pointing error across roll/yaw/pitch
+Tests the hypothesis at `LAW-LEDGER.md` **X9**: "Apply allocates the pointing error across roll/yaw/pitch
 through several independent gates and blends, each deciding 'am I active' per tick with no
 hysteresis; independent thresholds chatter at their boundaries and the chatter presents as
 commands fighting each other."
@@ -58,8 +58,13 @@ WIN_S = 0.20        # +/- half-width of the "near a crossing" window, seconds. N
                     # classifier itself uses a +/-0.20 s slope window, so a REGRESSING tick is
                     # already smeared by that much; the effective resolution is ~+/-0.4 s and
                     # this test cannot localize a crossing effect tighter than that.
-CONE_DEG = 0.2      # flightscore --cone. At 1.0 the micro*/fine segments are 100% ON_TARGET,
-                    # i.e. the sub-degree region this hypothesis is about is unscoreable.
+CONE_DEG = 0.2      # flightscore --cone, PINNED on purpose. At the old fixed 1.0 the micro*/fine
+                    # segments read 100% ON_TARGET, i.e. the sub-degree region this hypothesis is
+                    # about was unscoreable -- this tool has always overridden it, and flightscore's
+                    # default now derives the cone per segment instead (see its ON_TARGET_DEG block
+                    # and `LAW-CHARACTERIZATION.md` §6). Kept PINNED rather than switched to auto so
+                    # §5a's published numbers stay regenerable from the same captures; auto would
+                    # give each segment a different cone and silently move them.
 RAIL_EPS = 1e-3     # a blend within this of 0 or 1 IS at the rail
 PERM = 399          # circular shifts for the null (p resolution 1/400)
 

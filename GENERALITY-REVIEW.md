@@ -465,6 +465,23 @@ change is worth making and cannot regress anything, but it moves **0.45%** of co
 at the boundary. Do not scope an experiment as "unlock a dormant branch" — it would be measuring a
 boundary case, and the batch would read as a null.
 
+**READ THE PARAGRAPH ABOVE WITH THIS ONE, 2026-08-05 — it is correct and it is misleading, together.**
+The scope correction is right on its own terms and nothing in it is withdrawn. What it leaves the
+reader with is *"`_pitchEff` is basically fine except at a boundary"*, and that is false. The `>=`
+is a **boundary** defect; the **body** of the term is a different and much larger one:
+`pitchEffInst`'s else-branch, `Max(_pitchEff, PEffRevThresh)`, returns *exactly* `_pitchEff` for any
+value at or above the threshold, so the filter update degenerates to `+= k·0` — **the estimator is a
+latch, not a floor, and it is frozen for ~95% of every flight** at a value sampled from a *lag*
+transient rather than from authority. Measured: `pEff < 0.95` on **97.4%** of 48,085 rows over 10
+airframes, latched at **0.465–0.844**, i.e. fixed-wing pitch demand multiplied by 0.47–0.80 for whole
+flights. Ledger **L16**; `LAW-WEAKNESS-MAP` **W8** carries the same correction from the other side.
+
+**This is a documented failure mode of this file, not an accident.** Finding 14 measured one small
+true thing about `_pitchEff` and correctly said "small"; `W8` measured a different small true thing
+and correctly said "small"; **between them they closed the file on a term cutting a quarter to a half
+of pitch demand.** Two narrow correct nulls compose into a wrong belief, and no per-line bucket rule
+catches it. When a finding here concludes "small", say **what the null does not cover.**
+
 ### 15. HIGH — `_yawWeak` measures "the error did not close", not "the rudder is weak" — OPEN (STRUCTURAL + MEASURED)
 **Answer to finding 13's `_yawWeak` question: it does not clear, and the reason is the v0.83 shape.**
 The premise (a heading error that will not close means the rudder failed) is true only against a
@@ -572,6 +589,16 @@ at 0.30.
 **The clearest one-law violation in the corpus: a hardcoded constant, not a probed quantity, decides
 whether an airframe recovers.** Evidence: the R32 batch, `LAW-LEDGER.md` K1–K5
 §6 (63 captures, 37 868 rows, `Darkreach` on `darkreach-05`, 18 departures, 3 dead pilots).
+
+**`schedFloor` is not the only constant on that line — `utilStart = 0.6` is the other half, and it is
+the ONE-LAW half (added 2026-08-05).** The schedule starts biting at `aoaUtil = 0.6` of a ceiling that
+is itself `aoaCeil = lim − min(4°, 0.15·lim)`, and that pair of absolute-degree clamps does not scale:
+on a `lim = 10` trainer the de-rating starts at **~5.1° of AoA**, on a `lim = 27` fighter at **~13.8°**.
+So two airframes flying the same fraction of their own envelope meet the de-rater at different places
+— which is the same defect `N1` measured from the outside as a **0.529 → 0.739** switch-on spread.
+**Do not commission a batch for this.** It is collinear with `schedFloor` by construction and the
+`#45` A/B already has to fly the roster; carry `utilStart`, `aoaCeil` and each lane's `lim` as
+**covariates** in that batch and it costs nothing extra. Ledger `L3`, `N1`.
 
 **The constant.** `ChaseController.cs:1255`:
 

@@ -3,6 +3,116 @@
 All notable changes to WT Mouse Aim. Versions are the `PluginVersion` in `WTMouseAimPlugin.cs`
 (the single source of truth); each release is published via `release.ps1`.
 
+## 1.0.5 — two confirmed bugs shipped, four hypotheses armed, and the wobble finally gets a card
+
+> **Control-law change.** Two default-behaviour fixes (both provable bugs), four A/B levers whose
+> defaults reproduce v1.0.4 bit-for-bit, one CSV column **renamed** (8: `targetBank` →
+> `targetBankDead`; count stays 72), and six recorder-derived metrics withdrawn as unresolvable.
+> Nine new cards. Nothing speculative changes what the aircraft feels like unless a card asks.
+
+**The framing this release exists to fix.** `LAW-LEDGER.md` `G9` reports no fixed-wing regression
+across eleven releases, v0.96.0 → v1.0.3. Read honestly that also says **no fixed-wing improvement**:
+every batch since R41 was a diagnostic or a self-audit, and the maintainer's two actual complaints —
+it *wobbles*, and it feels *less responsive and accurate than it should be* — had never been put on
+the rig. This release ships the two bugs we can prove, arms the four hypotheses we cannot yet, and
+writes the first cards in the grid aimed at the complaints rather than at a corpus artefact.
+
+### Shipped as default behaviour — both provable bugs
+
+- **O13 — the tiltwing blend was inverted.** `tiltFrac` read the game's *already-blended*
+  `Lerp(0.18, 1, tiltAtSpeed)` output raw, so `heliBlend` measured **1.0000 sd 0.0000** wing-borne
+  (9,602/9,602 rows) and **0.1820 ± 0.0002** at hover — backwards. `tBankE *= (1 − heliBlend)` was
+  therefore exactly **0**: bank-to-turn was deleted in forward flight and fully active in the hover.
+  Now `Mathf.InverseLerp(1f, 0.18f, ·)`, which inverts precisely that range — the endpoints are the
+  game's own constants, not tuned values. Pre-registered prediction, recorded **before** the fix:
+  **0.000 / 0.998**; the change computes 0.0000 / 0.9976.
+- **The placement kill (`I12`).** R44 established the predictor as a non-zero **anchor** placement on
+  a variable-geometry airframe — `dz = 0` anchors **0/32** fatal, `dz = ±1500` **31/31**, Fisher
+  p = 4.1e−5 — not speed (`X33` refuted; 440 m/s gave 10/10 clean with the deck at zero). Spawn
+  *already* used the card's `startAlt`, so `DroneAltDeckM` was the sole manufacturer of the
+  displacement. New `TestDrone.DeckSpreadFlown` collapses the deck to 0 whenever a card declares a
+  `startAlt`, feeding the deck count, `RingRadius`, `DeckOf`, `deckOff` and `DeckText` from one
+  resolver so it cannot be half-applied. The ring geometry gets *more* honest: a two-deck fleet was
+  being charged for a 3-D separation the placement then deleted, leaving cross-deck neighbours 5.20 km
+  apart against a 6 km `LaneM`. `MoveAssembly` untouched.
+- **#20 hygiene** — `>=` → `>` on the `PEffRevThresh` floor branch (`X5`). Moves 0.45% of corpus
+  rows, all at the boundary; cannot regress anything.
+
+### Armed, defaults unchanged — four A/B levers
+
+All are `ConfigEntry<bool>` in `Control`, default `false` = v1.0.4 bit-for-bit, swept via a card's
+`armToggle`, and printed into the capture's `# config` header so a capture states its own arm.
+
+- **`PitchEffRelax`** — *the largest live defect found this cycle.* `_pitchEff`'s else-branch is a
+  hard **latch**, not a floor: `Max(_pitchEff, PEffRevThresh)` returns *exactly* `_pitchEff` above the
+  threshold, so the filter update becomes `+= k·0`. The measuring gate (`|cmd| > 0.05`) is open on
+  only **5.3%** of rows, so the estimator freezes a **lag** sample — `ach/cmd` starts near 0 on any
+  step and climbs to 1 on a *healthy* airframe — and holds it for ~95% of the flight. `pEff < 0.95`
+  on **97.4%** of 48,085 rows across 10 airframes; one leg freezes at **0.606 while the plant
+  delivers 1.048 of commanded rate**. Downstream `pErrTerm *= _pitchEff`, so pitch demand runs at
+  **0.47–0.80 permanently**. Arm B relaxes toward 1 while the gate is closed — *no command, no
+  evidence of weakness*. Handing the filter `1f` selects the existing release branch, so the decay is
+  the filter's own tau: no new constant, no new state, measuring branch byte-identical. Verified not
+  to restore authority in a departure (a departure is a large-command regime, so the gate is open and
+  the 0.10 s attack tau is live: a reversed plant drops `_pitchEff` 1.0 → 0.026 in 0.4 s on **both**
+  arms).
+- **`AoaSchedFloorRelative`** (#45) — `schedFloor` as `Clamp01(aoaFade / aoaCeil)` instead of an
+  absolute 0.3. Direction deliberately left open: the relative form gives a lim-10 `Darkreach` 0.47
+  against a lim-27 `Fighter1`'s 0.26, so arm B gives the *departing* airframe more residual demand.
+  Consistent with `K3`, against R32's reading — both outcomes are pre-registered as informative.
+- **`LeadFloorContinuous`** (#14) — the `predFloor` clamp corner as a smooth asymptote. Bounds, sign
+  and the v0.52 relay guarantee verified numerically across a grid; `f'(0) = −0.9999993`, so small
+  leads are unchanged to first order.
+- **#21 needed no knob** — the rail point already *is* `Control/EvolvedAlignHoldDeg`
+  (`lateralHold = clamp01((|azErr| − 2.5)/5.0)`, i.e. `S2`'s measured 7.5° rail). Note
+  `ScenarioPlayer.ResolveArm` casts to `ConfigEntry<bool>`, so **only bools are ABBA-sweepable**; a
+  float lever is varied by pinning it in two cards flown as one selection.
+
+### Instruments — six metrics withdrawn, one built, one column renamed
+
+- **`outR` was measuring the quantiser.** At `{0.000}`, its settled-window sd is **1.18 print steps**
+  with a median of **6 distinct codes**, and 83.9% of windows span under 3 steps — yet it published a
+  confident `wobbleFreqHz` on **15.1%** of segments. `wobble{Episodes,FreqHz,Coherence}Out{R,P}` stop
+  being written; `outR`'s are re-expressed on **`rollRate`** (4.88 steps, 21 codes) and `outP` is
+  **deleted with no replacement** — its rate twin `pitchRate` measures worse. The guard is
+  root-cause, not a hand-picked list: `WOBBLE_MIN_QUANTA = 3` withholds any frequency/coherence
+  metric whose settled window spans under 3 print steps of that column.
+- **#33, the retreat integral, shipped** — `retreatDeg`, `retreatEpisodes`, `monotonicityIndex`,
+  derived from `off` alone with no CSV change. The entry transient is excluded by dropping the
+  leading run of *shrinking* rises (a transient is by definition a decay), reusing `OFF_FLOOR_DEG`
+  rather than a tuned constant. Validated on the `S5` pair: `elDn` **3.09 ± 3.12°** against `elUp`
+  **exactly 0.000 on 15 of 15**; independently on `rotor-bistab`, where `monotonicityIndex` reads
+  −0.061 vs +0.411 while `settleTime95` reads exactly backwards.
+- **CSV column 8 renamed `targetBank` → `targetBankDead`.** No live law has written it since v0.60,
+  yet it was still the `over-roll` anomaly's reference and the `[anomaly:trail]` dump's `tgtBank`
+  field. On `place-390`, **17.6%** of rows read < 0.05° there while the live `tBankE` reads > 2°.
+  `DetectAnomalies` no longer takes the parameter at all, so it cannot be handed the wrong bank.
+  Renamed rather than deleted: dropping it would shift every column index in 3,098 archived captures,
+  whereas a rename makes stale offline code fail loudly.
+- **The recorder is a 16 Hz decimation of a ~60 Hz loop with no anti-alias filter**, and the gap is
+  not uniform (a 3-sample cycle). Because the autocorrelation lag is an integer, reportable
+  frequencies land on a comb of `1/(k·0.0625)` — the corpus's 2,706 published values pile onto
+  2.29 / 2.67 / 3.20 Hz **with empty bins between**. The default stays 20 Hz (`FlushRows = 50` counts
+  *rows*, so a global raise would triple main-thread flushes and re-create the freeze `AutoFlush =
+  false` exists to prevent); the two `slew-*` cards pin `Recorder/RecordRateHz = 60`, and the F1
+  description now carries the trap.
+
+### Cards — nine new, and the first ones aimed at the complaints
+
+`e6-pitch-eff` (the `PitchEffRelax` A/B), `ob-dwell-2` (the hold-band instrument — a constant-rate
+oblique drift that *parks* `|azErr|` at ~2.25° instead of stepping through it), `oblique-28` (the
+`S5` below-nose limit cycle against an exact within-card mirror), `slew-r06`/`slew-r20`
+(`OutputSlew` 6.0 vs 20.0), `sweep-r25`/`sweep-r45`/`sweep-r45c` (the responsiveness ladder), and
+`place-anchor` (the placement regression card). 56.8 min of flyable batch.
+
+### Docs — three standalone files deleted after their live content was moved
+
+`WOBBLE-FINDINGS.md`, `INSTRUCTOR-LOOP.md` and their references. `X35` records why: the wobble doc's
+central artifact was the dead `targetBank` column, its episode counts came from the detector that was
+counting entry transients (318 → 5), and its authority readings were `authorityUsedFrac`-class —
+all three corpus-wide invalidations landing on one document. Its conclusion fails independently too:
+*"unstable at every speed 70–390 m/s"* against R43 flying **407–505 m/s clean 12/12**.
+
 ## 1.0.4 — the run board counts the whole batch, not just the fleet in the sky
 
 > Harness only. **No control-law change, no recorder columns added, moved or removed.** Board and

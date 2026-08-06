@@ -67,19 +67,25 @@ CFG = REPO / "Cfg.cs"
 # that says "this knob is meant to be swept". Nothing links it to the list below except this scan.
 CFG_LEVER = re.compile(r"^\s*public static ConfigEntry<bool>\s+(\w+)\s*;.*\(A/B lever\)", re.M)
 
-# The four bools Cfg.cs marks "(A/B lever)". Every one must be read through Arm() to be sweepable;
+# The bools Cfg.cs marks "(A/B lever)". Every one must be read through Arm() to be sweepable;
 # a lever read as Cfg.X.Value still compiles and still flies, it is just invisible to the schedule.
 # v0.99.1: RelativeTurnLead was DELETED (knob and branch) after R39-D spent its A/B — the lead is now
 # unconditionally the relative rate, so there is no arm left to sweep and no site left to read.
+# ONLY BOOLS BELONG HERE: ScenarioPlayer.ResolveArm casts to ConfigEntry<bool>, so a float knob
+# cannot be swept by armToggle at all — it has to be pinned in a card's config[] and flown as two
+# cards in one selection.
 LEVERS = [
     "MarkerRateFeedForward",
     "IntegralStallGate",
     "BelowAlignSuppress",
     "AlignRateLead",
+    "AoaSchedFloorRelative",     # backlog #45 — schedule floor relative to the probed envelope
+    "LeadFloorContinuous",       # backlog #14 — smooth lead floor instead of the hard clamp corner
+    "PitchEffRelax",             # #20's else-branch: Max(_pitchEff, thresh) is a LATCH, not a floor
 ]
 # MarkerRateFeedForward is read at BOTH lockstep sites (the shared omegaDes and
-# ApplyEvolvedLegacy's own omega), so four levers = five call sites.
-LEVER_SITES = 5
+# ApplyEvolvedLegacy's own omega), so seven levers = eight call sites.
+LEVER_SITES = 8
 
 PROJ = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>

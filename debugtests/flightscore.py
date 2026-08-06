@@ -40,11 +40,36 @@ SLOPE_WIN_S = 0.20   # least-squares window for d(off)/dt, in SECONDS not sample
                      # recorder rate is Cfg.RecordRateHz (15 Hz in the R21 corpus, not the
                      # fixed step), so a fixed sample count would mean a different filter
                      # bandwidth per capture and runs would stop being comparable.
-ON_TARGET_DEG = 1.0  # inside this cone there is nothing left to score. --cone matters more
-                     # than it looks: the card's micro1..10 / fine segments are ENTIRELY
-                     # sub-degree, so at 1.0 they read 100% ON_TARGET and A is undefined for
-                     # exactly the fine-aim "it gets confused" complaint. Drop it to ~0.2 to
-                     # score those; the reversal-rate column sees them at any cone.
+# --- THE CONE, AND WHY IT IS NO LONGER A CONSTANT (v1.0.5) ---------------------------------------
+# "Inside this cone there is nothing left to score." A FIXED 1.0 deg made that sentence false for the
+# only regime the maintainer has ever complained about: the card's micro1..10 / fine segments are
+# ENTIRELY sub-degree, so at 1.0 they read 100% ON_TARGET, A is None, and the tool reports nothing
+# wrong because it looked at nothing. Re-run the same captures at 0.2 and 11-29% of that time is
+# REGRESSING. Thirty-four batches and "no fixed-wing regression across eleven releases" were scored
+# with the default blind to the sub-degree band (`LAW-CHARACTERIZATION.md` §6).
+#
+# The old comment here TOLD you to drop it to ~0.2. A constant that has to be overridden to be
+# correct is a wrong default with documentation attached, which is the same failure the ONE-LAW rule
+# names in the control law: a number that suits one segment size deciding an outcome for all of them.
+#
+# So the cone now FOLLOWS THE CARD'S OWN STEP, per segment: CONE_FRAC of that segment's own peak
+# `off`, floored at the `off` column's measurement quantum and capped at the historical 1.0 so no
+# segment is ever scored more coarsely than before. A 6 deg oblique leg gets 0.6, a 0.35 deg micro
+# step gets the floor and is finally scored, a 30 deg step still gets 1.0. Same idiom as
+# scorecard.BAND_FRAC, and `--cone X` still pins a constant for a like-for-like re-score.
+ON_TARGET_DEG = 1.0      # the CAP, and the historical default. Also what --cone still accepts.
+CONE_FRAC = 0.10         # of the segment's own step, mirroring scorecard.BAND_FRAC
+# The floor is the `off` column's MEASUREMENT quantum, not its print quantum: `off` is written
+# "{0.00}" from acos() in float32, so the smallest non-zero angle it can carry is 0.0198 deg and the
+# first resolvable rung is twice that. Below here "the nose is off target" is not a statement the
+# recorder can make. Same number and same derivation as scorecard.OFF_FLOOR_DEG -- duplicated rather
+# than imported because scorecard imports THIS module and the dependency must not close a cycle;
+# scorecard's copy carries the full derivation.
+CONE_FLOOR_DEG = 0.0396
+# ...and a segment that still scores this fraction of its time ON_TARGET was not measured, it was
+# skipped. Loud, numeric and per segment: "no scoreable ticks" printed as a quiet dash is exactly how
+# a blind run reads as a clean one.
+BLIND_PCT = 90.0
 AF_LIMIT_FRAC = 0.85 # >= this fraction of omega_avail = the airframe, not the law
 E_CLIP = 2.0
 STICK_DEADBAND = 0.02  # |out| below this is noise around zero, not a commanded reversal
@@ -254,8 +279,21 @@ def groups(run):
     return out
 
 
-def score_ticks(run, p, tau, cone=ON_TARGET_DEG):
-    """One record per scoreable tick: class, efficiency e, time weight, control activity."""
+def seg_cone(offs, cone=None):
+    """The on-target cone for ONE segment. `cone` not None pins it (that is what --cone does).
+
+    Auto: CONE_FRAC of this segment's own step, clamped to [CONE_FLOOR_DEG, ON_TARGET_DEG]. The step
+    is the segment's peak `off` -- on a step leg that is the demand itself, and on a fine-track leg
+    with no step it is the worst excursion, which is the right scale there too."""
+    if cone is not None:
+        return cone
+    return max(CONE_FLOOR_DEG, min(ON_TARGET_DEG, CONE_FRAC * max(offs))) if offs else ON_TARGET_DEG
+
+
+def score_ticks(run, p, tau, cone=None):
+    """One record per scoreable tick: class, efficiency e, time weight, control activity.
+
+    cone=None (the default) derives it PER SEGMENT -- see seg_cone() and the ON_TARGET_DEG block."""
     t, off, spd = run["t"], run["off"], run["spd"]
     rho = run.get("airDensity") or [RHO0] * len(t)
     vel = list(zip(run["velX"], run["velY"], run["velZ"]))
@@ -263,6 +301,7 @@ def score_ticks(run, p, tau, cone=ON_TARGET_DEG):
     for tag, idx in groups(run):
         if len(idx) < 5:
             continue
+        seg_c = seg_cone([off[i] for i in idx], cone)
         dts = [t[idx[i + 1]] - t[idx[i]] for i in range(len(idx) - 1)]
         dt = st.median(dts) or 0.02
         half = max(1, int(round(SLOPE_WIN_S / dt / 2.0)))
@@ -277,7 +316,7 @@ def score_ticks(run, p, tau, cone=ON_TARGET_DEG):
             oa, _, _ = omega_avail(spd[i], rho[i], p)
             act = sum(abs(run[a][i] - run[a][i - 1]) for a in AXES) / max(dt, 1e-6)
 
-            if off[i] <= cone:
+            if off[i] <= seg_c:
                 cls, e = "ON_TARGET", 0.0
             elif turn_actual >= AF_LIMIT_FRAC * oa:
                 # There was no better way. Not a defect; law work on these ticks is wasted.
@@ -288,7 +327,8 @@ def score_ticks(run, p, tau, cone=ON_TARGET_DEG):
                 cls = ("REGRESSING" if e < -0.05 else "STALLED" if e < 0.15
                        else "WORKING" if e < 0.7 else "NEAR_OPTIMAL")
             ticks.append({"i": i, "tag": tag, "cls": cls, "e": e, "w": w, "act": act,
-                          "oa": oa, "turn": turn_actual, "off": off[i], "dt": dt})
+                          "oa": oa, "turn": turn_actual, "off": off[i], "dt": dt,
+                          "cone": seg_c})
     return ticks
 
 
@@ -467,20 +507,29 @@ def summarize(run, ticks):
     # tuning this metric exists to avoid. Reversal rate + jerk stay as raw diagnostics.
     S = 1.0 / (1.0 + sm["churn"]) if sm.get("churn") is not None else None
     return {"dur": tw, "n": len(ticks), "A": A, "S": S, "coverage": cov,
+            # the cone this segment was actually scored at, and whether that cone ate it. BLIND is
+            # the honest reading of "A = None because everything was inside the cone": not a clean
+            # segment, an unscored one.
+            "cone_deg": st.median([k["cone"] for k in ticks]),
+            "blind": cov["ON_TARGET"] >= BLIND_PCT,
             "e_med": st.median([k["e"] for k in scored]) if scored else None,
             "off_med": st.median([k["off"] for k in ticks]),
             "omega_avail_med": st.median([k["oa"] for k in ticks]),
             "turn_med": st.median([k["turn"] for k in ticks]), **sm}
 
 
-def score_file(path, tau, cone=ON_TARGET_DEG, force_levers=False):
+def score_file(path, tau, cone=None, force_levers=False):
     run = load_run(path)
     p = load_airframe(path)
     ticks = score_ticks(run, p, tau, cone)
     segs = {}
     for tag in dict.fromkeys(k["tag"] for k in ticks):
         segs[tag] = summarize(run, [k for k in ticks if k["tag"] == tag])
-    res = {"file": os.path.basename(path), "airframe": p, "cone_deg": cone,
+    # cone_deg is "auto" or the pinned number; the per-SEGMENT cone actually used is on each segment,
+    # because under auto they differ by a factor of 25 within one capture.
+    res = {"file": os.path.basename(path), "airframe": p,
+           "cone_deg": "auto" if cone is None else cone,
+           "blind_segments": sorted(t for t, s in segs.items() if s and s["blind"]),
            "segments": segs, "all": summarize(run, ticks)}
     # The lever block appears ONLY when the capture actually carries a lever column (or the
     # user forces it). That is what keeps every pre-v0.83 capture's text AND json output
@@ -498,6 +547,9 @@ def fmt(s, name):
     if not s:
         return f"  {name:<14} (no scoreable ticks)"
     c = s["coverage"]
+    # A BLIND SEGMENT SAYS SO ON ITS OWN LINE. It used to print A=  -  with on-tgt 100% and read as
+    # a clean pass; that is how eleven releases were cleared in a band nothing was scoring.
+    blind = f"  << BLIND: {c['ON_TARGET']:.0f}% inside the {s['cone_deg']:.3f} deg cone" if s["blind"] else ""
     a = "  -  " if s["A"] is None else f"{s['A']:.3f}"
     sv = "  -  " if s["S"] is None else f"{s['S']:.3f}"
     em = "  -  " if s["e_med"] is None else f"{s['e_med']:+.2f}"
@@ -508,7 +560,7 @@ def fmt(s, name):
             f"rev{rev:5.1f}/s jrk{jrk:5.2f}  "
             f"| on-tgt {c['ON_TARGET']:4.0f}%  af-lim {c['AIRFRAME_LIMITED']:4.0f}%  "
             f"reg {c['REGRESSING']:4.0f}%  stall {c['STALLED']:4.0f}%  "
-            f"work {c['WORKING']:4.0f}%  opt {c['NEAR_OPTIMAL']:4.0f}%")
+            f"work {c['WORKING']:4.0f}%  opt {c['NEAR_OPTIMAL']:4.0f}%" + blind)
 
 
 LEVER_FMT = (("iGate~", "iGate", "{:.3f}"), ("iStal%", "iStallPct", "{:.0f}"),
@@ -703,10 +755,25 @@ def selftest():
     assert s["coverage"]["AIRFRAME_LIMITED"] > 95, s["coverage"]
     assert s["A"] is None, s["A"]             # nothing was scored, so there is no A
 
-    # 5. Inside the cone nothing is scored.
+    # 5. THE CONE TRAP (v1.0.5). A segment parked 0.4 deg off with the nose not moving is the
+    # maintainer's actual complaint -- fine aim, sub-degree, going nowhere. At the historical FIXED
+    # 1.0 deg cone it reads 100% ON_TARGET, A is None, and the tool reports nothing wrong because it
+    # scored nothing. Both halves are asserted here: --cone 1.0 still reproduces the old reading
+    # exactly (so an archived number can be re-derived), and the AUTO default now scores it.
     run = synth(lambda t: 0.4, turn=0.0)
-    s = summarize(run, score_ticks(run, mr, tau))
-    assert s["coverage"]["ON_TARGET"] > 99, s["coverage"]
+    pinned = summarize(run, score_ticks(run, mr, tau, cone=1.0))
+    assert pinned["coverage"]["ON_TARGET"] > 99, pinned["coverage"]
+    assert pinned["A"] is None and pinned["blind"], pinned          # ...and it now SAYS it is blind
+    auto = summarize(run, score_ticks(run, mr, tau))
+    assert auto["coverage"]["ON_TARGET"] == 0.0, auto["coverage"]   # 0.4 deg step -> cone at the floor
+    assert auto["coverage"]["STALLED"] > 99, auto["coverage"]       # not moving, and not on target
+    assert auto["A"] is not None and not auto["blind"], auto
+    assert abs(auto["cone_deg"] - CONE_FRAC * 0.4) < 1e-9, auto["cone_deg"]   # 10% of ITS step
+    # ...and the cone still FOLLOWS the step: a 60 deg leg keeps the 1.0 cap, a 6 deg leg gets 0.6.
+    assert seg_cone([60.0, 30.0, 0.1]) == ON_TARGET_DEG
+    assert abs(seg_cone([6.0, 3.0, 0.1]) - 0.6) < 1e-9
+    assert seg_cone([0.2, 0.1]) == CONE_FLOOR_DEG
+    assert seg_cone([0.2, 0.1], cone=1.0) == 1.0        # --cone still pins it, unchanged
 
     # 6. Churn: same closure, more thrash while stalled -> lower S.
     thrash = lambda t, a: (0.4 if int(t * 15) % 2 else -0.4) if a == "outR" else 0.0
@@ -886,7 +953,7 @@ def selftest():
 def main(argv):
     if "--selftest" in argv:
         return selftest()
-    opt = {"--tau": TAU_FEEL, "--cone": ON_TARGET_DEG}
+    opt = {"--tau": TAU_FEEL, "--cone": None}    # cone None = auto, per segment (see ON_TARGET_DEG)
     for k in list(opt):
         if k in argv:
             i = argv.index(k)
@@ -903,7 +970,8 @@ def main(argv):
         return print(__doc__.strip())
     results = [score_file(p, tau, cone, force_levers) for p in paths]
     if as_json:
-        print(json.dumps({"tau_feel": tau, "cone_deg": cone, "runs": results}, indent=1, default=str))
+        print(json.dumps({"tau_feel": tau, "cone_deg": "auto" if cone is None else cone,
+                          "runs": results}, indent=1, default=str))
         return
     if verbose or len(paths) <= DETAIL_FILE_LIMIT:
         for r in results:
@@ -911,6 +979,20 @@ def main(argv):
     else:
         print(f"{len(paths)} file(s) scored; per-file report suppressed (over DETAIL_FILE_LIMIT="
               f"{DETAIL_FILE_LIMIT}) -- re-run with --verbose, or on a subset, to see it.")
+    # THE BLIND ROLL-UP, printed on BOTH paths and unconditionally. The suppressed path is the batch
+    # path, i.e. the one where a blind run would otherwise leave no trace at all in the output.
+    blind = {}
+    for r in results:
+        for tag in r["blind_segments"]:
+            blind[tag] = blind.get(tag, 0) + 1
+    if blind:
+        print(f"\n  BLIND: {sum(blind.values())} segment(s) across {len(results)} file(s) spent "
+              f">= {BLIND_PCT:.0f}% of their time inside the on-target cone, so their A is not a "
+              f"score -- it is an absence of one.")
+        for tag, n in sorted(blind.items(), key=lambda kv: -kv[1]):
+            print(f"         {tag:<14} {n} file(s)")
+        print("         Re-run those with a smaller --cone if this is the regime you are asking "
+              "about.")
     if len(results) > 1:
         spread(results)
 

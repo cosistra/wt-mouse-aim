@@ -137,7 +137,7 @@ namespace NuclearOptionMouseAim
                                                // (marker-independent), so the lead can never fight a mouse flick.
         // Low-pass time constant shared by BOTH world-azimuth rate signals — the nose rate above and the
         // v0.78 marker rate below. v0.54 raised it 0.18->0.35: the ±3 deg/s ripple at 1.3-1.5 Hz was feeding
-        // the brake-clamp rectifier (WOBBLE-FINDINGS UPDATE 4); ~2x more attenuation there costs ~0.2 s of
+        // the brake-clamp rectifier (LAW-LEDGER.md L7 / GENERALITY-REVIEW finding 12); ~2x more attenuation there costs ~0.2 s of
         // rollout timing. ONE const on purpose — the two signals meet inside the same omega, so a mismatched
         // tau would show up as a PHASE error between them, which no gain can tune out.
         // ponytail: fixed, not a Cfg knob; promote to Cfg if flight tuning ever wants it.
@@ -1125,11 +1125,25 @@ namespace NuclearOptionMouseAim
                         if (_twc != null)
                         {
                             var (lo, hi) = _twc.GetAngleLimits();
-                            // ponytail: assumes maxAngle = engines-up/hover => tiltFrac 1 in hover. Orientation
-                            // UNCONFIRMED — one tiltwing transition flight must verify; flip to (hi-angle)/(hi-lo)
-                            // if the blend reads backwards in the [seam]/HUD readout.
+                            // O13 FIX (ledger O13/X30/H3) — THE TILTWING BRANCH WAS MISSING THE `1 −` ITS
+                            // NOZZLE TWIN HAS, and the hover end is 0.18, not 0. `GetAngleLimits` is innocent:
+                            // it forwards rotatingJoints[0]'s (minAngle,maxAngle) (:70286-70289 -> :70205-70208),
+                            // and `RotatorInput.Animate` sets currentAngle = Lerp(minAngle,maxAngle,t) (:70237),
+                            // so (angle−lo)/(hi−lo) recovers `t` = the game's tilt COMMAND customAxis1 — where
+                            // 1.0 is WING-BORNE (:70344 customAxis1 = Lerp(0.18,1,tiltAtSpeed)) and the hover
+                            // end is PINNED AT 0.18 (:70336/:70347/:70352 AutoHover => 0.18). That is the
+                            // opposite convention to the `_sds` line below, which is already right because
+                            // swivelPosition = 1 − customAxis1 (:69365-69366, hover => 0 at :69348). So map
+                            // [1 -> 0, 0.18 -> 1]. 0.18 is TiltWingController's archetype-wide hover reference,
+                            // a property of the game's controller and not of an airframe — ONE-LAW intact.
+                            // MEASURED PRE-FIX (R44, QuadVTOL1, speedRamp ≡ 0 so heliBlend IS tiltFrac):
+                            // 1.0000 sd 0.0000 on 9,602/9,602 rows at 150 m/s — i.e. tBankE *= (1−heliBlend)
+                            // deleted the whole bank-to-turn channel in the MOST wing-borne condition this
+                            // airframe has — and 0.1820 ± 0.0002 at the 70 m/s hover pin. Both endpoints of the
+                            // game's Lerp are therefore confirmed from flight, not just from source.
+                            // InverseLerp already Clamp01s, so the old Clamp01 is redundant.
                             if (hi - lo > 1f)
-                                tiltFrac = Mathf.Clamp01((_twc.GetWingAngle() - lo) / (hi - lo));
+                                tiltFrac = Mathf.InverseLerp(1f, 0.18f, (_twc.GetWingAngle() - lo) / (hi - lo));
                         }
                         else tiltFrac = Mathf.Clamp01(_sds.GetNozzleAngle() / 90f);
                         _heliBlend = Mathf.Max(_heliBlend, tiltFrac);
@@ -1211,8 +1225,43 @@ namespace NuclearOptionMouseAim
                         // freeze) — the pre-C1 effFloor=0.3 gave this self-probe for free; C1 removed it,
                         // this restores it at the lower 0.15. Gated on a LIVE readable FBW (inside this
                         // block), so a probe miss still holds — no per-plane constant.
+                        // A/B LEVER (PitchEffRelax) — THE ELSE-BRANCH IS A LATCH, NOT A FLOOR, AND IT OWNS
+                        // ~95% OF EVERY FLIGHT. For any _pitchEff >= revThresh, Max(_pitchEff, revThresh) IS
+                        // _pitchEff, so pitchEffInst == _pitchEff, so pTau takes the release branch (it is
+                        // not `<`), so the filter update below is += k·0. Frozen — not decayed, not leaked.
+                        // The `|cmd| > 0.05` gate is open on only 5.3% of rows (R44 `oblique-6-c`, 48,085
+                        // rows, 10 airframes), so 94.7% of the time the estimator is holding a value it can
+                        // no longer revise, and nothing below the engage handler (`_pitchEff = 1f`) resets it.
+                        // WHAT GETS FROZEN IS A LAG SAMPLE, NOT AN AUTHORITY MEASUREMENT. `cmd` is the
+                        // setpoint THIS tick; `ach` trails it by the airframe's pitch time constant, so on a
+                        // step `ach/cmd` starts near 0 and climbs to 1 as the plant catches up — on a
+                        // perfectly HEALTHY airframe. The 0.10 s attack tau is faster than any airframe's
+                        // pitch response, so the filter grabs the BOTTOM of that transient and the gate then
+                        // closes on it. Measured: pEff < 0.95 on 97.4% of rows; latched by leg direction
+                        // (16 legs/cell) at Multirole1 0.465 DOWN / 0.740 UP, SmallFighter1 0.519 / 0.760,
+                        // Fighter1 0.661 / 0.786; and one leg freezes at 0.606 while |fbwPR|/|fbwTgtPR| reads
+                        // 1.048 — the plant is OVER-delivering at the instant the estimator calls it 60%
+                        // capable. Downstream that number multiplies the pitch P term (`pErrTerm *=`, below),
+                        // so fixed-wing pitch demand runs permanently at 0.47-0.80 off a frozen transient.
+                        // ON: with the gate CLOSED, relax toward 1. No command ⇒ no evidence of weakness ⇒
+                        // no grounds to keep de-rating — which is the ONE-LAW justification and also the
+                        // direction ledger K3 asks for (five terms only ever REDUCE authority, nothing
+                        // raises it; this un-freezes one of them). Handing the filter `1f` rather than
+                        // decaying by hand is deliberate: 1f > _pitchEff selects pEffRel, so the existing
+                        // filter IS the requested first-order decay toward 1 at the existing release tau —
+                        // no second tau, no new state. The MEASURING branch is untouched, so a weak or
+                        // reversed plant still de-rates the moment there is a command to measure against.
+                        // Strictly subsumes the v0.67 C1 latch-breaker: relaxing toward 1 passes through
+                        // revThresh on the way, so a latched-low estimate still re-establishes pitch.
+                        // FOR THE BATCH ANALYSIS: this also moves every scored leg's INITIAL CONDITION, not
+                        // just its steady state. Today each leg inherits the previous leg's latch (the `arm`
+                        // window latches ~0.749 before the first scored leg begins); under ON the mostly-
+                        // closed gate between legs relaxes it back toward 1, so a leg starts near 1 instead
+                        // of 0.749. Do not attribute the whole arm delta to steady-state de-rating.
+                        // Default OFF = the latch, bit-for-bit.
                         pitchEffInst = Mathf.Abs(cmd) > 0.05f ? Mathf.Clamp01(ach / cmd)
-                                                             : Mathf.Max(_pitchEff, PEffRevThresh);
+                                     : Arm(Cfg.PitchEffRelax) ? 1f
+                                                              : Mathf.Max(_pitchEff, PEffRevThresh);
                     }
                     catch { /* leave hold */ }
                 }
@@ -1276,7 +1325,33 @@ namespace NuclearOptionMouseAim
                     // ponytail: fixed utilStart/floor/taus, promote to Cfg if flight tuning demands it.
                     const float utilStart = 0.6f, schedFloor = 0.3f, atkTau = 0.05f, relTau = 1.0f;
                     float aoaUtil  = Mathf.Max(aoaPredUp, -aoaPredDn) / Mathf.Max(1f, aoaCeil);
-                    float schedRaw = Mathf.Lerp(1f, schedFloor, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
+                    // #45 A/B LEVER (AoaSchedFloorRelative). The schedule's INPUT is already relative — aoaUtil
+                    // normalises by this airframe's own probed ceiling — while its OUTPUT terminates at the same
+                    // ABSOLUTE 0.3 for a 27 deg ceiling on an 8.7 t Fighter1 and a 10 deg ceiling on a 105 t
+                    // Darkreach. A hardcoded constant deciding an outcome is the ONE-LAW smell, and R32 measured
+                    // qSched at exactly 0.300 on 100.0% of the 2,314 rows past |AoA| 20 deg against 0.0% on all
+                    // 31 clean replicates of the same card and airframe (ledger K3/L3).
+                    // WHY aoaFade/aoaCeil AND NOT omegaMax OR _fbwMaxPitchVel. The floor multiplies a
+                    // DIMENSIONLESS stick demand, so the relative form has to be dimensionless too. Both rate
+                    // probes are rad/s, and their only dimensionless combination — omegaMax/_fbwMaxPitchVel —
+                    // collapses to EXACTLY 1 in the raw-law regime (assist off below 1.2x corner q, where
+                    // omegaMax IS _fbwMaxPitchVel, :1173), i.e. it would switch the schedule off entirely on
+                    // the Darkreach, which is the one airframe #45 is about. aoaFade and aoaCeil are both
+                    // degrees off the SAME probe two lines up, so their ratio is dimensionless with no invented
+                    // reference: it is the share of the airframe's usable AoA range that its own fade band
+                    // occupies — how coarse this envelope is relative to itself. A coarse envelope has less
+                    // room to schedule over, so terminating it as low as a fine one asks the law to give up
+                    // authority it never had. Fighter1 (lim 27): fade 6 / ceil 23 = 0.26, i.e. ~today's 0.30 on
+                    // the class the constant was fitted on. Darkreach (lim 10): fade 4 / ceil 8.5 = 0.47.
+                    // DIRECTION IS DELIBERATE: K3 is that the law already has five terms that only ever REDUCE
+                    // authority and nothing that raises it, so a sixth de-authorizing term is explicitly not
+                    // the fix; this arm reallocates the floor ACROSS airframes rather than lowering it
+                    // globally. Clamp01 because a very low ceiling can push fade/ceil past 1.
+                    // Default OFF = byte-identical to the shipped absolute floor.
+                    float schedFloorEff = Arm(Cfg.AoaSchedFloorRelative)
+                        ? Mathf.Clamp01(aoaFade / Mathf.Max(1f, aoaCeil))
+                        : schedFloor;
+                    float schedRaw = Mathf.Lerp(1f, schedFloorEff, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
                     float schedTau = schedRaw < _alphaSchedFilt ? atkTau : relTau;
                     _alphaSchedFilt += (dt / (schedTau + dt)) * (schedRaw - _alphaSchedFilt);
                     qSched = Mathf.Min(qSched, _alphaSchedFilt);
@@ -1407,8 +1482,32 @@ namespace NuclearOptionMouseAim
                 // proportional gain at 0.28 of a configured 0.92) without being removed from the regime it
                 // was built for.
                 const float predFloor = 0.30f; // ponytail: fixed fraction, promote to Cfg if flight tuning wants it
-                azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
-                                        : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
+                // #14 A/B LEVER (LeadFloorContinuous) — the STEP, not the floor value, is what is under test.
+                // Written as a ratio r = (lead that SHRINKS the error) / |azErr|, the shipped clamp is
+                // f(r) = clamp(1 − r, predFloor, 1): slope −1 up to r = 1 − predFloor, then a CORNER where the
+                // slope jumps to 0 and the lead stops contributing at all. That corner is a discontinuity in
+                // the derivative sitting inside a loop whose whole failure mode is relaying on
+                // discontinuities, and R21 measured it binding on 100.0% of the settled window (ledger L7;
+                // GATE-CHATTER RR 6.5-36.1 near a crossing, beating every sham by 2-16x and surviving both
+                // skip controls). ON replaces it with the same map made C-infinity:
+                //     f(r) = predFloor + (1 − predFloor) · exp(−r / (1 − predFloor))
+                // f(0) = 1 and f'(0) = −1, so it is EXACT to first order in the lead — a small lead behaves
+                // identically — and it approaches predFloor asymptotically instead of arriving at it, so the
+                // floor is never a binding constraint and there is no corner to latch. The v0.52 relay
+                // argument is untouched by construction: f is in [predFloor, 1] for all r, so azErrPred keeps
+                // azErr's sign and |azErrPred| <= |azErr| exactly as the clamp guaranteed. r <= 0 (a lead that
+                // would GROW the error) still returns the raw error, same as the clamp's upper bound.
+                // Default OFF = byte-identical to the shipped step.
+                if (Arm(Cfg.LeadFloorContinuous))
+                {
+                    float shrink = azErr >= 0f ? leadDeg : -leadDeg;   // + = the lead moves the error toward 0
+                    azErrPred = azErr * (shrink <= 0f ? 1f
+                        : predFloor + (1f - predFloor)
+                          * Mathf.Exp(-shrink / Mathf.Max(1e-4f, Mathf.Abs(azErr) * (1f - predFloor))));
+                }
+                else
+                    azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
+                                            : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
                 // v0.58 heading deprojection (see hdgConf above). Pure multiplicative, applied AFTER the
                 // brake/floor clamp so the clamp bounds scale coherently (h·clamp(x,a,b) = clamp(h·x,h·a,h·b));
                 // azErr and _headingRateFilt inflate by the same 1/cos(pitch), so scaling the result
@@ -1734,7 +1833,7 @@ namespace NuclearOptionMouseAim
                 // per completed turn — the "how did the planned path actually work out" record.
                 if (Cfg.AnomalyLogging.Value)
                 {
-                    DetectAnomalies(aircraft, off, bank, targetBank, bigTurn, yawRate, rollRate, aoaNow, azErr, dt);
+                    DetectAnomalies(aircraft, off, bank, bigTurn, yawRate, rollRate, aoaNow, azErr, dt);
                     TrackManeuver(aircraft, off, phi, bank, rollRate, dt);
                 }
 
@@ -1846,8 +1945,11 @@ namespace NuclearOptionMouseAim
             // vMag is used here (unlike Legacy, where it was unused). `off` and `targetBank` were
             // parameters until v0.96 and were never read: change 2a computes its own tBankE locally, so
             // the caller's weakness-gated targetBank was dead the moment Legacy was removed in v0.60,
-            // and `off` went the same way. Apply still keeps BOTH as locals — DetectAnomalies' over-roll
-            // check and the recorder column read them there.
+            // and `off` went the same way. Apply still keeps both as locals, but for DIFFERENT reasons
+            // now: `off` is read by DetectAnomalies, while `targetBank` survives for exactly one purpose —
+            // writing CSV column 8, which is retained under the name `targetBankDead` so the column
+            // indices of 3,098 archived captures do not shift. Nothing reads it as a control signal any
+            // more; the anomaly path moved to `_tBankFlown` with the column rename.
 
             // PITCH — identical to Legacy.
             pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
@@ -1979,7 +2081,16 @@ namespace NuclearOptionMouseAim
             // it is a stale hold, not a live reading — scaling by it there would apply a meaningless number.
             // Rotorcraft keep pre-v0.64 behaviour exactly.
             const float effFloor = 0.3f; // regime constant (revThresh is the shared PEffRevThresh field)
-            if (!_collective) pErrTerm *= _pitchEff >= PEffRevThresh ? Mathf.Max(effFloor, _pitchEff) : _pitchEff;
+            // #20 HYGIENE (ledger X5). `>=` -> `>`. The v0.67 self-probe LPFs toward revThresh FROM BELOW and
+            // asymptotes there, so `_pitchEff` parks on EXACTLY 0.150 and the `>=` branch then clamps demand
+            // back UP to effFloor — feeding 30% pitch into the one state the gate exists to stop feeding.
+            // Signature over the 1,032 archived captures (627,110 rows, R28-R32): 2,811 rows read exactly
+            // 0.150 and only 8 read anything above it up to 0.152, i.e. the LPF parked on its own target.
+            // Moves 0.45% of corpus rows, all at the boundary, and cannot regress anything: a plant that has
+            // genuinely recovered reads strictly above the threshold and is untouched. NOT an experiment —
+            // an A/B here would report a null (the branch is dormant at card entry conditions) and that null
+            // would read as "the diagnosis was wrong" when it is not.
+            if (!_collective) pErrTerm *= _pitchEff > PEffRevThresh ? Mathf.Max(effFloor, _pitchEff) : _pitchEff;
             tgtP = Mathf.Clamp(((pErrTerm - coordPull) * qSched + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
 
             // YAW — Legacy, plus the hover-regime authority boost (v0.43). With the wings held level by the
@@ -2132,14 +2243,21 @@ namespace NuclearOptionMouseAim
         // Event-only anomaly logger (v0.25). Each detector keeps small rolling state and fires at most
         // once per cooldown, writing a single compact [anomaly] line. Runs every FixedUpdate while flying,
         // so it catches the exact frame a command goes wrong without the per-frame [chase] spam.
-        private void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
+        // Reads `_tBankFlown` (the tBankE the roll servo really flew this tick) directly rather than taking a
+        // bank target as a parameter. It USED to take Apply's `targetBank`, the yawWeak-gated linear/atan
+        // blend that no live law has flown since v0.60 — 17.6% of `place-390` rows have that at < 0.05 deg
+        // while tBankE is > 2 deg, so both consumers here (the over-roll test and the trail's tgtBank field)
+        // were comparing achieved bank against a number nothing commanded. Dropping the parameter instead of
+        // passing `_tBankFlown` into it is deliberate: there is now no way to hand this the wrong bank.
+        // ApplyEvolvedLegacy writes `_tBankFlown` before Apply reaches this call, so it is current.
+        private void DetectAnomalies(Aircraft ac, float off, float bank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
         {
             float now = Time.time;
             float spdNow = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
 
             // Stash this frame in the ring buffer FIRST (logs nothing; dumped only if an event fires below).
             _ring[_ringHead] = new AnFrame {
-                t = now, off = off, bank = bank, tgtBank = targetBank,
+                t = now, off = off, bank = bank, tgtBank = _tBankFlown,
                 p = _outP, r = _outR, y = _outY, yr = yawRate, rr = rollRate, rf = _rollRateFilt, spd = spdNow, g = ac.gForce };
             _ringHead = (_ringHead + 1) % _ring.Length;
             if (_ringCount < _ring.Length) _ringCount++;
@@ -2175,14 +2293,17 @@ namespace NuclearOptionMouseAim
 
             // OVER-ROLL — actual bank overshot what the law actually asked for. GATED to the PURE fine regime
             // (bigTurn <= 0, i.e. off < FineAngle): only there does the fine bank servo alone govern roll, so
-            // targetBank is the real commanded bank. Above FineAngle the v0.26 body-frame roll-to-align law
-            // legitimately commands more bank than the azimuth servo would, so comparing to targetBank there
+            // the commanded bank is the whole story. Above FineAngle the v0.26 body-frame roll-to-align law
+            // legitimately commands more bank than the azimuth servo would, so comparing there
             // false-fires all through a normal turn (the bigTurn<0.5 gate let that happen — v0.26.1 fix). Also
             // require the bank to be DEEPENING (roll rate still increasing |bank|, same sign as bank) so a
             // turn-exit roll-out — bank momentarily above target but actively levelling — doesn't trip it.
-            if (bigTurn <= 0f && Mathf.Abs(bank) > Mathf.Abs(targetBank) + Cfg.AnomalyOverRollDeg.Value
+            // The reference is `_tBankFlown` (tBankE): the DEAD `targetBank` this used to read is exactly
+            // 0 on a large minority of rows where the servo is flying real bank, so it manufactured
+            // over-roll events out of the difference between two different signals.
+            if (bigTurn <= 0f && Mathf.Abs(bank) > Mathf.Abs(_tBankFlown) + Cfg.AnomalyOverRollDeg.Value
                 && Mathf.Sign(rollRate) == Mathf.Sign(bank))
-                Anomaly("over-roll", $"bank={bank:0.0} target={targetBank:0.0}", ref _anOverRollT, now, ac, off, bank);
+                Anomaly("over-roll", $"bank={bank:0.0} target={_tBankFlown:0.0}", ref _anOverRollT, now, ac, off, bank);
 
             // HUNT — rapid output sign-flapping on pitch or yaw within a 1 s window while the error is NOT
             // meaningfully closing: a limit cycle / wing-rock rather than honest convergence.

@@ -1,0 +1,67 @@
+{
+  "name": "oblique-28",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "count": 10,
+  "note": "THE elDn LIMIT CYCLE, PUT ON THE RIG - the first card in the grid written against LAW-LEDGER S5/S6. S5 measured a SUSTAINED ROLL LIMIT CYCLE in the below-nose hemisphere (mean off 6.92 +/- 2.40 deg, bank half-amplitude 43.3 +/- 9.2 deg, corr(|azErr|, blendWeight) +0.918 +/- 0.045) while the mirrored step in the UPPER hemisphere converged to 0.03 deg and never touched the stick again. That measurement is 11 captures of the BUILT-IN fixedwing-v2 card, whose elDn/elUp legs are the ONLY source of those tags in the whole corpus (15 segments total, R11-R19) and which LAST FLEW IN R20 AT v0.79.0. So BelowAlignSuppress - the v0.85 fix aimed at exactly this defect, and whose own Cfg description quotes S5's numbers as its justification - has NEVER been measured against the stimulus that produced the finding. e1-below-suppress / e1-below-control tested it on oblique-below's 6 deg steps instead, and at that step size belowness does nothing measurable: corpus oblique-below-c vs oblique-6-c is rollYawOpposedPct 19.8 vs 19.5, bothActivePct 36.2 vs 36.4, stickFlipRateR 0.174 vs 0.177, terminalOffDeg 0.233 vs 0.195, blendRailPct 0.0 both, n = 73 and 300 per tag. S6 says the regression scales with STEP SIZE, not gate activity (r = +0.785), and 6 deg is the largest step ever flown below the nose in this project. This card is the missing large-step rung. GEOMETRY: the oblique-6-c / oblique-12-c diamond, horizon-centred, at r = 19.80 (step magnitude 28.0 deg) with 20 s holds instead of 8. Horizon-centred ON PURPOSE rather than below-centred: at this step size the diamond spans BOTH hemispheres, so obDL28 holds at el -19.80 (S5's elDn condition, -20) and obUR28 holds at el +19.80 - its exact mirror, equal magnitude and opposite sign in BOTH axes - inside ONE card, at one entry condition, on one aircraft. That is the control the built-in never had: fixedwing-v2's elUp is a 30 deg step held 15 s and its elDn a 50 deg step held 10 s flown later and slower, so 'below' was confounded with step size, hold duration and energy state all at once. obDR28 / obUL28 are the second mirrored pair and both land ON the horizon at el 0 - the handedness control at zero net elevation, and the yardstick for how far apart two legs of this card sit when NOTHING is wrong. WHY 20 s HOLDS: S5's cycle is 0.3 Hz. wobble_scan's osc_mode wants ~4 periods (13.3 s) and fixedWindowOffDeg is NULL below 8 s, so the family's usual 8 s leg can resolve neither. 20 s is 6 periods. WHY THE TAGS ARE ob*, NOT elDn/elUp: scorecard.compute_segment attaches allocation_metrics AND wobble_scan to oblique_step ONLY. An el_step tag gets neither - no stickFlipRate*, no wobbleEpisodes*/wobbleCoherence*, no rollYawOpposedPct / bothActivePct / rollBlendMean. A card tagged elDn would measure this limit cycle with every limit-cycle metric switched off: the 'invisible to its own metric' failure cards/README.md documents. WHY 28 deg IS ADMISSIBLE (I7): rail risk FALLS with step size in this family, it does not rise. Corpus blendRailPct by rung: 51.8 (oblique-05), 57.6 (oblique-2), 4.2 (oblique-6), 6.0 (oblique-12) - the SMALL steps are the railed ones. Extrapolating the two clean rungs, 28 deg projects turnRateDemandRatio ~0.23 (6 deg: 0.038-0.054, 12 deg: 0.092-0.111) and bankClampActivePct ~20 pct (6 deg: 2.2-5.1, 12 deg: 6.2-9.5), against RAILED_PCT = 90. Read blendRailPct and bankClampActivePct per segment before scoring anyway. KNOWN, DELIBERATE CONFOUND: obDL28 is slot 2 and obUR28 slot 4, so the up-mirror flies from the lower-energy state the down leg left. That biases AGAINST obUR, i.e. against the finding - if obDL28 still scores worse, the effect is real. R31 (oblique-12-fwd vs -rev) measured the traversal-position term as 4-7x smaller than the down/up term and pointing the other way, which is why this ships as one card rather than a fwd/rev pair. PASS / FAIL: FAIL (S5 reproduces; BelowAlignSuppress does not cover the large-step case) = obDL28 does not converge - terminalOffDeg far above obUR28's, settleTime95 NULL on obDL28 and present on obUR28, stickFlipRateR and wobbleCoherenceOutR elevated on obDL28 alone, blendRailPct < 90 on both. PASS = the two legs sit inside the obDR28/obUL28 mirror-pair spread, which retires S5 for v1.0.3+ and says the maintainer's wobble is not this one. AIRFRAME: all ten fixed-wing jsonKeys, one lane each. CARD-OWNED VALUES (v1.0.3): throttle 0.70, fuel 1.00, forceEntry true, deck 0, stagger 3 - corpus-verified as what oblique-6-c ACTUALLY flew in R44 (ov_Scenario_ScenarioThrottle = 0.7, ov_Scenario_ScenarioEntryFuel = 1, ov_Drone_DroneAltDeckM = 0, entry_alt_to = 4000 on 80/80 captures), so this card is a pure step-size and hold-duration change against that batch. startSpeedCorner 0.95 with startSpeed 250 as the fail-soft fallback, same as the whole -c family: R44 placed the ten keys at 95-190 m/s. repeat 5 = 4k+1 per X27 - replicate 0 is anchor-capturing and scores nothing, so 5 buys 4 scored replicates per lane. count 10 = one lane per key, the count R44 proved clean at 72 of 48,085 rows over 20 ms.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.70"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "0"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0.0,
+      "el": 19.8
+    },
+    {
+      "tag": "obDR28",
+      "dur": 20,
+      "az": 19.8,
+      "el": 0.0
+    },
+    {
+      "tag": "obDL28",
+      "dur": 20,
+      "az": 0.0,
+      "el": -19.8
+    },
+    {
+      "tag": "obUL28",
+      "dur": 20,
+      "az": -19.8,
+      "el": 0.0
+    },
+    {
+      "tag": "obUR28",
+      "dur": 20,
+      "az": 0.0,
+      "el": 19.8
+    }
+  ]
+}

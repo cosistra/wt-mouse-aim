@@ -332,6 +332,23 @@ def deck_spread(card, K):
     return (max(0.0, v) if v is not None else 0.0), how
 
 
+def deck_flown(card, K):
+    """(m, how) -- TestDrone.DeckSpreadFlown (v1.0.5), i.e. what the fleet FLIES rather than what the
+    card asked for. The deck YIELDS to a declared `startAlt`: placement teleports every lane to
+    `startAlt` on its first placement, so the spread's only surviving effect there was to turn that
+    placement into a +-spread/2 vertical move -- ledger I12's placement kill, 31 of 31 dead at
+    dz = +-1500 m against 0 of 32 at dz = 0.
+
+    TWO functions because the C# has two, and mirroring only one is how the halves drift: deck_spread
+    above is `DeckSpreadM` ("what was asked", which is what the ownership/fallthrough checks are
+    about) and this is `DeckSpreadFlown` ("what flies", which is what every altitude check must use).
+    Collapsing them into one would make the declaration tests assert the flown value and quietly stop
+    testing the pin."""
+    if declared(card, "startAlt"):
+        return 0.0, "collapsed to one deck by the card's declared startAlt (DeckSpreadFlown)"
+    return deck_spread(card, K)
+
+
 def stagger(card, K):
     """(s, how) -- TestDrone.StaggerSec, the other pre-spawn read."""
     v, how = pinned_num(card, "Drone/DroneStaggerSec", K)
@@ -476,14 +493,9 @@ def check_card(card, K, AF):
                                "ScenarioPlayer aborts the card on the first tick below it, every "
                                "replicate. This is what `startAlt: 0` did to the rotor pair."
                                % (float(card["startAlt"]), K["FloorAltM"]))
-    elif float(card["startAlt"]) - deck_spread(card, K)[0] / 2 < K["FloorAltM"]:
-        add(WARN, "entry-alt", "startAlt %g m is fine, but DroneAltDeckM = %g (%s) puts the LOWER "
-                               "deck at %g m -- under the %g m card floor, so half the fleet aborts "
-                               "on its first tick. Declare 'Drone/DroneAltDeckM': '0' on this card."
-                               % (float(card["startAlt"]), deck_spread(card, K)[0],
-                                  deck_spread(card, K)[1],
-                                  float(card["startAlt"]) - deck_spread(card, K)[0] / 2,
-                                  K["FloorAltM"]))
+    # (the LOWER-deck floor check moved below, to where `alt` and the FLOWN deck are resolved: since
+    # v1.0.5 a declared startAlt collapses the deck, so the case that survives is the card that
+    # declares none and spawns on Drone/DroneSpawnAlt -- which this chain used to skip entirely.)
 
     thr, thr_src = effective_throttle(card, K)
     if thr is not None and thr < K["MinThrottle"]:
@@ -494,7 +506,14 @@ def check_card(card, K, AF):
                                  K["Scenario/ScenarioThrottle"]))
 
     alt = float(card["startAlt"]) if has_alt else float(K["Drone/DroneSpawnAlt"])
-    deck, deck_src = deck_spread(card, K)
+    deck, deck_src = deck_flown(card, K)      # FLOWN, not asked -- see deck_flown()
+    if deck > 0 and alt - deck / 2.0 < K["FloorAltM"]:
+        add(WARN, "entry-alt", "entry altitude %g m is fine, but the deck spread FLIES at %g m (%s) "
+                               "and puts the LOWER deck at %g m -- under the %g m card floor, so "
+                               "half the fleet aborts on its first tick. Declare "
+                               "'Drone/DroneAltDeckM': '0', or declare a startAlt (which collapses "
+                               "the deck outright since v1.0.5)."
+                               % (alt, deck, deck_src, alt - deck / 2.0, K["FloorAltM"]))
 
     for k, r in rows:
         v, how = entry_speed(card, r, K)
@@ -562,10 +581,15 @@ def check_card(card, K, AF):
                 % (k, v, how, v / corner, corner, 0.75 * corner,
                    "" if thr_src == "card pin" else "the fallthrough ", thr or 0, K["MinThrottle"]))
         if ssc > 0 and not corner:
+            # `v`, not `ss` -- `ss` is a local of entry_speed() and was never in scope here, so this
+            # branch raised NameError instead of warning. It needed a card declaring startSpeedCorner
+            # over a roster containing an airframe with no measured FBW corner, and `place-anchor`
+            # (QuadVTOL1) is the first one written. `v` IS the number the message wants: in exactly
+            # this branch entry_speed already returned the absolute fallback.
             add(WARN, "entry-speed", "%s: startSpeedCorner %.2fx, but AIRFRAMES.md has no measured "
                                      "FBW corner for it -- ResolveStartSpeed fails soft to the "
                                      "absolute startSpeed %g m/s, so this lane enters at a different "
-                                     "aerodynamic state than the rest of the fleet" % (k, ssc, ss))
+                                     "aerodynamic state than the rest of the fleet" % (k, ssc, v))
 
     # The deck spread lands on top of EVERY card's startAlt, so it is a run-level note printed once
     # by run() rather than 36 identical warnings -- what is card-specific is the upper-deck
@@ -831,6 +855,17 @@ def selftest():
                                           + [{"key": s, "value": v}])
     assert deck_spread(pin(good, "Drone/DroneAltDeckM", "0"), K) == (0.0, "card pin")
     assert deck_spread(good, K)[0] == float(K["Drone/DroneAltDeckM"])
+    # ...and DeckSpreadFlown on top of it: a declared startAlt collapses the deck the card asked for,
+    # an absent one leaves it real. The two must NOT be the same function -- the assert above is about
+    # the pin beating the default, this one is about what the fleet actually flies (v1.0.5, I12).
+    assert declared(good, "startAlt") and deck_flown(good, K)[0] == 0.0, deck_flown(good, K)
+    noalt = {k: v for k, v in good.items() if k != "startAlt"}
+    assert deck_flown(noalt, K) == deck_spread(noalt, K), deck_flown(noalt, K)
+    # the surviving lower-deck WARN: no startAlt, so the deck is real and can reach under the floor
+    assert any(l == WARN and "LOWER deck" in m for l, m in levels(
+        pin(noalt, "Drone/DroneAltDeckM", str(2 * K["Drone/DroneSpawnAlt"])), "entry-alt"))
+    assert not [1 for l, m in levels(pin(good, "Drone/DroneAltDeckM", "999999"), "entry-alt")
+                if "LOWER deck" in m], "a declared startAlt cannot trip the deck floor any more"
     assert stagger(pin(good, "Drone/DroneStaggerSec", "12"), K) == (12.0, "card pin")
     assert effective_throttle(pin(good, "Scenario/ScenarioThrottle", "0.40"), K) == (0.40, "card pin")
     # ...and a card that declares NOTHING must name the fallthrough, not pretend it decided.

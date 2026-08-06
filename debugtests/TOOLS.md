@@ -63,7 +63,9 @@ means adding it to `PINS_REQUIRED` here and to every shipped card.** The runtime
 **Offline recording tool.** `python debugtests/analyze-wobble.py <rec.csv>...` (stdlib-only) has
 two modes. **Default** scores any maneuver-recorder CSV for the death-wobble signature:
 oscillation episodes with frequency/amplitude/trend, roll-rail %, targetBank clamp %, and the
-bank-vs-command lag (built from the v0.51 investigation — see `WOBBLE-FINDINGS.md`).
+bank-vs-command lag (built from the v0.51 investigation, **whose conclusions are REFUTED — see
+`LAW-LEDGER.md` X35**: read this tool as a per-capture readout, not as a verdict, and note that the
+wobble it was chasing is a *below-nose* phenomenon, not a high-speed one).
 **`--digest <rec.csv>`** collapses the 900-row-ish capture into a ~30-line phase-segmented
 timeline (per segment: duration, the signals that moved, per-axis stick sign-flip counts, and any
 `# cfg` change / `[anomaly]` from the sibling `mouseaim-anomalies-<session>.log`). **To read a
@@ -72,7 +74,13 @@ to an LLM is expensive and mostly steady-state redundancy. `--selftest` runs the
 Run this on user-reported recordings before theorizing. Past **10** captures `--digest` collapses
 one level further, to one line per file; `--verbose` keeps the full timelines.
 It also **exports `WOBBLE_SIGNALS`** (v0.96) — the per-signal oscillation dead-bands (bank 3.0,
-azErr 0.5, outR/outP/outY 0.05, aoa 2.0) — as the one definition, consumed by `scorecard.py`. The
+azErr 0.5, outR/outP/outY 0.05, aoa 2.0) — as the one definition, consumed by `scorecard.py`, plus
+(v1.0.5) **`PRINT_QUANTUM`**, the recorder's print step per column, and **`SETTLED_SIGNALS`**, the
+subset that survives a *settled-window* question: `outR` is replaced there by `rollRate` and `outP`
+is dropped outright, because in a settled tail those two columns hold 1–1.5 print quanta of spread
+and an autocorrelation will fit the quantiser (`CAPTURES-DB.md` gotcha 22, `LAW-LEDGER.md` X34).
+`WOBBLE_SIGNALS` itself is unchanged: this module's own death-wobble scan is amplitude-gated at 50
+quanta and rail-to-rail, so quantisation cannot reach it. The
 direction rule is the non-obvious bit and is worth stating: `scorecard.py` `exec_module()`s
 analyze-wobble (the hyphenated filename means no plain `import`), so the dependency runs
 **scorecard → analyze-wobble**, and anything shared between the two must be defined on the

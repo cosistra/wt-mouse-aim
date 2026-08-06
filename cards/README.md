@@ -388,6 +388,21 @@ varies speed and nothing else.
 | `place-440` | 440 m/s | `FastBomber1` ×12 lanes | R43's exact kill, re-flown at n=60 as the **with-teleport arm** of the isolator |
 | `place-440-noteleport` | 440 m/s | `FastBomber1` ×12 lanes | **the isolator** — same everything, `DroneAltDeckM: 0` |
 
+**THE LADDER IS DEAD; ONE CARD SURVIVES IT — `place-anchor` (v1.0.4).** R44 refuted the ladder's whole
+premise (`X33` — the kill is airframe, never speed) and `I12` named the real predictor: a **non-zero
+ANCHOR placement on a variable-geometry airframe**, 31/31 fatal at dz = ±1500 m against 0/32 at dz = 0.
+v1.0.4 fixes it upstream of the teleport — `TestDrone.DeckSpreadFlown` collapses the deck whenever a
+card declares `startAlt`, so the anchor placement's `dPos` is exactly (0,0,0). **Do not re-fly the
+seven rungs.** `place-anchor` is the regression card and the only one of this family worth a launch:
+
+| card | entry | roster | what it decides |
+| --- | --- | --- | --- |
+| `place-anchor` | **1.00× FBW corner** (200 / 160 / ~120 m/s), 4000 m, `DroneAltDeckM: 3000` pinned | `FastBomber1, QuadVTOL1, Multirole1` ×6 lanes, ×5 | the v1.0.4 fix, in the configuration that was 100% lethal on v1.0.3. Both variable-geometry keys plus a fixed-wing control. **PASS: 30 of 30 complete, `entry_alt_from == entry_alt_to == 4000` and `snapBackM = 0` on every replicate 1.** FAIL: any `aircraft gone` at 0.0 s |
+
+Corner-relative rather than §7's specified `startSpeed: 250` **because 250 would have refused the
+airframe the card exists to fly** — `QuadVTOL1`'s Vmax is 148.6 m/s and `EntrySpeedFlyable`'s ceiling
+is 0.95× that. See the card's own `note`.
+
 **PASS = the lane survives placement and writes a full capture; FAIL = `abort: aircraft gone`, 1
 sample, `dur=0.0`, and `LANE n IS OUT` on the run board.** A FAIL is the measurement, not a wasted
 rung, and it costs almost no wall clock because the replicate ends immediately.
@@ -498,6 +513,36 @@ oblique-6-c;place-440;place-440-noteleport;place-420;place-400;place-390;place-3
 replicate immediately). **Split it after `q-lo-300`** if you want two sittings — that is the fixed-wing
 half (41 min) against the rotorcraft half (52 min), and the `R<N>` session tag increments on a game
 restart, which the batch index wants anyway.
+
+### The wobble/responsiveness slate (8 cards, 56.8 min) — v1.0.5
+
+**The first cards in this grid written against the maintainer's own two complaints** rather than
+against a corpus artefact. Everything above measures the law; these measure the *report*. Fly them as
+two fleets (A = 43.3 min, B = 13.5 min); the arm designs and batch strings are in
+[`LAW-CHARACTERIZATION.md`](../LAW-CHARACTERIZATION.md) §7 Tier 1c.
+
+| card | isolates | pass / fail |
+|---|---|---|
+| `e6-pitch-eff` | `Control/PitchEffRelax` — `_pitchEff` is a hard **latch**, not a floor (gate open on 5.3% of rows, `pEff` < 0.95 on 97.4%), so pitch demand runs at 0.47–0.80 permanently. `ob-dwell-2` geometry, 10 keys | pass = per-leg `pEff` → ~1 on arm B **with** `terminalOffDeg` down and `stickFlipRateP` not up. **Cut DOWN vs UP, never pool** (R44: `Multirole1` 0.466/0.715, inverted on `FastBomber1`/`Darkreach`). Failure signature = `pEff` climbing *during* an oscillation — read `pEffTrendPerS` beside `stickFlipRateP` |
+| `ob-dwell-2` | the **hold-band instrument**: constant-rate oblique drift parks \|azErr\|≈\|elevErr\|≈2.25° for all 80 scored s; `aimRate` 3.54 °/s clears the 3 °/s `_settleOK` gate | read it as an instrument first — confirm the band landed at 1–3° and `settleOn`≈0, else re-cost every arm hosted on it. Step-response metrics are meaningless here **by construction** |
+| `slew-r06` / `slew-r20` | `Control/OutputSlew` 6.0 vs 20.0 — the law's **only nonlinearity**, never once varied in 3,327 captures across 35 batches. 40 s azimuth reversal train, ±6° every 1.0 s | score the **pair**. Rate-limiting ⇒ railed-interval count and `stickFlipRateR` fall together and resolved frequency scales ×3.3. Falsified if f is R-independent, or if raising R makes it **worse** (= the limiter is load-bearing). See gotcha 21 — the frequency comb is ±12% at 1.9 Hz |
+| `oblique-28` | `S5`/`S6`: a 28° oblique diamond, horizon-centred so `obDL28` (el −19.80) and `obUR28` (el +19.80) are an **exact within-card mirror**; `obDR28`/`obUL28` are the zero-elevation handedness control | FAIL = `obDL28` never converges (`terminalOffDeg` ≫ `obUR28`, `settleTime95` NULL on it alone, `retreatDeg`/`monotonicityIndex` separating them), `blendRailPct` < 90 on both. PASS retires `S5` for v1.0.3+ |
+| `sweep-r25` | the bank servo **switched off** — lag ≈2.25° < `FineBankDeadzone`, so `lateralHold` = 0 | report lag/rate per airframe beside `sweep-r45`; the pair is the first measurement of what the bank pipeline actually buys |
+| `sweep-r45` | the `D13`/`A1` anchor, unarmed, on current code | `blendRailPct` 0; watch `Multirole1` `bankClampActivePct` (89.2 in R41 against a rail at 90) |
+| `sweep-r45c` | the same demand at 1.0× corner — separates "the lag is a property of the demand" from "of the speed" | score against `sweep-r45`, **never pooled**. Lower at corner ⇒ the law is under-gained at high q |
+
+**Two shipped cards score nothing and are superseded.** `sweep-slow` and `sweep-creep` ship
+`repeat: 1`, so under `LAW-LEDGER.md` X27 every one of their replicates is anchor-capturing and
+**zero captures are admissible**. `sweep-r45` supersedes `sweep-slow` for lag work.
+
+**Why the wobble card goes UP in step size, which is counter-intuitive.** Rail risk *falls* with
+oblique step: mean `blendRailPct` is 51.8 (0.5°), 57.6 (2°), 4.2 (6°), 6.0 (12°). The small steps are
+the railed ones, and a railed segment is no signal. 28° projects `turnRateDemandRatio` ≈0.23 and
+`bankClampActivePct` ≈20% against a `RAILED_PCT` of 90.
+
+**Why these use `ob*` tags and not `elDn`/`elUp`.** `scorecard.compute_segment` attaches
+`allocation_metrics` and `wobble_scan` to `oblique_step` **only**. An `elDn`-tagged card would measure
+a limit cycle with every limit-cycle metric switched off.
 
 ## What the measurements say about the "confused small movements" report
 
@@ -890,8 +935,9 @@ demand silently freezes — which is why the selftest asserts the length.
   would need a per-airframe rate, which `deriveAzRate` deliberately does not allow.
 - **Reversal / astern at low q.** The built-ins cover them at 250 m/s only, where `flightscore.py`
   scores them 48–55% `AIRFRAME_LIMITED`; they may be more informative on the trainer.
-- **Roll entry state.** "From an established roll" is on the INSTRUCTOR-LOOP axis list; an aim demand
-  cannot command a roll rate directly.
+- **Roll entry state.** "From an established roll" is on the axis list in
+  [`LAW-CHARACTERIZATION.md`](../LAW-CHARACTERIZATION.md) §6 (formerly `INSTRUCTOR-LOOP.md`, deleted
+  v1.0.5 — see `LAW-LEDGER.md` X9); an aim demand cannot command a roll rate directly.
 - **Oblique at low q or on a trainer.** The whole oblique ladder is 250 m/s / 4000 m. Re-issuing it
   at the `stol` entry condition is a copy-and-edit away, once the jet ladder has said something.
 - **A speed SWEEP, at any speed.** `startSpeedCorner` is one multiple for the whole card, resolved per
