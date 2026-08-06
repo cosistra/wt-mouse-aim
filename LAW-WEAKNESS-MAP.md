@@ -740,6 +740,20 @@ predicts every tag closed-form with no free parameters. The general lesson is th
 re-learning: **a de-rater that correlates with a bad outcome is not thereby its cause — check first
 whether the branch you are blaming even executes.**
 
+### R25. "The weathervane model predicts >= 10-30 deg (or a railed pedal) at 60 m/s, so a small residual there acquits it"
+The **prediction** is withdrawn, not the model (R44; `cards/rotor-weathervane-60.json`, ledger **H7**).
+It was cut by holding `beta` fixed while the ramp multiplier `num2 = clamp01((V − 40)/20)` saturates to
+1.0 — a ~13× scaling of `0.1·beta·0.4·num2`. But `beta` is **not an input**: it is the equilibrium of
+the weathervane loop against the airframe's *own* directional stability, so on any airframe whose fin
+works at 60+ m/s `beta` collapses and a saturated `num2` multiplies almost nothing. R44 shows it
+directly — `UtilityHelo1` ran to 90–120 m/s with `heliBlend` **0.0000**, the pedal **never railed**
+(`stickRailPctY` 0, max `|outY|` 0.50) and `terminalOffDeg` was **0.212–0.279°**. A small residual at
+60 m/s is therefore consistent with **both** candidate models and discriminates nothing. Score a
+reconstructed `beta` (from `outY`, via H7's closed form), never `off` alone. The general lesson, and
+it is the twin of R24's: **a disturbance term's gain is not its effect when the disturbance is itself
+a closed-loop equilibrium — scaling the gain tells you nothing until you know what happens to the
+state it multiplies.**
+
 ---
 
 # WHAT WE STILL CANNOT SEE

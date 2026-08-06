@@ -566,6 +566,26 @@ every materialized row, so per-row queries silently have nothing to read), and *
   a card. **Either** make placement offset by the lane deck **or** delete the claim and keep the deck
   as the lane-packing device `RingRadius` needs. Until then a card's only q lever is speed, and speed
   is confounded with airframe. Related: the Tier 2 `DroneAltDeckM` default contradiction below.
+- **(i) NEW (R44) — refuse the ANCHOR placement, don't fix the teleport.** A card that pins a non-zero
+  `DroneAltDeckM` spends its whole first placement moving the lane off the deck, and on a
+  variable-geometry airframe that is **100% fatal** (ledger **I12**, 31/31; the R43 speed premise is
+  **X33**). The teleport primitive is fine — the same airframe survives 26.3 km mid-run — so this is
+  **not** a `MoveAssembly` change (see its graveyard comment). Two one-line shapes, in preference
+  order: **(1)** spawn the lane at the card's `startAlt` when the card declares one, so the anchor is
+  the zero-displacement placement it already is on every `deck = 0` card — this also closes **(h)**
+  by deleting the contradiction rather than honouring it; **(2)** if the deck must stay, refuse the
+  card pre-spawn when `DroneAltDeckM ≠ 0` and the airframe probes a wing-angle range (the
+  `wingAngleMin/Max` probe already runs — it is `sc_wingAngleMaxDeg` in every sidecar), the same
+  shape as the v0.92 envelope gate. **Ship exactly one and re-fly the confirmation card below;**
+  shipping both destroys the contrast.
+  - **The confirmation card.** `place-anchor` — airframes `FastBomber1, QuadVTOL1, Multirole1`
+    (the two variable-geometry keys plus a fixed-wing control), `startSpeed: 250`, `startAlt: 4000`,
+    `count: 6`, `repeat: 5` (4k+1, **X27**), pinned `DroneAltDeckM: 3000`, geometry copied from
+    `place-noop`. On today's build it must reproduce **FastBomber1 dead / Multirole1 alive**; whether
+    `QuadVTOL1` dies is the open half of **I12** — it is the only other key with a Transform-writing
+    geometry controller and has never been given a non-zero anchor. Pass after the fix: 30 of 30
+    captures complete, `entry_alt_from == entry_alt_to` on every replicate 1. Fail: any
+    `abort: aircraft gone` at 0.0 s.
 
 **Tier 2 — docs the checker cannot see.** The v0.94 fleet-ABBA safety argument in `CLAUDE.md` (replace
 with "`frameMs` is a per-row column, so covary or drop"); the `DroneAltDeckM` default contradiction
@@ -593,6 +613,21 @@ on every row — cosmetic, but it contradicts the columns of record and will mis
   over 87.6 → 112.3 kPa (steeper than linear, the shape of an unnormalized derivative gain). So the
   roll twin is still the largest structural ONE-LAW gap and is still worth building — but it is no
   longer justified as "fixing a user-visible defect" until Tier 1 (g) is flown.
+  **R44 (2026-08-05) WITHDRAWS THE q-SCALING SENTENCE ABOVE — DO NOT CITE THE +0.891 AGAIN.** The
+  crossed pair `q-hi-300`/`q-lo-300` (2500 vs 8000 m, 1.44–1.52× measured q per airframe, no
+  within-airframe overlap, n = 32/32 tails) found **no** q-dependence: `outR` sd ratio 0.884 the
+  *wrong* way (p = 0.158), `stickFlipRateR` identical to four decimals, `rmsPointingErrorDeg` flat
+  (p = 0.905), and the one significant mover — `rollRate` sd, higher in *thin* air, p = 0.039 — is
+  aerodynamic damping, not the gain. R43's Spearman was computed on a signal at its **print quantum**
+  (`outR` is `{0.000}`; 14–32 distinct codes, sd = 1–2 quanta — `debugtests/CAPTURES-DB.md` gotcha 18,
+  `LAW-LEDGER.md` **X34**). **The gap is unchanged and still the largest** — the roll channel has no q
+  term at all and `qSched` is a *pitch* schedule railed at 1.000 everywhere above corner — but its
+  only surviving evidence of harm is the field limit cycle, so **Tier 1 (g) (the hand-flown capture)
+  is now the ONLY test that can justify building it.** Two instrument consequences for whoever flies
+  it: score `rollRate`, not `outR`; and a 0.45 throttle pin does **not** hold 300 m/s — the 8000 m
+  lanes accelerated to 300–331 m/s while the 2500 m lanes decayed to 277–303, which cost the pair a
+  third of its designed 1.82× lever. A card that needs a speed band still has no instrument that
+  holds one (`AuditHold` only reports).
 - `aoaFade`'s floor should key off the lead overshoot the mod already computes (**do not ship without
   `alpha-pullup` flown twice** — narrowing the lim-10 fade from 40% to 25% of the limiter risks
   reintroducing the trainer AoA pump the floor was added to stop). The `Min(6f, …)` cap on `aoaFade`
@@ -650,6 +685,21 @@ what each unblocks:
   `ScenarioThrottle = 0.25`, so speed and throttle are confounded on that card as it stands. Reaching
   `heliBlend` ∈ [0.75, 1.0] is still worth having — the band has **zero samples in the corpus** — but it
   is no longer what gates the code change. ~10 min unattended.
+  **DONE — R44, 2026-08-05. THE GATE IS LIFTED AND THE O13 FIX IS CLEAR TO SHIP.** Both cards flew
+  10/10. Baseline of record: `rotor-tilt-hold` (thr 1.00) `heliBlend` = **1.0000 ± 0.0000, n=10**
+  (9,602/9,602 rows exactly 1.000, 150–153 m/s); `rotor-tilt-hold-lo` (thr 0.25) **0.1820 ± 0.0002,
+  n=10** at 67–72 m/s. `speedRamp ≡ 0` on every scored row (`vFwd` min **65.1**, never below the 60
+  pin), so `heliBlend` IS `tiltFrac` on both arms and no segment needed discarding. The `≥ 0.8`
+  pre-fix criterion is confirmed **at saturation**, i.e. the bank channel is fully deleted in cruise.
+  The full numbers, and the post-fix prediction recorded in advance (hi arm → 0.000, **lo arm →
+  0.998**), are in ledger **O13**. Two residual notes for whoever re-flies after the fix: **(i)
+  neither arm held its declared 120 m/s** — thr 1.00 accelerated to 152 m/s (above `QuadVTOL1`'s
+  Vmax **148.6**, `AIRFRAMES.md`) and descended 3000 → 2494 m, thr 0.25 decelerated to 70 m/s and
+  descended to 1588 m, so the throttle/speed confound is **narrowed but not broken** (the only
+  matched-speed contrast is the transient 90–100 m/s overlap: **0.730 at thr 1.00 vs 0.516 at thr
+  0.25**, n=242/336 rate-limited rows — suggestive that throttle moves it too, not a verdict);
+  **(ii)** what the pair *does* settle cleanly is both endpoints of the game's
+  `customAxis1 = Lerp(0.18, 1, tiltAtSpeed)`, measured from flight for the first time.
 - **(b) Give the hover cards a collective** — unchanged and still the blocker on ONE-LAW case 4.
   R42 reproduced **16/16** `UtilityHelo1` altitude-floor aborts, `velY` −24…−29 m/s, `thr` pinned at
   0.600 (ledger **H5**). Two of three rotorcraft still cannot hold altitude, so "hover" still rests on
@@ -682,6 +732,32 @@ what each unblocks:
   the threshold at 41.5–41.8 under `HoldThrottle = 0.60`. The pair's `armToggle` also closes ledger
   **O14(c)** — R42 could not exercise the v1.0.1 `arm=-1` warm-up because no rotor card declared an arm.
   Cards want `repeat: 4k+1`.
+  **STILL OPEN AFTER R44, AND THIS IS THE BATCH'S ONE UNFINISHED ITEM. RE-FLY `rotor-weathervane-60`.**
+  The 35 arm flew 10/10; the **60 arm wrote 2 captures of 76 and 27 rows** (1.5 s / 0.5 s), both the
+  `arm = NULL` anchor replicate, both containing **only their `arm` segment** — **zero scored
+  segments, so nothing to decide from** (ledger **H7**). O14(c) *is* closed as a side effect: the
+  warm-up worked on 4/4 lanes. What R44 did settle for free, off the *control* arm, is that
+  **`heliBlend` is not the selector** — flat at 0.655–0.749 while `|off|` moves 0.012 → 2.112 across
+  the 40 m/s crossing — so the re-fly is now a one-sided confirmation, not a coin flip.
+  **What the re-fly needs, and it is not just more captures:**
+  - **RE-CUT THE THROTTLE PINS FROM R44's OBSERVED `spd`, they are wrong.** At the declared 0.45,
+    `AttackHelo1` settled at **41 m/s** — *above* the 40 m/s threshold on 3 of its 5 segments, so
+    even the control is half-contaminated (it survived only because the two clean segments came
+    first); it wants ≈ **0.38–0.42**. `UtilityHelo1` at the same 0.45 ran to **90–120 m/s**, past its
+    Vmax 133.9 and nowhere near 35 — **drop it from both cards or give it its own pin (~0.25–0.30)**,
+    because as flown it measured a different experiment on a different archetype. The 60 arm's 0.85
+    is untested but 0.45 → 41 m/s on `AttackHelo1` suggests it clears 60 comfortably.
+  - **SCORE A RECONSTRUCTED `beta`, NOT `off` ALONE.** The card's ">= 10–30° or the pedal rails"
+    prediction is **withdrawn as stated** (ledger H7): it assumes `beta` holds while `num2` ramps,
+    but `beta` is the equilibrium of the weathervane loop against the airframe's own fin, so a small
+    residual at 60 m/s fits *both* models and decides nothing. Reconstruct `beta` from `outY` via
+    H7's closed form and score that.
+  - **Power is not the problem.** At the already-raised `count: 10` / `repeat: 5` the 60 arm alone is
+    5 lanes × 5 replicates per airframe = **20 scored captures per airframe** in ~16 min, against a
+    residual whose replicate CV is ~1%. That is ample; the risk is entirely in the two bullets above.
+  - **The durable fix is a speed-referenced entry.** These pins are open-loop guesses at a plant with
+    no speed hold. Holding `spd` to the card's `startSpeed` would retire this whole failure mode
+    rather than re-guessing it every rotor batch — a harness item, not a card item.
 
 **Fixed-wing cards, from R41.** Do **not** re-fly `e1-below-suppress` or `e1-below-control` as they
 stand — `bWt` ≈ 0 on the scored window, so neither can see the term regardless of arm (ledger **A2**);

@@ -440,12 +440,12 @@ cross-batch comparison in the queue above (notably `place-440` against R43's 3 d
 
 #### D — the rotorcraft tie-breakers (4 cards)
 
-| card | entry | roster | what it decides |
-|---|---|---|---|
-| `rotor-weathervane-35` | 35 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | the control arm — **below** `yawWeathervaneMinSpeed` = 40. Both models predict 0.00–0.1° |
-| `rotor-weathervane-60` | 60 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | **the tie-break.** Weathervane ⇒ ~13× the R42 residual or a railed pedal; heliBlend ⇒ the residual vanishes |
-| `rotor-tilt-hold` | 120 m/s, 3000 m, thr **1.00** | `QuadVTOL1` ×8 lanes | the **O13 pre-fix baseline** |
-| `rotor-tilt-hold-lo` | 120 m/s, 3000 m, thr **0.25** | `QuadVTOL1` ×8 lanes | its control — separates the throttle input from the speed input |
+| card | entry | roster | what it decides | **R44 verdict** |
+|---|---|---|---|---|
+| `rotor-weathervane-35` | 35 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | the control arm — **below** `yawWeathervaneMinSpeed` = 40. Both models predict 0.00–0.1° | **SPLIT.** `AttackHelo1` settled at **41 m/s**, so 2 of 5 segments are a true control (0.000/0.010°) and 3 crossed the threshold (1.356/1.728/1.482°, CV 0.6–1.2%) — an accidental within-card crossing that **eliminates `heliBlend` as the selector**. `UtilityHelo1` ran to **90–120 m/s**: not a 35 m/s measurement at all. Re-cut both pins |
+| `rotor-weathervane-60` | 60 m/s, 2500 m | `AttackHelo1, UtilityHelo1` | ~~**the tie-break.** Weathervane ⇒ ~13× the R42 residual or a railed pedal~~ — **the ">= 13×" half is WITHDRAWN, see the card note**; heliBlend ⇒ the residual vanishes | **NO DATA — RE-FLY.** 2 captures of 76 and 27 rows, both the `arm=NULL` anchor, both `arm`-segment-only. **Zero scored segments.** Not underpowered — absent |
+| `rotor-tilt-hold` | 120 m/s, 3000 m, thr **1.00** | `QuadVTOL1` ×8 lanes | the **O13 pre-fix baseline** | **VALID — BASELINE RECORDED, FIX UNBLOCKED.** `heliBlend` **1.0000 ± 0.0000**, n=10 (9,602/9,602 rows). Flew 152 m/s, not the declared 120 (above Vmax 148.6) — harmless here, the blend saturates far below |
+| `rotor-tilt-hold-lo` | 120 m/s, 3000 m, thr **0.25** | `QuadVTOL1` ×8 lanes | its control — separates the throttle input from the speed input | **VALID as a readout, CONTROL PARTLY FAILED.** **0.1820 ± 0.0002**, n=10 — the game's 0.18 hover pin. But neither arm held 120 (152 vs 70 m/s), so the throttle/speed confound is narrowed, not broken |
 
 `rotor-weathervane-*` is the highest-value card in the batch because it **discriminates between two
 candidate fixes** rather than confirming one. `H7`'s deterministic 1.5–2.4° residual is now traced to
@@ -458,7 +458,16 @@ declared > 0**, because `ScenarioPlayer.OwnInputs` early-returns at `EntrySpeed 
 (`Control/IntegralStallGate` — the integrator winding on error *persistence* vs *magnitude* is exactly
 the mechanism that would or would not erase a standing residual), which also closes **`O14(c)`**: no
 R42 rotor card declared one, so `arm=-1` never appeared and the v1.0.1 warm-up fix is still
-code-reviewed rather than measured.
+code-reviewed rather than measured. **R44 update: `O14(c)` is CLOSED — the warm-up measured clean
+(`arm = NULL` on replicate 1 of 4/4 lanes, then `0,1,1,0`), the `IntegralStallGate` A/B itself came
+back null on the residual, and the 35 arm produced the batch's best rotorcraft result by accident
+while the 60 arm produced nothing at all. Read the two card notes before re-flying either.**
+
+**FLOWN, R44 — this gate is discharged and the O13 fix is clear to ship.** The paragraph below is kept
+as the card's design rationale; the measured baseline is `heliBlend` **1.0000 ± 0.0000** (n=10) on
+`rotor-tilt-hold` and **0.1820 ± 0.0002** (n=10) on `-lo`, i.e. the pre-fix criterion confirmed *at
+saturation*. Post-fix the hi arm must read **0.000** and the `-lo` arm **flips to ~0.998** — expected,
+not a regression. Ledger **O13**.
 
 `rotor-tilt-hold` **must be flown before the O13 fix ships** — the confirming test is a before/after on
 one condition and shipping first destroys the baseline. Pre-fix, `heliBlend` should read **≥ 0.8** in

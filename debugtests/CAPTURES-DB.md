@@ -132,6 +132,9 @@ those citations (`H7`, `§5a`, `1d`, `F2`) were document-local and are gone; the
 | **R41** | v1.0.0 | seven fixed-wing cards + three rotor, 451 caps | `LAW-LEDGER.md` **A1** (feed-forward off the rail), **A2** (the `e1*` nulls), **H3–H5** (rotorcraft), **I11** (the ring geometry), **X27** (replicate 1 is a different flight condition). Cited from `compare-runs.py` |
 | **R42** | v1.0.1 | the **rotor re-fly**: `rotor-hover` + `rotor-bistab` + `rotor-transition`, 3 rotorcraft, 14 lanes, 56 caps — R41's three rotor cards at the **shipped** `HeliForwardSpeed`/`HeliHoverSpeed` 60/20 instead of the stale v0.43 150/40 | `LAW-LEDGER.md` **H6** (`AttackHelo1` converges — R41's divergence was the config), **H7** (the blend-band standing residual, the first above-floor rotorcraft pointing measurement), **H2**/**H4**/**H5** amended, **L15** (candidate mechanism), **X29** (the divergence retracted), **X30** (`tiltFrac` runs backwards — O12 answered, and it corrects H3), **X31** (the `heliBlend` 0.455 arithmetic), **O13**/**O14** (new); `GENERALITY-REVIEW.md` finding 6 (consequence withdrawn, structure stands); `LAW-CHARACTERIZATION.md` §7 Tier 1(f), Tier 2, Tier 3 and the rotorcraft re-fly list. **R41 vs R42 is a clean one-knob intervention on an identical card/roster — but only on `AttackHelo1` above 20 m/s and `QuadVTOL1`'s `rotor-transition`; everywhere else both configs clamp `speedRamp` to 1.0 and the two batches are the same expression.** **RE-ANALYSED 2026-08-02 against the decompile, no new flying:** H7's mechanism is now closed-form (the game's `yawWeathervane` above 40 m/s, 5/5 tags) and **L15's "both channels de-rated" is RETRACTED** — `yawWeakFade` is bypassed on every rotorcraft row; O13 resolved (`GetAngleLimits()` innocent, the tiltwing branch is missing the `1f −`, hover reference 0.18) and X30's "monotone fall" corrected to a spawn transient. New homes: `LAW-WEAKNESS-MAP.md` **W9** (the leaky integrator) and **R24** (do-not-re-propose), `GENERALITY-REVIEW.md` findings **3** and **6**, `LAW-CHARACTERIZATION.md` §7 rotorcraft (a)/(d). |
 | **R43** | v1.0.3 | `hs-hold`, the **250–400 m/s hole** — 15 captures, **12 valid** (`Fighter1`/`Multirole1`/`SmallFighter1` × 4); `FastBomber1` killed at placement on 3/3 and retired | `LAW-LEDGER.md` **O11** (narrowed, still OPEN — the prescribed high-q test was flown and came back clean: 48 settled tails at 407–505 m/s / q 71.6–112.3 kPa, `outR` sd 0.0007–0.0045 against a 0.05 threshold, `wobbleEpisodesOutR` 0 on 48/48; what is left is the human-on-the-mouse condition a card cannot script), **X32** (`DroneAltDeckM` sets SPAWN altitude only — placement teleports every lane to the card's `startAlt`, so the card's declared 2500/5500 m q-contrast factor never existed); `GENERALITY-REVIEW.md` finding 5 (structural violation stands; the q-scaling it predicts is CONFIRMED in direction — Spearman(q, `outR` sd) +0.891 within `Multirole1` — at ~1/1000 of limit-cycle amplitude); `LAW-CHARACTERIZATION.md` §7 Tier 1 **(g)** and **(h)**; `cards/hs-hold.json` note + `cards/README.md` (card VALID but it **accelerates** — 341/352 m/s entry, 428/506/438 m/s by 90 s — and its q factor is confounded with airframe). Gotcha 16 below |
+| **R44** · control + q | v1.0.3 | `oblique-6-c` **80 caps / 10 lanes × 8 replicates** (the repeat-card control, 4th flight: R29→R33→R41→R44) and the `q-hi-300` / `q-lo-300` pair, **20 caps each**, 4 lanes × 5 replicates, identical geometry at 2500 m vs 8000 m | `LAW-LEDGER.md` **G9** (extended to v1.0.3 — the harness has not moved: Spearman +1.000 on the 10-airframe ranking, max per-airframe `rmsPointingErrorDeg` drift **0.56%**, mean 0.00%), **X34** (the q pair achieved a clean 1.44–1.52× q lever and the roll constants' predicted q-dependence did NOT appear — the card's own REFUTED criterion, and R43's `outR` sd evidence retracted as a quantisation artifact); `GENERALITY-REVIEW.md` finding 5 (consequence withdrawn, structure stands); gotcha 18 below; `cards/q-hi-300.json` / `-lo-300.json` notes |
+| **R44** · rotor | v1.0.3 | the rotorcraft half — `rotor-tilt-hold` **10/10** + `rotor-tilt-hold-lo` **10/10** (`QuadVTOL1`, the O13 pre-fix baseline pair) and `rotor-weathervane-35` **10/10** + `rotor-weathervane-60` **2 captures, 0 scored segments** (`AttackHelo1`/`UtilityHelo1`, the H7 tie-breaker; the game was closed before the 60 arm left its `arm` window) | `LAW-LEDGER.md` **O13** — the pre-fix baseline is RECORDED and the fix is UNBLOCKED: `heliBlend` **1.0000 ± 0.0000** (n=10, thr 1.00, 150–153 m/s) vs **0.1820 ± 0.0002** (n=10, thr 0.25, 67–72 m/s), i.e. the `≥ 0.8` criterion confirmed *at saturation*, and both ends of the game's `Lerp(0.18, 1, tiltAtSpeed)` measured from flight for the first time; **H7** — the residual reproduces on a second card (0.000/0.010° below 40 m/s vs 1.356/1.728/1.482° at 40.7–41.2 m/s, CV 0.6–1.2%, n=5) and **`heliBlend` is eliminated as the selector** (flat 0.655–0.749 while `|off|` moves 0.012 → 2.112 across the 40 m/s crossing), **but the discriminating 60 m/s arm is UNFLOWN and the card's own ">= 10–30° at 60 m/s" prediction is WITHDRAWN as stated — `beta` is an equilibrium, not an input**; **O14(c) CLOSED** (the v1.0.1 `arm=NULL` warm-up verified on 4/4 lanes). `GENERALITY-REVIEW.md` finding **19** (the tiltwing blend is throttle-latched — survives the O13 fix). `LAW-CHARACTERIZATION.md` §7 rotorcraft **(a)** DONE / **(d)** still open with a re-fly spec (re-cut both throttle pins from R44's observed `spd`: 0.45 put `AttackHelo1` at **41 m/s**, above its own control threshold, and `UtilityHelo1` at **90–120 m/s**). Card notes updated on all four. Gotcha 17 above |
+| **R44** | v1.0.3 | 229 captures, 14 cards, 13 airframes — including the **7-rung placement-speed ladder** (`place-440`, `-420`, `-400`, `-390`, `-375`, `-300` and the `place-440-noteleport` isolator), 77 of those captures, 27 aborted | `LAW-LEDGER.md` **X33** (the R43 "above ~400 m/s kills it" premise is REFUTED — 440 m/s is clean 10/10 with `DroneAltDeckM: 0`, 300 m/s is fatal 3/3 with the deck on) and **I12** (what actually predicts the kill: a **non-zero anchor placement on a variable-geometry airframe**, 31/31 vs 0/32, Fisher p = 4.1e-5 on the speed-and-deck-matched control); `LAW-CHARACTERIZATION.md` §7 Tier 1 **(i)** (the pre-spawn refusal / spawn-at-`startAlt` fix and its confirmation card); all seven `cards/place-*.json` notes. Gotcha 18 below |
 | **Discord v0.68 field bundle** | v0.68.0 | two users, six recordings, not a batch | `LAW-LEDGER.md` **X28** (the locale formatting bug, fixed v1.0.1) and **O11** (the high-q roll limit cycle); `GENERALITY-REVIEW.md` finding 5. Cited from `WTMouseAimPlugin.cs`, `Recording.cs` |
 
 **Raw evidence** for R28–R37 is in `debugtests/archive/R<n>-<date>/` (CSVs, sidecars, logs). Later
@@ -671,6 +674,17 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
     (`AttackHelo1` diverges) which R42 retracted (`LAW-LEDGER.md` X29). The `config` column is the
     capture's own record of the levers **as flown**; a two-batch comparison must diff it first:
     `SELECT run_tag, count(*), config FROM captures WHERE run_tag IN (...) GROUP BY 1,3`.
+    **The same trap one level up: `cards/*.json` in the repo is not the card that flew.** The grid is
+    copied into `<game>/BepInEx/config/wtmouseaim-cards` **by hand**, so the deployed copy can be
+    older *or newer* than the batch. R44 is the worked example — `q-hi-300`/`q-lo-300` flew **4 lanes /
+    20 captures** off their airframe list because the card carried no `count` at the time; `count: 12`
+    was committed four minutes *after* the batch ended and re-deployed three minutes after that, so
+    both the repo file and the deployed file now claim a 12-lane / 60-capture card that has never run.
+    `check-card.py`'s cost estimate reads the same field and will quote the number that did not fly.
+    **What flew is in `LogOutput.log`, on the launch line** — `[drone] card '<name>' (…): airframe …
+    [card], N drone(s) [card '<name>' count | airframe list (K named)]` — and it names the *source* of
+    every value, which is the whole reason that line prints. Cross-check against the corpus with
+    `SELECT card, count(DISTINCT drone) lanes, count(*) caps FROM captures WHERE run_tag = '…' GROUP BY 1`.
 
 16. **Reading `entry_alt_from` as the altitude a capture FLEW.** It is where the drone was *before*
     placement; `entry_alt_to` is where the card put it, and that is always the card's own `startAlt`.
@@ -684,3 +698,56 @@ python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --f
     returns 1 for every row in the table today. Corollary: **on a fixed-`startAlt` card the only q
     lever is speed**, and speed is set per-airframe by `startSpeedCorner`, so q comes out confounded
     with airframe unless the card crosses it some other way.
+
+17. **A capture that died inside its `arm` window still has `segments` rows, so a capture-count or a
+    segment-count reports data that does not exist.** `excluded = 1` segments carry **no metrics at
+    all** by construction (`type = 'arm'`), so `count(*)` over `captures` or over `segments` counts
+    them exactly like a scored capture and the query returns a plausible small-n instead of zero.
+    R44's `rotor-weathervane-60` is the worked example: 2 captures, 76 and 27 rows (1.5 s / 0.5 s of
+    a 186 s card), **one `arm` segment each plus one stray `unsegmented` row, and zero scored
+    segments** — the game was closed before the card left its settling window. Reading "2 captures"
+    as "an underpowered sample" rather than "no sample" is the whole trap; there was nothing to be
+    underpowered *with*. Always qualify:
+    ```sql
+    -- captures that actually produced SCORED data, not merely rows
+    SELECT ca.card, count(DISTINCT ca.id) caps, count(*) scored_segs
+      FROM captures ca JOIN segments s ON s.capture_id = ca.id
+     WHERE ca.run_tag = 'R44' AND s.excluded = 0 GROUP BY 1;
+    ```
+    Two cheap corroborating tells on the same rows: `captures.stop` is **NULL** when the footer never
+    got written (a truncated run), and `captures.arm` is NULL on the anchor replicate anyway
+    (`LAW-LEDGER.md` **X27**), so a truncated card very often leaves behind *only* anchor replicates —
+    i.e. the surviving captures are the ones that were armed as neither arm.
+
+18. **`sd(outR)` in a settled tail is a COUNT OF PRINT QUANTA, not an amplitude — the stick columns
+    have a resolution floor of their own, and it is coarser than `off`'s.** `outP`/`outR`/`outY` are
+    written `{0.000}` (`Recording.cs:590`), so the quantum is **1e-3 of full stick**. In R44's
+    `q-hi-300`/`q-lo-300` settled tails (t ≥ 10 s of a 20 s `fine_track`, 6 410 rows) `outR` occupies
+    **14 distinct values** on the high-q card and 32 on the low-q one, spanning ±0.007 / ±0.009, with
+    **~34% of samples reading exactly `0.000`**; per-cell `sd` is **0.0010–0.0021 — one to two
+    quanta.** A between-condition difference of 0.0002 is a fifth of a print step and orders nothing,
+    exactly as `terminalOffDeg` below 0.0396° orders nothing (gotcha 11). **`stickFlipRate{P,R,Y}` is
+    the same floor after a sign test:** every one of those 40 segments scored `stickFlipRateR` = 0.05
+    or 0.10 — literally **1 or 2 sign changes in 20 s**, one of which is the commanded reversal — and
+    the two cards' means are *identical to four decimals* (0.0564 vs 0.0564, n=32 each).
+    **Both were R43's evidence for the q-dependence of the roll constants; its quoted `outR` sd range
+    0.0007–0.0045 is 0.7–4.5 quanta, the low end sub-quantum** (`LAW-LEDGER.md` **X34**). Rules:
+    - Below ~0.01 of stick, use a **physical** column instead — `rollRate` is also `{0.000}` but in
+      rad/s, so the same motion occupies 46–63 codes rather than 14, i.e. ~4× the usable resolution.
+    - `wobbleEpisodes*` = 0 and `wobbleFreqHz*` = NULL are the *correct* readings on such a signal,
+      not a null result to report; the detector is refusing to fit noise.
+    - `count(DISTINCT r.outR)` over the window you are about to take an `sd` of is the one-line check.
+
+19. **`replicate` is COMPUTED per `(session, drone, card)`, and a lane RESPAWN gets a NEW `drone`
+    id** — so every retry after a fatal abort restarts the count and reads `replicate = 1`. R44's 27
+    `FastBomber1` placement kills are all `replicate = 1` and that is **not** evidence that only the
+    anchor replicate is affected; it is 9 lanes × 3 spawn attempts, each attempt a fresh `drone`.
+    The log line that goes with it (`suite ended with 1 of 5 replicate(s) ABORTED`) is the same
+    artefact read from the other side: a fatal abort ends the suite, so the tally is always *one*
+    aborted out of however many the queue held. **`entry_respawn` is the column that tells them
+    apart** (NULL = first spawn, 1/2 = retry), and the physically meaningful "is this an anchor
+    placement" test is `entry_snapBackM = 0`, never `replicate = 1`:
+    ```sql
+    SELECT card, drone, replicate, entry_respawn, entry_snapBackM, aborted
+      FROM captures WHERE run_tag = 'R44' AND airframe = 'FastBomber1' ORDER BY rec;
+    ```

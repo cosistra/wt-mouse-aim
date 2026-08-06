@@ -165,6 +165,7 @@ namespace** from `LAW-CHARACTERIZATION.md` §7's `#n`.
 | `16` | HIGH | `lateralHold` rails and disconnects the ENTIRE bank pipeline | SPLIT VERDICT (2026-08-02): the `blendWeight` hand-off… | 452 |
 | `17` | MEDIUM | v0.85 `AlignRateLead` makes the roll DERIVATIVE gain a function of `blendWeight` | STRUCTURAL, and FLOWN NULL on the 6° oblique (R41) | 498 |
 | `18` | HIGH | the AoA schedule rails at a hardcoded 0.300 floor while the airframe departs | OPEN (MEASURED, R32) | 538 |
+| `19` | MEDIUM | the tiltwing arm of `heliBlend` is THROTTLE-LATCHED, not derived from flight state | OPEN (MEASURED, R44) — survives the O13 fix; the gate saturates either way | 603 |
 
 <!-- FINDING-INDEX:END -->
 
@@ -220,7 +221,7 @@ phase-margin arithmetic hardcodes the fitted UH-90/RAH-72 lag. A modded helo wit
 shifts the margin. Measuring the lag online (achieved vs commanded rate — the same machinery as
 finding 2, helo edition) would close it.
 
-### 5. HIGH — the roll axis is the least normalized axis — OPEN (STRUCTURAL); the field cycle did NOT reproduce (R43, 2026-08-02)
+### 5. HIGH — the roll axis is the least normalized axis — OPEN (STRUCTURAL); the field cycle did NOT reproduce (R43), and the q-scaling itself did NOT survive a crossed design (R44, 2026-08-05)
 
 > **PROMOTED MEDIUM → HIGH, 2026-08-02, on a field report — then the harness re-fly came back clean.
 > Read both blocks; the structural violation survives, the "the corpus cannot see it" argument does
@@ -270,6 +271,37 @@ finding 2, helo edition) would close it.
 > highest-q lane — was lost to a placement kill on 3 of 3 attempts. Every airframe therefore
 > contributes one q band and the between-airframe slope cannot be separated from the airframe. The
 > **within**-airframe Spearmans above are the defensible half.
+>
+> **THE CROSSED DESIGN WAS FLOWN (R44, 2026-08-05) AND THE ABOVE q-SCALING PARAGRAPH IS WITHDRAWN —
+> BOTH ITS RESULT AND ITS INSTRUMENT.** `q-hi-300` / `q-lo-300` is the design X32 forced: identical
+> roster (`Fighter1`, `Multirole1`, `SmallFighter1`, `FastBomber1`), identical geometry, identical
+> 300 m/s entry and 0.45 throttle pin, **`startAlt` 2500 vs 8000 m the only declared difference**, so
+> q is crossed with airframe instead of nested in it. The lever landed: measured q **37.0–46.0 kPa**
+> vs **25.0–32.0 kPa**, a **1.44–1.52×** ratio per airframe with **no within-airframe overlap**
+> (20 captures per card, 4 lanes × 5 replicates, anchor replicate excluded per `LAW-LEDGER.md` X27).
+> **The predicted consequence did not appear.** The card's own confirm criterion — `outR` sd higher
+> at 2500 m for *every* airframe — holds on **2 of 4**, and pooled it leans the other way (0.00119 hi
+> vs 0.00134 lo, ratio 0.884, permutation **p = 0.158**, n = 32/32). `stickFlipRateR` is **identical
+> to four decimals on both cards** (0.0564). `rmsPointingErrorDeg` is flat (ratio 1.005, p = 0.905).
+> The only significant mover, `rollRate` sd, runs **against** this finding — 0.00435 hi vs 0.00571 lo,
+> p = 0.039 — i.e. *more* residual roll motion in *thinner* air, which is what aerodynamic roll
+> damping ∝ q predicts and is not what an unnormalized gain does.
+>
+> **And R43's +0.891 was an artifact of the instrument's print resolution.** `outR` is written
+> `{0.000}`; in these settled tails it occupies **14–32 distinct codes** with ~34% of samples exactly
+> 0.000, so a per-cell sd of 0.0010–0.0021 is **one to two print quanta** and R43's 0.0007 low end is
+> *sub*-quantum (`debugtests/CAPTURES-DB.md` gotcha 18). Any future roll-normalization A/B must score
+> a physical column — `rollRate`, ~4× the usable resolution — not the stick.
+>
+> **What this leaves.** The ONE-LAW violation is **exactly as structural as before and no less real**:
+> `RollGain` / `RollDamping` / `RollRateSmoothing` are global constants at v1.0.3, and `qSched` — the
+> law's only dynamic-pressure term — is **railed at 1.000 on every row of both cards**, because it is
+> a *low*-q **pitch** schedule (`Mathf.Clamp(qRatio, 0.3f, 1f)`, `ChaseController.cs:1174`) and both
+> cards fly above corner. The roll channel has **no q term at all** anywhere in the flown range. What
+> is now measured is that this costs **nothing observable at fine-tracking amplitudes over a 1.5×
+> q lever**. The finding's remaining live evidence is the field limit cycle at **~1.15 peak-to-peak** —
+> three orders of magnitude above anything a scripted card has excited — so the case for the fix rests
+> on O11's pilot-excitation hypothesis, not on a measurable gradient. `LAW-LEDGER.md` **X34**.
 
 **Regressed to OPEN (v0.65).** The measured roll-effectiveness normalization lived ONLY in Unified's
 geodesic roll servo (`_rollEffFilt`, the roll twin of `_pitchEff`/`_yawEffFilt`), which was deleted
@@ -599,6 +631,45 @@ departure, it damages only the pilot (`Pilot.TakeGForceDamage`, `:85989`, 20 g t
 index), and clipping it removes the most visible failure signal while changing nothing about the
 authority problem. It would also be a sixth de-authorizing term on a law whose defect is that it
 already has five.
+
+### 19. MEDIUM — the tiltwing arm of `heliBlend` is THROTTLE-LATCHED, not derived from flight state — OPEN (MEASURED, R44)
+
+**A gate that decides whether the law treats the aircraft as a rotor or as a wing has, over the whole
+cruise envelope, no dependence on live physical state at all.** It saturates, and which rail it
+saturates against is picked by pilot throttle.
+
+**The measurement** (R44, `rotor-tilt-hold` / `-lo`, `QuadVTOL1`, n=10 captures each, `tiltwing=1`
+confirmed; both cards sit above `HeliForwardSpeed` so `speedRamp ≡ 0` and `heliBlend` **is**
+`tiltFrac` — ledger **O13**):
+
+| arm | `ScenarioThrottle` | speed band | `heliBlend` | spread |
+|---|---|---|---|---|
+| `rotor-tilt-hold` `az8thhi` | **1.00** | 150–153 m/s | **1.0000** | sd 0.0000, 9,602/9,602 rows exactly 1.000 |
+| `rotor-tilt-hold-lo` `az8thlo` | **0.25** | 67–72 m/s | **0.1820** | sd 0.0002 |
+
+Across a 120 → 152 m/s acceleration the gate does not move by one float ulp. The same is true at the
+other pin across 67 → 98 m/s. The only thing that moved it was the throttle.
+
+**Why this is a ONE-LAW violation and not just the O13 sign bug.** O13's one-line fix corrects the
+*sense* — `InverseLerp(1, 0.18, ·)` maps these two readings to 0.000 and 0.998 — but the *shape*
+survives the fix untouched: the gate is still a step function of throttle, still saturated at both
+ends, and `tBankE *= (1 − heliBlend)` is therefore still all-or-nothing. Post-fix the failure simply
+changes address: the `-lo` arm will run at `heliBlend` ≈ 1.0 — bank channel fully deleted — at
+**70 m/s**, above `HeliForwardSpeed`. Ship the O13 fix (it is strictly better than the inverted
+reading), then treat this as the open item behind it.
+
+**Why the law is entitled to more.** The tilt command is one *input* to "is this thing a wing right
+now", not the answer to it. The law already computes live evidence that answers it directly —
+dynamic pressure against the probed `wingAreaTotal`, and the measured roll/bank effectiveness
+estimators it uses everywhere else — and `max(speedRamp, tiltFrac)` throws all of that away in favour
+of a single latched reading. The ONE-LAW form blends on that live evidence with the tilt command as
+one term among several, so a tiltwing at 152 m/s with its wings level is a wing regardless of where
+the throttle sits.
+
+**Blast radius is narrow but total**: one archetype of the fourteen (`QuadVTOL1` is the only quad
+tiltwing), and on it the bank-to-turn channel is either fully present or fully absent. Related:
+finding **6** (the *plain-helo* arm of the same blend, absolute m/s constants) — same gate, different
+arm, and neither arm keys off anything probed.
 
 ## Suggested order of attack
 
