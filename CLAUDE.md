@@ -384,6 +384,22 @@ fix the prose too.** A green checker on a wrong diagram is the failure mode to a
 ## Local-only, not in a fresh checkout
 These are git-ignored (machine-specific or work-in-progress) — mentioned so an agent knows what the
 maintainer's tree has that yours won't:
+- `debugtests/captures.db` (~563 MB) — **the corpus.** Every offline conclusion in `LAW-LEDGER.md`
+  was derived from it. Too big for git (`debugtests/.gitignore`); rebuilt by `index-captures.py` from
+  raw captures, so it is reproducible in principle but not cheaply.
+- `debugtests/archive/` (~508 MB) — the raw per-batch CSV dumps already indexed into the db above.
 - `.claude/hooks/`, `.claude/settings.local.json` — the auto build+deploy hooks and local deploy paths.
 - `plans/` — design plans agreed but **not yet built** (parked "potential improvements"). Drop a new
   standalone markdown file here instead of starting code when an idea should be captured for later.
+
+**Moving the project to another machine.** `git clone` + `git checkout <branch>` gets the code, the
+cards, the tools and every standing doc — that is the whole repo. Then copy by hand, in this order of
+importance: **`debugtests/captures.db`** (without it no ledger claim can be re-checked and no new
+batch can be indexed against history), `plans/`, and optionally `.claude/hooks/` +
+`.claude/settings.local.json` (skip them and use the manual two-command build/deploy loop above).
+`debugtests/archive/` is optional — it is only needed to re-derive the db. To *fly* on the new
+machine you also need the game itself plus BepInEx 5 Mono x64 (see setup at the top), the cards
+copied into `<game>\BepInEx\config\wtmouseaim-cards\`, and `ScenarioBatchQueue` set — the queue
+strings for the current slate are in [`ROADMAP.md`](ROADMAP.md). Nothing else is machine-specific:
+`<game>` is auto-discovered and since v1.0.3 the card owns every run parameter, so a fresh
+`com.no.wtmouseaim.cfg` flies the same experiment this one does.
