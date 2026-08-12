@@ -110,6 +110,12 @@ cards in two days failed on arithmetic computable in advance — `alpha-sweep` (
 `startSpeed: 0` fell through to `DroneSpawnSpeed`). **`python debugtests/check-card.py cards/*.json`
 exists to catch this class. Run it before every batch.**
 
+**(e) A SPAWNED AGENT MUST BE TOLD THE PATH, NOT LEFT TO PICK ONE.** All current work is far ahead of
+`main`, and an agent that creates its own git worktree gets one branched from `main` — i.e. a tree
+without any of it. Six agents have now lost a run to this. **Every agent prompt says: work in
+`<repo path>` directly, do NOT create a worktree.** Same reason `git status` is worth one glance
+before believing a file is missing.
+
 ## 5. Build / deploy / test
 
 ```bash
