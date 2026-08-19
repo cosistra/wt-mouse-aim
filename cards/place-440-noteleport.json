@@ -1,0 +1,54 @@
+{
+  "name": "place-440-noteleport",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "FastBomber1",
+  "note": "FAMILY A, THE ISOLATOR - AND THE ONE CARD IN THE LADDER WHOSE OUTCOME IS GENUINELY UNKNOWN. A placement carries TWO things at once and R43 could not separate them: the entry SPEED, and a vertical TELEPORT. Per LAW-LEDGER.md X32 a lane spawns at startAlt +/- DroneAltDeckM/2 and PlaceOnCondition then teleports it to startAlt, so hs-hold's declared 'deck spread' was never an altitude spread - it was a 1500 m displacement applied to every lane at t=0, on top of writing 440 m/s into the rigid body. The rest of the ladder holds that displacement fixed at R43's 1500 m and varies speed. THIS CARD DOES THE OPPOSITE: identical airframe, identical geometry, identical 440 m/s, DroneAltDeckM = 0. Read TestDrone.DeckSpreadM and TestDrone.RingRadius before doubting it - the deck value is a SPREAD about startAlt, not an offset, so 0 collapses the fleet to ONE deck at exactly startAlt and the placement's vertical displacement is zero. The ring radius does not move with it: at 2 lanes both the one-deck and two-deck formulas are bound by the AbeamM 5000 m floor, so the deck is the only thing that changes between this card and 'place-440'. EITHER RESULT IS THE ANSWER, and this card deliberately declares no PASS side. LANES SURVIVE -> the teleport is a NECESSARY CO-FACTOR: the ceiling is about placement DISPLACEMENT at speed, not about speed alone, the whole ladder's rungs are measuring speed x 1500 m rather than speed, and the harness fix is to place at the spawn altitude. LANES DIE ANYWAY -> speed alone is sufficient, the ladder's rungs mean what they say, and the rung that first dies is the true ceiling. A 10-of-10 death here is as informative as a 10-of-10 survival; what would be uninformative is a split, which at n=10 would say the transient is marginal at 440 and the bracket needs the finer rungs. PAIRED ARM: 'place-440' (same everything, DroneAltDeckM = 3000). Fly BOTH or neither - a one-armed run here reproduces R43's ambiguity in a new place. The R43 arm exists (3 of 3 dead) but crosses a batch boundary, which is precisely what Family C is in the queue to test. count 2 for the same reason as place-400/420: ten draws, 3 s of stagger. THROTTLE 0.92 is (440/460)^2 off R43's single trim datum and is a first estimate - immaterial if the lane dies at t=0, and to be re-cut from the capture if it does not. FLOWN R44 (v1.0.3, 2026-08-05) - THE CARD IS VALID AND ITS PREMISE IS DEAD. This ladder was built on R43's bracket 'placement above ~400 m/s destroys an aircraft'. It does not survive its own rung set. FastBomber1 aborted 'aircraft gone' at 0.0 s on EVERY rung - 440, 420, 400, 390, 375 AND 300 m/s - while its sibling keys on the multi-airframe rungs flew the full 46 s, and the isolator place-440-noteleport (identical except DroneAltDeckM: 0) placed FastBomber1 at 440 m/s and wrote 10 of 10 complete captures. So speed is not a factor at either end. What predicts the kill is the ANCHOR placement: with a non-zero deck, replicate 1 is a 1500 m move off the spawn deck, and that is 100% fatal to FastBomber1 (31/31 across R40+R43+R44) and harmless to every other key (0/24). It is not displacement size either - the same airframe survives 26.3 km mid-run snapbacks and 3894 m of mid-run altitude change. Mechanism (PLAUSIBLE): FastBomber1 is one of only two variable-geometry keys in the corpus, and SwingWingController.RotatorInput.Animate writes counterRotators[i].transform.Rotate(...) every FixedUpdate the wing is slewing - a Transform write on an unparented AeroPart body, which is exactly the act the MoveAssembly graveyard bans. See LAW-LEDGER.md X33 (refuted) and I12 (the predictor), LAW-CHARACTERIZATION.md §7 Tier 1 (i) for the fix and its confirmation card. DO NOT RE-FLY THIS LADDER - the isolator already answered it in 10 captures. To reach the high-speed band today, pin DroneAltDeckM: 0 on any card carrying FastBomber1. THIS IS THE ISOLATOR AND IT IS THE MOST VALUABLE CARD OF THE SEVEN: 10 of 10 captures, 736-737 rows each, FastBomber1 placed at 440 m/s with DroneAltDeckM: 0. Its replicates 2-5 also snap back ~20.3 km at 440 m/s without complaint, which is what rules out displacement size. It is the corpus's only clean 440 m/s fixed-wing data.",
+  "startSpeed": 440,
+  "startAlt": 4000,
+  "count": 12,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.92"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "0"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": -1.0,
+      "el": 0
+    },
+    {
+      "tag": "finePL440NTR",
+      "dur": 20,
+      "az": 1.0,
+      "el": 0
+    },
+    {
+      "tag": "finePL440NTL",
+      "dur": 20,
+      "az": -1.0,
+      "el": 0
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using BepInEx.Configuration;
 using HarmonyLib;
 using Rewired;
 using UnityEngine;
@@ -14,21 +16,33 @@ namespace NuclearOptionMouseAim
     // blend roll between "bank toward target" (far off) and "wings level" (on target). We fully OWN
     // the stick while active (native is skipped); only a short ramp on disengage. The game's FBW/
     // AutoTrimmer limit G/AoA downstream, so no integral term — just P + a slew-rate limit.
-    internal static class ChaseController
+    //
+    // ONE INSTANCE PER AIRCRAFT (v0.82). Every field below is per-aircraft state — integrators,
+    // filters, the ring buffer, the reflection probe caches, the phase/maneuver trackers. As statics
+    // they were fine while exactly one aircraft was ever flown by the mod; the v0.81 drone harness
+    // flies N at once, and N aircraft sharing one integrator does not produce a slightly worse
+    // capture, it produces a meaningless one. Get a controller through `For(aircraft)` — never
+    // `new` — so the same aircraft always gets the same state back. The handful of members that
+    // remain `static` are genuinely process-global and each says why at its declaration: the Rewired
+    // player-0 cache (one input device per process), the anomaly stream's index/flash fields plus the
+    // trail throttle (one log stream per process), and — v0.94 — the A/B arm map, which is static
+    // precisely BECAUSE it is keyed by aircraft: it holds N independent assignments and has to
+    // outlive the per-replicate `Forget` that drops the controllers (see the ARM-SEAM note).
+    internal sealed class ChaseController
     {
-        private static bool  _active;     // owning the stick this frame
-        private static bool  _wasActive;  // last frame (edge detection)
-        private static float _outP, _outR, _outY;
-        private static float _disRamp;    // 1->0 disengage blend
-        private static Vector3 _prevFwd;  // last frame's nose direction (for pitch/yaw rate damping)
-        private static Vector3 _prevUp;   // last frame's up axis (for roll-rate damping)
-        private static bool  _prevFwdValid;
-        private static float _lastChaseLog; // throttle the [chase] trace to ~5/sec
+        private bool  _active;     // owning the stick this frame
+        private bool  _wasActive;  // last frame (edge detection)
+        private float _outP, _outR, _outY;
+        private float _disRamp;    // 1->0 disengage blend
+        private Vector3 _prevFwd;  // last frame's nose direction (for pitch/yaw rate damping)
+        private Vector3 _prevUp;   // last frame's up axis (for roll-rate damping)
+        private bool  _prevFwdValid;
+        private float _lastChaseLog; // throttle the [chase] trace to ~5/sec
 
         // Per-axis manual override-on-touch state. _eng* is 0 (mouse-aim owns the axis) .. 1 (you own it);
         // _mApply* freezes the manual value at release so the axis eases back to chase, not to zero.
-        private static float _engP, _engR, _engY;
-        private static float _mApplyP, _mApplyR, _mApplyY;
+        private float _engP, _engR, _engY;
+        private float _mApplyP, _mApplyR, _mApplyY;
         private static Player _rewired;   // cached Rewired player 0 (same one PilotPlayerState reads)
 
         // Global hard-handoff state (v0.49). When ManualHandoffTime > 0 the per-axis blend is replaced
@@ -38,40 +52,54 @@ namespace NuclearOptionMouseAim
         // only re-engages once _manualHold counts back down to 0 (i.e. that many seconds after your last
         // input). _gEng in [0,1] is the global manual->instructor blend (1 = you own it, eases to 0 as
         // the chase takes back over) — the global twin of the per-axis _eng*.
-        private static float _manualHold;  // seconds the instructor stays off after the last manual input
-        private static float _gEng;        // 1 = full manual on all axes, 0 = full instructor
+        private float _manualHold;  // seconds the instructor stays off after the last manual input
+        private float _gEng;        // 1 = full manual on all axes, 0 = full instructor
 
         // Fine-regime integrator state (v0.24). The game's FBW is a rate-command law, so a proportional
         // outer loop asymptotes and parks short; these wind in the steady bias that closes the last bit.
-        private static float _iPitch, _iYaw;
+        private float _iPitch, _iYaw;
+
+        // CLOSURE-STALL GATE (v0.83) — the persistence half of the integrator gate. Through v0.82 the
+        // only thing that let _iPitch/_iYaw wind was fineBlend, a function of error MAGNITUDE (off <
+        // FineAngle), so the term whose whole job is killing steady-state residual was switched OFF
+        // exactly where a residual stood: R21's ten sustained-turn replicates parked at off ~10.2 deg
+        // with FineAngle 6, and recorded iPitch at +/-0.001 against its 0.12 cap for the whole 30 s.
+        // The condition for integral action is "the proportional path has FAILED to close this error",
+        // not "the error is small". _stallFilt in [0,1] is that measurement: 1 = the nose is rotating
+        // but none of that rotation is shrinking the error. _prevOffTrk is the previous frame's off
+        // (< 0 = no valid previous sample). Deliberately NOT the anomaly detector's _prevOff — that one
+        // is only updated inside DetectAnomalies, which runs only while AnomalyLogging is on, so
+        // borrowing it would make the control law depend on a diagnostics toggle.
+        private float _prevOffTrk = -1f;
+        private float _stallFilt;
 
         // Fly Level autopilot (v0.24). When active, the chase ignores the marker and flies straight-and-
         // level at the heading captured on toggle-on (horizontal projection of the nose at that instant).
-        public static bool FlyLevelActive;
-        private static Vector3 _levelHeading = Vector3.forward; // world-space, horizontal, unit
+        public bool FlyLevelActive;
+        private Vector3 _levelHeading = Vector3.forward; // world-space, horizontal, unit
 
         // Anomaly detection state (v0.25). Event-only logger: each detector keeps a little rolling state
         // and emits ONE [anomaly] line on the triggering frame, with a per-type cooldown.
-        private static float _offMin = float.MaxValue;          // closest approach during the current command (overshoot)
-        private static float _prevOff;                          // last frame's off (closing test)
-        private static float _huntWinStart;                     // start of the 1 s sign-flip window
-        private static int   _flipsP, _flipsY;                  // output sign-flips this window (hunt)
-        private static float _prevSignP, _prevSignY;            // last non-trivial output sign per axis
-        private static float _missTimer;                        // seconds off has stayed high while saturated (no progress)
-        private static float _missAnchorOff;                    // off captured at the start of the current stall window
-        private static float _yawWagWinStart;                   // start of the low-speed yaw-wag window
-        private static int   _yawWagFlips;                      // yaw output sign-flips this window (low-speed wag)
-        private static float _prevSignYW;                       // last non-trivial yaw output sign (wag counter)
-        private static float _wobbleWinStart;                   // start of the high-speed roll-wobble window
-        private static int   _wobbleFlips;                      // roll output sign-flips this window (high-speed wobble)
-        private static float _prevSignRW;                       // last non-trivial roll output sign (wobble counter)
-        private static float _anOvershootT, _anOverRollT, _anHuntT, _anMissT, _anYawWagT, _anWobbleT, _anStressT, _anAzlcT; // per-type cooldown stamps
-        private static float _azlcWinStart;                      // az-limit-cycle (v0.58) half-window start
-        private static int   _azlcFlips, _azlcFlipsPrev;         // azErr sign flips, current/previous half-window
-        private static float _azlcPeak, _azlcPeakPrev;           // peak |azErr| per half-window (envelope)
-        private static float _azlcOutRMin, _azlcOutRMax;         // outR span this half-window (is roll chasing?)
-        private static float _azlcPrevAz;                        // last azErr (flip edge detect)
-        private static float _stressTimer;                      // seconds past the airframe's g/AoA limits (overstress detector)
+        private float _offMin = float.MaxValue;          // closest approach during the current command (overshoot)
+        private float _prevOff;                          // last frame's off (closing test)
+        private float _huntWinStart;                     // start of the 1 s sign-flip window
+        private int   _flipsP, _flipsY;                  // output sign-flips this window (hunt)
+        private float _prevSignP, _prevSignY;            // last non-trivial output sign per axis
+        private float _missTimer;                        // seconds off has stayed high while saturated (no progress)
+        private float _missAnchorOff;                    // off captured at the start of the current stall window
+        private float _yawWagWinStart;                   // start of the low-speed yaw-wag window
+        private int   _yawWagFlips;                      // yaw output sign-flips this window (low-speed wag)
+        private float _prevSignYW;                       // last non-trivial yaw output sign (wag counter)
+        private float _wobbleWinStart;                   // start of the high-speed roll-wobble window
+        private int   _wobbleFlips;                      // roll output sign-flips this window (high-speed wobble)
+        private float _prevSignRW;                       // last non-trivial roll output sign (wobble counter)
+        private float _anOvershootT, _anOverRollT, _anHuntT, _anMissT, _anYawWagT, _anWobbleT, _anStressT, _anAzlcT; // per-type cooldown stamps
+        private float _azlcWinStart;                      // az-limit-cycle (v0.58) half-window start
+        private int   _azlcFlips, _azlcFlipsPrev;         // azErr sign flips, current/previous half-window
+        private float _azlcPeak, _azlcPeakPrev;           // peak |azErr| per half-window (envelope)
+        private float _azlcOutRMin, _azlcOutRMax;         // outR span this half-window (is roll chasing?)
+        private float _azlcPrevAz;                        // last azErr (flip edge detect)
+        private float _stressTimer;                      // seconds past the airframe's g/AoA limits (overstress detector)
 
         // Anomaly index + on-screen flash (v0.25.2). Every anomaly that clears its cooldown gets the next
         // sequential number (monotonic across the whole session, so #N is unambiguous even across respawns).
@@ -86,37 +114,66 @@ namespace NuclearOptionMouseAim
         // plan is legible on the HUD ("PHASE: ALIGN"), and emits ONE [maneuver] summary line per completed
         // turn — the "how did the planned path actually work out" record. Phase is surfaced always; the
         // maneuver tracker only runs while AnomalyLogging is on (it reuses the overshoot flag).
-        public  static string LastPhase = "";                   // surfaced to OnGUI + the [anomaly] line
-        private static bool   _manvActive;                      // a maneuver (off rose above AlignAngle) is in progress
-        private static float  _manvStartT, _manvStartOff, _manvPeakOff; // start time / start & peak off
-        private static float  _manvAlignT, _manvCaptureT;       // sec to first |phi|<20deg / first off<FineAngle (-1 = not yet)
-        private static float  _manvPeakBank, _manvPeakG, _manvPeakRoll; // peak |bank| / |g| / |rollRate| over the maneuver
-        private static float  _manvSettle;                      // sec off has stayed under FineAngle (capture-settle timer)
-        private static bool   _manvOvershot;                    // an overshoot anomaly fired during this maneuver
+        public  string LastPhase = "";                   // surfaced to OnGUI + the [anomaly] line
+        private bool   _manvActive;                      // a maneuver (off rose above AlignAngle) is in progress
+        private float  _manvStartT, _manvStartOff, _manvPeakOff; // start time / start & peak off
+        private float  _manvAlignT, _manvCaptureT;       // sec to first |phi|<20deg / first off<FineAngle (-1 = not yet)
+        private float  _manvPeakBank, _manvPeakG, _manvPeakRoll; // peak |bank| / |g| / |rollRate| over the maneuver
+        private float  _manvSettle;                      // sec off has stayed under FineAngle (capture-settle timer)
+        private bool   _manvOvershot;                    // an overshoot anomaly fired during this maneuver
 
         // Recent-frame ring buffer (v0.25.1): every FixedUpdate we stash a compact state snapshot here but
         // log NOTHING. When a detector fires, DumpTrail emits the last ~20 frames as a single [anomaly:trail]
         // line so the lead-UP to the event is visible (how the wag built / how the bank blew past) without
         // any continuous spam. Formatting only happens on a real anomaly, so the buffer itself is free.
         private struct AnFrame { public float t, off, bank, tgtBank, p, r, y, yr, rr, rf, spd, g; }
-        private static readonly AnFrame[] _ring = new AnFrame[64];
-        private static int   _ringHead;     // next write index
-        private static int   _ringCount;    // valid entries (<= _ring.Length)
+        private readonly AnFrame[] _ring = new AnFrame[64];
+        private int   _ringHead;     // next write index
+        private int   _ringCount;    // valid entries (<= _ring.Length)
         private static float _lastTrailT;   // one trail dump per second across all anomaly types
-        private static float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
-        private static float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
+        private float _rollRateFilt;    // low-pass-filtered roll rate feeding the damping term (anti high-speed roll PIO)
+        private float _headingRateFilt; // low-passed world heading rate of the NOSE (deg/s, + = swinging right). Feeds the
                                                // v0.51 anticipatory lead on the turn-rate bank command (azErrPred in Apply). Nose-only
                                                // (marker-independent), so the lead can never fight a mouse flick.
-        private static float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
-        internal static float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
+        // Low-pass time constant shared by BOTH world-azimuth rate signals — the nose rate above and the
+        // v0.78 marker rate below. v0.54 raised it 0.18->0.35: the ±3 deg/s ripple at 1.3-1.5 Hz was feeding
+        // the brake-clamp rectifier (LAW-LEDGER.md L7 / GENERALITY-REVIEW finding 12); ~2x more attenuation there costs ~0.2 s of
+        // rollout timing. ONE const on purpose — the two signals meet inside the same omega, so a mismatched
+        // tau would show up as a PHASE error between them, which no gain can tune out.
+        // ponytail: fixed, not a Cfg knob; promote to Cfg if flight tuning ever wants it.
+        private const float HdgRateTau = 0.35f;
+        private float _tBankSlewed;     // v0.54: slew-limited EvolvedLegacy bank target (deg) — rate-limit state
+        internal float _tBankFlown;     // bank target the active law's roll servo actually flies (deg) — recorder column tBankE
                                                // (the recorded targetBank is the shared yawWeak-gated blend, which EvolvedLegacy does
                                                // NOT fly; reading it cost two red herrings in the v0.53 analysis)
-        private static float _eAlignSlew;      // v0.57: slew-limited big-turn roll-alignment error — breaks the ~1 Hz tail-on
+        private float _eAlignSlew;      // v0.57: slew-limited big-turn roll-alignment error — breaks the ~1 Hz tail-on
                                                // roll relay (phi sign-flips in one tick when the target crosses dead-astern;
                                                // eAlign followed it rail-to-rail, bypassing every bank-target slew/deadzone)
-        private static float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
-        private static float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
-        private static float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
+        // v0.85 ALIGN-CHANNEL RATE LEAD. phi is the roll-to-align channel's ENTIRE error signal and the
+        // channel was pure-P on it; this is its derivative, low-passed with the same HdgRateTau as the two
+        // world-azimuth rates so all three rate signals share one phase. Measured, not modelled: it is the
+        // TOTAL bearing rate (aircraft roll + pitch/yaw + the marker's own motion), which is what makes the
+        // lead track a sweeping marker instead of braking it — the v0.83 relative-rate lesson applied to
+        // this channel. DeltaAngle so the ±180 wrap is a no-op; invalidated (not held) whenever |lateral|
+        // falls under the conditioning floor, because phi is meaningless there and a stale rate would be
+        // injected the moment it becomes meaningful again.
+        private float _phiRateFilt;
+        private float _prevPhi;
+        private bool  _prevPhiValid;
+        // atan2 conditioning floor on |lateral| (~sin FineAngle 6°): below it BOTH local.x and local.y are
+        // ~0 and phi is junk. Class-level since v0.85 because the rate above and the eAlign target in the
+        // law must gate on the SAME number — a rate that survives a gate the target does not would feed
+        // near-boresight noise straight into the align channel. Regime constant (geometry), not per-plane.
+        private const float EAlignLatGate = 0.10f;
+        // Roll-loop decision variables surfaced for the recorder (columns bSup / bWt / phiLead) — the
+        // v0.78/v0.83 rule: an A/B whose fix and whose no-op both read as "less oscillation" is not
+        // measurable unless the capture says which one happened. Written every frame the law runs.
+        private float _belowSup;        // below-nose roll-to-align suppression actually applied [0,1]
+        private float _blendW;          // roll blend weight AFTER suppression — the loop gain itself
+        private float _phiLead;         // deg of bearing lead actually added to phi (0 when the lever is off)
+        private float _aoaPrev;         // v0.57: last frame's AoA (deg) for the gate's predictive lead
+        private float _aoaRateFilt;     // v0.57: low-passed AoA rate (deg/s) feeding the predictive AoA gate
+        private float _alphaSchedFilt = 1f; // v0.59: smoothed AoA-utilization demand schedule (1 = full demand,
                                                // down to the 0.3 q-clamp floor near this airframe's own alpha ceiling).
                                                // Fast attack / slow release — the hysteresis that stops demand snapping
                                                // hot again as AoA falls back through the ceiling mid-cycle (loaded-jet fix)
@@ -126,18 +183,18 @@ namespace NuclearOptionMouseAim
         // when the rudder is empirically failing to CLOSE the heading error despite being commanded toward
         // it, and decays toward 0 otherwise. It has memory (the LPF) so it pre-biases the next nudge in the
         // same regime. _prevAzErr feeds the heading-closing rate. Reset on engage with the other detectors.
-        private static float _yawWeak;          // 0 = rudder is working, 1 = rudder ineffective -> bank-and-pull
-        private static float _yawEffFilt;       // low-passed |yawRate|/|outY| (diagnostic, logged to the CSV)
-        private static float _prevAzErr;        // last frame's azimuth error (deg) for d|azErr|/dt
-        private static bool  _prevAzErrValid;   // skip the first frame's bogus derivative
-        private static float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
+        private float _yawWeak;          // 0 = rudder is working, 1 = rudder ineffective -> bank-and-pull
+        private float _yawEffFilt;       // low-passed |yawRate|/|outY| (diagnostic, logged to the CSV)
+        private float _prevAzErr;        // last frame's azimuth error (deg) for d|azErr|/dt
+        private bool  _prevAzErrValid;   // skip the first frame's bogus derivative
+        private float _closeRateFilt;    // low-passed heading-closing rate (deg/s) — noise-robust derivative
 
         // Measured pitch-effectiveness estimate (v0.60) — the pitch twin of _yawWeak, consumed by
         // ApplyEvolvedLegacy. 1 = the plant delivers the commanded pitch rate; < 1 = it's under-delivering
         // (loaded / mushing / low-q / damaged). Low-passed achieved/commanded ratio of the game FBW's
         // own pitch rate pair, with the same fast-attack/slow-release asymmetry (memory/hysteresis) as
         // _yawWeak. Computed in Apply's shared pre-compute; reset to 1 on engage.
-        private static float _pitchEff = 1f;
+        private float _pitchEff = 1f;
         // v0.65 C1 reversal threshold AND v0.67 dead-command self-probe level — one const so they can't
         // drift apart. Below this, _pitchEff means "reversed/lost plant" (C1 drops the floor); it is also
         // the level a GATED-OUT command drifts toward so the pitch loop keeps a ~15% self-probe alive
@@ -149,21 +206,31 @@ namespace NuclearOptionMouseAim
         // inject a small V-INDEPENDENT sub-gate micro-bank that closes a high-q azimuth residual without
         // re-arming the V-scaled bank relay. _settleOn = did that injection fire this frame (recorder
         // column settleOn). _prevAim/_prevAimValid feed the rate. Reset on engage like the other estimators.
-        private static Vector3 _prevAim;
-        private static bool    _prevAimValid;
-        private static float   _aimRateFilt;
-        private static bool    _settleOK;
-        private static bool    _settleOn;
+        private Vector3 _prevAim;
+        private bool    _prevAimValid;
+        private float   _aimRateFilt;
+        private bool    _settleOK;
+        private bool    _settleOn;
+
+        // MARKER AZIMUTH RATE (v0.78) — the SIGNED world-azimuth rate of the aim direction (deg/s,
+        // + = sweeping right), in the same frame and sign convention as azErr and _headingRateFilt so the
+        // three are directly comparable, and low-passed with the SAME HdgRateTau as the nose rate.
+        // Deliberately NOT _aimRateFilt above: that one is an UNSIGNED total angular speed used only as a
+        // "is the marker moving at all" gate, and an unsigned magnitude cannot feed a signed turn demand.
+        // Fed forward into both omega sites — full rationale at the shared omegaDes site in Apply.
+        // _aimAzAcId guards the shared _prevAim sample against an aircraft change (see the compute block).
+        private float _aimAzRateFilt;
+        private int   _aimAzAcId = -1;
 
         // Hover / "flown-like-a-helicopter" regime state (v0.43). _collective latches the airframe class
         // (true = takeoffDistance==0 = heli/hover-VTOL) on engage; _heliBlend in [0,1] is the per-frame
         // regime blend (0 = fixed-wing bank-to-turn, 1 = hover yaw-to-point), computed in Apply from
         // forward airspeed + AutoHover. _vFwd/_hoverOn are surfaced for the CSV/trace. EvolvedLegacy only.
-        internal static bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
-        internal static float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
-        internal static float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
-        internal static float _speed;           // total airspeed magnitude (m/s) — surfaced for the debug HUD
-        internal static bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
+        internal bool  _collective;      // airframe is collective (heli / hover-VTOL); fixed-wing => always 0 heliBlend
+        internal float _heliBlend;       // 0 = full fixed-wing, 1 = full hover yaw-to-point
+        internal float _vFwd;            // forward-direction component of velocity (m/s) — the regime signal
+        internal float _speed;           // total airspeed magnitude (m/s) — surfaced for the debug HUD
+        internal bool  _hoverOn;         // game's AutoHover engaged this frame (forces heliBlend=1)
 
         // FBW probe cache (v0.55). The decompiled ControlsFilter.FlyByWire.Filter showed the pitch stick
         // is a g-scaled RATE command whose gain collapses below corner speed, and that the in-game
@@ -174,13 +241,13 @@ namespace NuclearOptionMouseAim
         // the plane can actually fly (see the FBW PROBE block in Apply). Cached per aircraft instance id;
         // EVERYTHING fails soft: helicopters (HeloControlsFilter / FBW disabled) or a game update renaming
         // a field just leave the probe not-ok and the pre-0.55 behaviour intact.
-        private static int   _fbwAcId;                   // aircraft instance id the cache belongs to
-        private static ControlsFilter.FlyByWire _fbwFbw; // resolved FBW block (null = unavailable)
-        private static bool  _fbwEnabled;                // FBW Enabled flag for the cached airframe
-        private static float _fbwCorner, _fbwMaxPitchVel;// public params ([2]=cornerSpeed, [1]=maxPitchAngularVel)
-        private static float _fbwGLimit = 9f, _fbwAlphaLimit = 25f, _fbwAlphaLimStr = 0.05f; // private trio (defaults = decompiled class defaults)
-        private static bool  _fbwRefsTried, _fbwRefsOk;  // AccessTools field-ref bootstrap (attempted once per session)
-        private static AccessTools.FieldRef<ControlsFilter.FlyByWire, float> _fbwGLimRef, _fbwALimRef, _fbwALimStrRef;
+        private int   _fbwAcId;                   // aircraft instance id the cache belongs to
+        private ControlsFilter.FlyByWire _fbwFbw; // resolved FBW block (null = unavailable)
+        private bool  _fbwEnabled;                // FBW Enabled flag for the cached airframe
+        private float _fbwCorner, _fbwMaxPitchVel;// public params ([2]=cornerSpeed, [1]=maxPitchAngularVel)
+        private float _fbwGLimit = 9f, _fbwAlphaLimit = 25f, _fbwAlphaLimStr = 0.05f; // private trio (defaults = decompiled class defaults)
+        private bool  _fbwRefsTried, _fbwRefsOk;  // AccessTools field-ref bootstrap (attempted once per session)
+        private AccessTools.FieldRef<ControlsFilter.FlyByWire, float> _fbwGLimRef, _fbwALimRef, _fbwALimStrRef;
 
         // CANARD PROBE cache (v0.57). The KR-67 Ifrit is the one airframe with a RelaxedStabilityController:
         // before the FBW ever sees the stick, the game REPLACES pitch with Lerp(AoA/canardRange, stick,
@@ -190,11 +257,11 @@ namespace NuclearOptionMouseAim
         // on the Ifrit only (buzz on up to 82% of a file, both assist states, back to v0.53). The mod
         // inverts the remap (see InvertCanardRemap) so the game delivers the pitch the law intended.
         // Same fail-soft rules as the FBW cache: missing component / renamed field => identity (old behaviour).
-        private static RelaxedStabilityController _rsCtrl; // null = airframe has none (everything but the Ifrit)
-        private static float _rsCanardRange;               // its serialized canardRange (deg)
-        private static bool  _rsRefsTried, _rsRefsOk;
-        private static AccessTools.FieldRef<Aircraft, RelaxedStabilityController> _rsCtrlRef;
-        private static AccessTools.FieldRef<RelaxedStabilityController, float> _rsRangeRef, _rsEffRef;
+        private RelaxedStabilityController _rsCtrl; // null = airframe has none (everything but the Ifrit)
+        private float _rsCanardRange;               // its serialized canardRange (deg)
+        private bool  _rsRefsTried, _rsRefsOk;
+        private AccessTools.FieldRef<Aircraft, RelaxedStabilityController> _rsCtrlRef;
+        private AccessTools.FieldRef<RelaxedStabilityController, float> _rsRangeRef, _rsEffRef;
 
         // HELO FBW PROBE cache (v0.58). Rotorcraft don't fly the base flyByWire the v0.55 probe reads:
         // HeloControlsFilter OVERRIDES Filter entirely and runs its own private heloFlyByWire — a 3-axis
@@ -205,18 +272,191 @@ namespace NuclearOptionMouseAim
         // NORMALIZATION block in ApplyEvolvedLegacy). The archetype refs drive the tilt/nozzle-angle
         // hover-regime blend. Same fail-soft contract as the FBW/canard probes: any miss leaves _heloOk
         // false / refs null and the exact pre-0.58 behaviour.
-        private static bool    _heloOk;                          // helo FBW resolved, Enabled, params sane
-        private static float   _heloGLimit    = 3f;              // its serialized gLimit (class default)
-        private static Vector3 _heloMaxAngVel = new Vector3(1f, 2f, 2f); // rad/s per unit stick (x=pitch, y=yaw, z=roll)
-        private static TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
-        private static SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
-        private static bool _hasCompound;                        // CompoundHeloController present (log-only for now)
+        private bool    _heloOk;                          // helo FBW resolved, Enabled, params sane
+        private float   _heloGLimit    = 3f;              // its serialized gLimit (class default)
+        private Vector3 _heloMaxAngVel = new Vector3(1f, 2f, 2f); // rad/s per unit stick (x=pitch, y=yaw, z=roll)
+        private TiltWingController _twc;                  // tilt-wing VTOL gauge (null = not this archetype)
+        private SwivelDuctSystem   _sds;                  // swivel-duct VTOL gauge (null = not this archetype)
+        private bool _hasCompound;                        // CompoundHeloController present (log-only for now)
+        // THE _collective THIS PROBE LAST RAN UNDER (v1.0.0) — and the reason the probe is retryable.
+        // ResolveHelo reads _collective, which BeginFrame latches; it was called ONLY from ResolveFbw's
+        // aircraft-change edge, and on the DRONE path that edge fires from ManeuverRecorder's `# fbw`
+        // header write (ScenarioPlayer.StartCard -> Toggle -> FbwHeader -> ResolveFbw) BEFORE the
+        // aircraft's first BeginFrame. So the probe early-returned on _collective == false and the edge
+        // was CONSUMED: _heloOk stayed false for the life of the aircraft and the whole v0.58 rotorcraft
+        // branch was dead on every drone capture ever taken (48/48 in debugtests/R39-rotor.md, proven by
+        // reconstruction to a median 0.0005 stick units and by ZERO [helofbw] lines against 12 [canard]).
+        // The trigger was the wrong edge for an input written after it, so the probe now carries its own:
+        // ResolveFbw re-asks every call and re-probes when the answer has changed. Fixed-wing is
+        // BYTE-IDENTICAL — _collective is false at the edge and stays false, so the retry never fires.
+        private bool _heloProbedAs;
 
-        public static bool IsFlying => _active;
+        // =========================================================================================
+        // THE REGISTRY (v0.82) — one controller per aircraft, keyed by Aircraft.GetInstanceID(),
+        // the same key TestDrone uses for its own dictionary.
+        // =========================================================================================
+        private static readonly Dictionary<int, ChaseController> _byAc = new Dictionary<int, ChaseController>();
+        private Aircraft _ac;   // the aircraft this controller belongs to — read ONLY by the eviction sweep
+
+        // UNCREWED (v0.87, harness phase 2). "Nobody is sitting in this aircraft", and therefore: do
+        // not read the human's Rewired stick, do not move the human's AimRig marker, do not touch the
+        // human's HUD. Those three are the ONLY things in this class that are one-per-process rather
+        // than one-per-aircraft, and every one of them is the player's.
+        //
+        // It is a plain instance bool, set by FlyUncrewed and never cleared, because an aircraft does
+        // not change crew state under its own controller (Forget drops both together). That is also
+        // what makes non-negotiable #1 checkable rather than argued: the crewed path CANNOT reach the
+        // uncrewed branches, because the only writer is FlyUncrewed, which is only reachable from
+        // TestDronePatch, which resolves against a dictionary an aircraft can only enter through
+        // TestDrone.Spawn — and Spawn asserts `ac.Player == null` before registering.
+        // check-architecture.py enforces both halves of that sentence.
+        private bool _uncrewed;
+
+        // THE HUD'S CONTROLLER. OnGUI has no aircraft in hand and must show the LOCAL PLAYER's
+        // numbers — never a drone's, which is the whole reason the controller stopped being static.
+        // BeginFrame publishes itself here only when its aircraft is the one the game calls local, so
+        // a drone can never claim it. Null until the player has flown one fixed step, hence every
+        // HUD read is null-conditional.
+        internal static ChaseController Player { get; private set; }
+
+        // The controller for this aircraft, created on first use. Never `new ChaseController()`
+        // anywhere else: a second instance for the same aircraft is a silently-reset integrator.
+        internal static ChaseController For(Aircraft ac)
+        {
+            int id = ac.GetInstanceID();
+            if (_byAc.TryGetValue(id, out var c)) return c;
+            // EVICTION, on the MISS path only. A miss happens once per aircraft, not once per fixed
+            // step, so the sweep costs nothing on the hot path while still bounding the dictionary
+            // over an unattended session (every drone spawn and every player respawn is a new
+            // aircraft). Unity reports a destroyed object as null WITHOUT throwing, so a dead entry
+            // never announces itself — it just keeps a corpse mapped forever.
+            Sweep();
+            c = new ChaseController { _ac = ac };
+            c.SeedArm(id);   // v0.94: the A/B arm OUTLIVES the controller — see the ARM-SEAM note below
+            _byAc[id] = c;
+            return c;
+        }
+
+        // Drop an aircraft's controller. Idempotent; safe to call for an aircraft that never had one.
+        // TestDrone calls this from both removal paths (deliberate despawn and the prune of a drone
+        // the game removed under us), which is what keeps a long unattended run flat.
+        //
+        // IT DOES NOT DROP THE ARM (v0.94), and that is the load-bearing half of the seam below:
+        // ScenarioPlayer.PlaceOnCondition calls this on EVERY replicate, so clearing the assignment
+        // here would silently un-sweep every A/B while each capture still labelled itself arm=0/arm=1.
+        internal static void Forget(Aircraft ac) { if (ac != null) Forget(ac.GetInstanceID()); }
+
+        internal static void Forget(int aircraftId)
+        {
+            if (_byAc.TryGetValue(aircraftId, out var c))
+            {
+                if (ReferenceEquals(c, Player)) Player = null;   // don't leave the HUD reading a corpse
+                _byAc.Remove(aircraftId);
+            }
+        }
+
+        // =========================================================================================
+        // THE A/B ARM SEAM (v0.94) — how the law reads a knob an experiment is SWEEPING.
+        //
+        // The five bools Cfg marks `(A/B lever)` are what an attribution card alternates. Until now
+        // the law read them straight off the process-global ConfigEntry, so N aircraft physically
+        // could not fly different arms in the same instant and ScenarioPlayer had to STAND THE WHOLE
+        // SCHEDULE DOWN the moment a second aircraft was mid-card — every A/B was a one-drone serial
+        // grind, which is why all five `e*` cards pin `count: 1`.
+        //
+        // Now the sweep goes through the CONTROLLER instead: `Arm(entry)` returns THIS aircraft's
+        // assigned value when the assignment names that entry, and the live config value otherwise.
+        // Nothing writes Cfg any more, so the human's own F1 setting is still exactly what he flies
+        // while a drone batch sweeps around him.
+        //
+        // A NEW A/B LEVER MUST BE READ THROUGH Arm() TO BE SWEEPABLE. Reading it as `Cfg.X.Value`
+        // compiles and flies — it is simply invisible to the schedule, which is the same
+        // silently-answers-a-different-question failure this release exists to remove. And ONLY the
+        // levers go through here: this is the sweep seam, not a general config indirection layer, and
+        // every unnecessary conversion is a string compare on the hot path buying nothing.
+        //
+        // THE ASSIGNMENT LIVES IN THE REGISTRY, NOT IN THE INSTANCE. `ScenarioPlayer.PlaceOnCondition`
+        // calls `Forget(ac)` on every replicate (the v0.84 per-replicate reset), so a plain instance
+        // field would be wiped at the start of every single replicate. That is not merely a
+        // workaround for the reset: the arm is a property of THE AIRCRAFT'S CURRENT TEST ASSIGNMENT,
+        // not of the controller's integrator state, so surviving a controller reset is the correct
+        // semantics — an integrator is what the last few seconds of flying left behind, an arm is what
+        // the suite decided this replicate is measuring. Exactly two things clear it: the suite that
+        // set it, in Finish, and TestDrone.ForgetState on despawn.
+        //
+        // The map is a third `static` in this class (with the Rewired cache and the anomaly stream),
+        // and it is process-global for the same reason they are: it is keyed BY AIRCRAFT, so it holds
+        // N independent assignments rather than one shared one.
+        // --- ARM-SEAM BEGIN ---
+        // KeyValuePair rather than a tuple purely so the region stays trivially compilable on its own
+        // (see the debugtests note under SetArm).
+        private static readonly Dictionary<int, KeyValuePair<string, bool>> _armByAircraft =
+            new Dictionary<int, KeyValuePair<string, bool>>();
+
+        private string _armKnob;    // null = this aircraft has no arm assigned; else the ConfigEntry Key swept
+        private bool   _armValue;   // the value it is pinned to for this replicate
+
+        // Write (or clear) an aircraft's assignment. An empty/null knob clears it.
+        internal static void StoreArm(int aircraftId, string knob, bool val)
+        {
+            if (string.IsNullOrEmpty(knob)) _armByAircraft.Remove(aircraftId);
+            else _armByAircraft[aircraftId] = new KeyValuePair<string, bool>(knob, val);
+        }
+
+        // Copy the standing assignment onto this instance. Called from `For` on every freshly built
+        // controller — i.e. on the first tick after every `Forget` — and from `SetArm`.
+        internal void SeedArm(int aircraftId)
+        {
+            if (_armByAircraft.TryGetValue(aircraftId, out var a)) { _armKnob = a.Key; _armValue = a.Value; }
+            else { _armKnob = null; _armValue = false; }
+        }
+
+        // The value the law must use for one lever: this aircraft's arm when the schedule is sweeping
+        // THIS knob, the live config value otherwise. Two field reads and, only while a sweep is
+        // running at all, one string compare.
+        internal bool Arm(string knobKey, bool live) =>
+            _armKnob != null && _armKnob == knobKey ? _armValue : live;
+        // --- ARM-SEAM END ---
+
+        // Assign (knob) or clear (null knob) an aircraft's arm. Keyed by INSTANCE ID rather than by
+        // `Aircraft` for the same reason `Forget(int)` is: the despawn path calls it with an aircraft
+        // the game may already have destroyed, and both callers (ScenarioPlayer, TestDrone) hold the
+        // cached id anyway.
+        //
+        // The `_byAc` poke is not optional: `Forget` only happens on a card that HAS an entry
+        // condition, so a hover card (or the very first card of a run on an aircraft that has already
+        // been flown) would otherwise keep flying the previous arm out of a live instance.
+        //
+        // Split from StoreArm above so the seam stays inside the ARM-SEAM markers with no game or
+        // BepInEx type in it — `debugtests/test-arm-schedule.py` extracts that region verbatim and
+        // compiles it, the same trick BOARD-MATH and CARD-MODEL use in ScenarioPlayer.cs.
+        internal static void SetArm(int aircraftId, string knob, bool val)
+        {
+            StoreArm(aircraftId, knob, val);
+            if (_byAc.TryGetValue(aircraftId, out var c)) c.SeedArm(aircraftId);
+        }
+
+        // What the law and the '# config' header call. One line, so the rule above has exactly one
+        // definition and a second reading of "is this knob being swept?" cannot drift from it.
+        internal bool Arm(ConfigEntry<bool> e) => Arm(e.Definition.Key, e.Value);
+
+        // ponytail: linear scan + a throwaway list, on a path that runs once per new aircraft. The
+        // dictionary holds single digits in practice (DroneCount caps at 16); if it ever holds
+        // thousands, that is a missing Forget call, not a reason to index this.
+        private static void Sweep()
+        {
+            List<int> dead = null;
+            foreach (var kv in _byAc)
+                if (kv.Value._ac == null) (dead ?? (dead = new List<int>())).Add(kv.Key);
+            if (dead == null) return;
+            foreach (int k in dead) Forget(k);
+        }
+
+        public bool IsFlying => _active;
 
         // Toggle Fly Level. On engage, latch the current horizontal heading so we hold THIS course (not
         // wherever the nose happens to drift). Capturing the heading here keeps Apply() purely reactive.
-        public static void ToggleFlyLevel(Aircraft aircraft)
+        public void ToggleFlyLevel(Aircraft aircraft)
         {
             FlyLevelActive = !FlyLevelActive;
             if (FlyLevelActive && aircraft != null)
@@ -237,13 +477,13 @@ namespace NuclearOptionMouseAim
         // Latest pilot G-tolerance (PilotPlayerState.pilotStrength), 1 = fine, <0.2 = blacked/redded out
         // and the game has zeroed all stick input. Surfaced for the overlay's G-LOC warning. Seeded to 1
         // so we never flash the warning before the first read.
-        public static float PilotStrength { get; private set; } = 1f;
+        public float PilotStrength { get; private set; } = 1f;
 
         // The instructor's own slewed stick command this frame (before any manual override blends on top),
         // surfaced for the top-left debug readout: "what the instructor is saying". 0 when not flying.
-        public static float LastPitch { get; private set; }
-        public static float LastRoll  { get; private set; }
-        public static float LastYaw   { get; private set; }
+        public float LastPitch { get; private set; }
+        public float LastRoll  { get; private set; }
+        public float LastYaw   { get; private set; }
 
         // The player's manual stick/keyboard/pedal source. Null until Rewired is ready.
         private static Player RewiredPlayer()
@@ -251,6 +491,22 @@ namespace NuclearOptionMouseAim
             if (_rewired == null && ReInput.isReady)
                 _rewired = ReInput.players.GetPlayer(0);
             return _rewired;
+        }
+
+        // "Is the human on the stick RIGHT NOW?" — the single definition of manual input: the same
+        // three axes and the same ManualDeadzone the override block in Apply() uses (it calls this
+        // for its own `anyInput`). Exposed so the ScenarioPlayer can abort a test card on a stick
+        // touch instead of growing a second detector that could drift out of agreement with this one.
+        // Deliberately NOT gated on Cfg.ManualOverride: "the pilot grabbed the controls" is true
+        // whether or not the per-axis blend is enabled.
+        public static bool ManualStickInput()
+        {
+            var pl = RewiredPlayer();
+            if (pl == null) return false;
+            float dz = Cfg.ManualDeadzone.Value;
+            return Mathf.Abs(pl.GetAxis("Pitch")) > dz
+                || Mathf.Abs(pl.GetAxis("Roll"))  > dz
+                || Mathf.Abs(pl.GetAxis("Yaw"))   > dz;
         }
 
         // Override-on-touch for one axis: push past the deadzone and you INSTANTLY take that axis
@@ -269,7 +525,7 @@ namespace NuclearOptionMouseAim
         // call per airframe (an int compare). Returns true when the FBW block is present, Enabled and its
         // params are sane — the callers' gate for every v0.55 normalization/cap. All reflection guarded;
         // any failure leaves the probe not-ok for this airframe (fail SOFT, old behaviour).
-        private static bool ResolveFbw(Aircraft ac)
+        private bool ResolveFbw(Aircraft ac)
         {
             if (ac == null) return false;
             int id = ac.GetInstanceID();
@@ -317,8 +573,8 @@ namespace NuclearOptionMouseAim
                         else { _fbwGLimit = 9f; _fbwAlphaLimit = 25f; _fbwAlphaLimStr = 0.05f; }
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[fbw] '{(ac.definition != null ? ac.definition.name : "<unknown>")}' enabled={_fbwEnabled} " +
-                            $"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} " +
-                            $"alphaLimiter={_fbwAlphaLimit:0.#} (strength {_fbwAlphaLimStr:0.###})");
+                            WTMouseAimPlugin.Inv($"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} ") +
+                            WTMouseAimPlugin.Inv($"alphaLimiter={_fbwAlphaLimit:0.#} (strength {_fbwAlphaLimStr:0.###})"));
                     }
                 }
                 catch (System.Exception e)
@@ -327,13 +583,18 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogWarning($"[fbw] probe failed for this airframe ({e.Message}) — v0.55 normalization inactive.");
                 }
             }
+            // v1.0.0 — RETRY the helo probe when the class latch it reads has changed since it last ran.
+            // One bool compare on the hot path; fires at most once per aircraft, and only for a rotorcraft
+            // whose first ResolveFbw beat its first BeginFrame (the drone order — see _heloProbedAs). `else`
+            // because the edge above has already re-probed under the current _collective.
+            else if (_collective != _heloProbedAs) ResolveHelo(ac);
             return _fbwEnabled && _fbwFbw != null && _fbwCorner > 1f && _fbwGLimit > 0.1f;
         }
 
         // CANARD PROBE resolve (v0.57) — see the cache comment above. Called on the aircraft-change edge
         // inside ResolveFbw so both probes rebind together. Fail SOFT: any miss leaves _rsCtrl null and
         // the pitch path untouched (identity — exactly the pre-0.57 behaviour on every other airframe).
-        private static void ResolveCanard(Aircraft ac)
+        private void ResolveCanard(Aircraft ac)
         {
             _rsCtrl = null; _rsCanardRange = 0f;
             try
@@ -374,7 +635,7 @@ namespace NuclearOptionMouseAim
                     WTMouseAimPlugin.Log.LogInfo(
                         $"[canard] resolve '{(ac.definition != null ? ac.definition.name : "<unknown>")}' " +
                         $"field={_rsCtrl != null} childScan={ac.GetComponentInChildren<RelaxedStabilityController>(true) != null}" +
-                        (_rsCtrl != null ? $" canardRange={_rsCanardRange:0.#} eff={_rsEffRef(_rsCtrl):0.##} — pitch linearization active." : " — identity (matches the game)."));
+                        (_rsCtrl != null ? WTMouseAimPlugin.Inv($" canardRange={_rsCanardRange:0.#} eff={_rsEffRef(_rsCtrl):0.##} — pitch linearization active.") : " — identity (matches the game)."));
                 }
             }
             catch (System.Exception e)
@@ -389,8 +650,13 @@ namespace NuclearOptionMouseAim
         // PRIVATE NESTED class (no compile-time type), so this reads it with Traverse instead of the
         // typed FieldRef pattern the other probes use. Fail SOFT: any miss leaves _heloOk false and
         // the archetype refs null — exact pre-0.58 behaviour (hot direct gains, speed-only blend).
-        private static void ResolveHelo(Aircraft ac)
+        private void ResolveHelo(Aircraft ac)
         {
+            _heloProbedAs = _collective;  // FIRST statement, and on every path: this is what makes the
+                                          // probe idempotent instead of one-shot. Set before the early
+                                          // return so a fixed-wing records "probed as fixed-wing" and
+                                          // never retries, and before the try so a throwing probe is not
+                                          // re-run every fixed step for the rest of the flight.
             _heloOk = false; _twc = null; _sds = null; _hasCompound = false;
             if (!_collective) return; // fixed-wing: nothing to probe, keep the refs null
             try
@@ -416,8 +682,8 @@ namespace NuclearOptionMouseAim
                         if (_heloOk) { _heloGLimit = gLim; _heloMaxAngVel = mav; }
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[helofbw] '{(ac.definition != null ? ac.definition.name : "<unknown>")}' enabled={enabled} " +
-                            $"gLimit={gLim:0.#} maxAngularVel=({mav.x:0.##},{mav.y:0.##},{mav.z:0.##}) " +
-                            $"directControl=({dcf.x:0.##},{dcf.y:0.##},{dcf.z:0.##}) " +
+                            WTMouseAimPlugin.Inv($"gLimit={gLim:0.#} maxAngularVel=({mav.x:0.##},{mav.y:0.##},{mav.z:0.##}) ") +
+                            WTMouseAimPlugin.Inv($"directControl=({dcf.x:0.##},{dcf.y:0.##},{dcf.z:0.##}) ") +
                             $"tiltwing={(_twc != null ? 1 : 0)} swivelduct={(_sds != null ? 1 : 0)} compound={(_hasCompound ? 1 : 0)}");
                     }
                 }
@@ -446,7 +712,7 @@ namespace NuclearOptionMouseAim
 
         // Is the canard remap live THIS frame? (component present, engine running — the game zeroes
         // effectiveness on engine-off — and above the game's own 30 m/s gate.)
-        private static bool CanardActive(float vMag)
+        private bool CanardActive(float vMag)
         {
             if (_rsCtrl == null || vMag <= 30f) return false;
             try { return _rsEffRef(_rsCtrl) != 0f; }
@@ -454,22 +720,29 @@ namespace NuclearOptionMouseAim
         }
 
         // One-line FBW parameter summary for the maneuver-recorder header ("what plane was this, really").
-        internal static string FbwHeader(Aircraft ac)
+        internal string FbwHeader(Aircraft ac)
         {
             try
             {
                 if (ResolveFbw(ac))
-                    return $"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} " +
-                           $"alphaLimiter={_fbwAlphaLimit:0.#} alphaLimiterStrength={_fbwAlphaLimStr:0.###} assist={(ac.flightAssist ? 1 : 0)}" +
-                           (_rsCtrl != null ? $" canardRange={_rsCanardRange:0.#}" : "");
+                    return WTMouseAimPlugin.Inv($"cornerSpeed={_fbwCorner:0.#} maxPitchAngVel={_fbwMaxPitchVel:0.##} gLimit={_fbwGLimit:0.#} ") +
+                           WTMouseAimPlugin.Inv($"alphaLimiter={_fbwAlphaLimit:0.#} alphaLimiterStrength={_fbwAlphaLimStr:0.###} assist={(ac.flightAssist ? 1 : 0)}") +
+                           (_rsCtrl != null ? WTMouseAimPlugin.Inv($" canardRange={_rsCanardRange:0.#}") : "");
             }
             catch { /* fall through to unavailable */ }
             return "<unavailable>";
         }
 
         // Called from the prefix. Returns true if WE own the stick (native should be skipped).
-        public static bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
+        public bool BeginFrame(Aircraft aircraft, bool fixedWing, float pilotStrength)
         {
+            // v0.82 — publish THIS controller as the HUD's, but only if this aircraft is the one the
+            // game itself calls local. GetLocalAircraft is the game's own definition (the same one
+            // AimRig.TryGetContext and the recorder use), so an uncrewed drone can never satisfy it,
+            // and a failed read leaves the previous publication alone rather than blanking the HUD.
+            if (GameManager.GetLocalAircraft(out var localAc) && ReferenceEquals(localAc, aircraft))
+                Player = this;
+
             PilotStrength = pilotStrength; // surface for the overlay's G-LOC warning (runs every FixedUpdate)
             _collective = !fixedWing;      // latch airframe class for the hover-regime blend (EvolvedLegacy)
             // NOTE: deliberately NOT gated on Guards.MenusOpen(). While a menu/map is up the sim keeps
@@ -506,11 +779,18 @@ namespace NuclearOptionMouseAim
                 _yawWeak = 0f; _yawEffFilt = 0f; _closeRateFilt = 0f; _prevAzErrValid = false; // fresh yaw-weakness estimate
                 _headingRateFilt = 0f; _tBankSlewed = 0f; // fresh heading-rate lead (v0.51) + bank-target slew (v0.54)
                 _eAlignSlew = 0f; // v0.61: clear cross-engagement carry (was a persistent static → stale seed on re-engage)
+                _phiRateFilt = 0f; _prevPhiValid = false; // v0.85: no bearing-rate lead across the engage gap
                 _alphaSchedFilt = 1f; // fresh AoA-utilization demand schedule (v0.59)
                 _pitchEff = 1f; // fresh measured pitch-effectiveness estimate (v0.60)
                 _prevAimValid = false; _aimRateFilt = 0f; // fresh B2 marker-stationary gate (v0.65)
-                HideNativeVirtualJoystick();
-                WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged.");
+                _aimAzRateFilt = 0f; _aimAzAcId = -1;     // fresh marker-rate feed-forward (v0.78)
+                _prevOffTrk = -1f; _stallFilt = 0f;       // fresh closure-stall gate (v0.83) — never wind on an engage step
+                // The native virtual-joystick crosshair is the LOCAL PLAYER's HUD (SceneSingleton<FlightHud>),
+                // one per process. A drone engaging must not reach into it — it isn't competing for the
+                // human's mouse, and blanking his crosshair from a drone's engage would be the harness
+                // changing something the player can see.
+                if (!_uncrewed) HideNativeVirtualJoystick();
+                WTMouseAimPlugin.Log.LogInfo($"WT Mouse Aim: ON ({(fixedWing ? "fixed-wing" : "rotorcraft")}) — chase control engaged{(_uncrewed ? " [drone]" : "")}.");
             }
             else if (!active && _wasActive)
             {
@@ -523,8 +803,39 @@ namespace NuclearOptionMouseAim
             return active;
         }
 
-        // Called from the postfix every frame (native may or may not have run).
-        public static void Apply(Aircraft aircraft)
+        // THE UNCREWED ENTRY (v0.87, harness phase 2). One call, because a drone has ONE seam
+        // (TestDronePatch's postfix on Pilot_OnAeroInputsApplied) where the player has two — the
+        // prefix that runs BeginFrame and the postfix that runs Apply. The ORDER is the same either
+        // way, and that is the point: BeginFrame decides ownership and seeds the engage, Apply writes
+        // the stick, and the caller runs Aircraft.FilterInputs afterwards, exactly as the game does
+        // for a pilot state.
+        //
+        // aimDir is THIS aircraft's demand (its ScenarioPlayer's AimDemand). The player's marker is
+        // one per process and is his; passing the demand in is what lets N aircraft chase N different
+        // directions through one law with no global in the middle.
+        //
+        // Returns false when the instructor declined to fly (see BeginFrame's `active`), having
+        // written NOTHING — the caller then owns the tick. It deliberately does not fall through to
+        // the disengage ramp: that ramp exists to hand back to the game's native stick, and an
+        // uncrewed aircraft has no native stick to hand back to.
+        internal bool FlyUncrewed(Aircraft ac, Vector3 aimDir)
+        {
+            _uncrewed = true;
+            // Same classification the player's seam makes (PilotPlayerStatePatch.TryResolve), from the
+            // same field. pilotStrength is 1: G-LOC is a property of the human in the seat, and there
+            // isn't one — an uncrewed airframe is limited by its own structure, which the game's own
+            // damage model already enforces.
+            bool fixedWing = ac.GetAircraftParameters().takeoffDistance > 0f;
+            if (!BeginFrame(ac, fixedWing, 1f)) return false;
+            Apply(ac, aimDir);
+            return true;
+        }
+
+        // Called from the postfix every frame (native may or may not have run). The player's demand is
+        // the world-locked marker — one AimRig per process, and it is the human's.
+        public void Apply(Aircraft aircraft) => Apply(aircraft, AimRig.AimForward);
+
+        public void Apply(Aircraft aircraft, Vector3 aimTarget)
         {
             var ci = aircraft.GetInputs();
             if (ci == null) return;
@@ -559,7 +870,7 @@ namespace NuclearOptionMouseAim
                         ? (Quaternion.AngleAxis(-aoaDeg, hRight) * _levelHeading).normalized
                         : _levelHeading;
                 }
-                else aimDir = AimRig.AimForward;
+                else aimDir = aimTarget;   // the player's marker, or a drone's own card demand
 
                 // Marker direction in the body frame (unit): x = right, y = up, z = forward.
                 Vector3 local = t.InverseTransformDirection(aimDir);
@@ -592,11 +903,29 @@ namespace NuclearOptionMouseAim
                 // micro-bank in ApplyEvolvedLegacy stands down (the main law + manual override own a
                 // moving marker); quasi-stationary = it may inject. aimDir is already in hand — no new
                 // game signal. Convergent/gated design is documented at the injection site.
+                // The v0.78 feed-forward differentiates the SAME _prevAim sample, so the staleness guard is
+                // hoisted here and covers both: on an aircraft change AimRig re-seeds the marker onto the new
+                // nose, and differencing across that seed would emit one enormous bogus rate into both signals.
+                int aimAcId = aircraft.GetInstanceID();
+                if (aimAcId != _aimAzAcId) { _aimAzAcId = aimAcId; _prevAimValid = false; }
                 if (_prevAimValid && dt > 1e-5f)
                 {
                     float aimRate = Vector3.Angle(_prevAim, aimDir) / dt;
                     _aimRateFilt += (dt / (0.15f + dt)) * (aimRate - _aimRateFilt);
+                    // MARKER AZIMUTH RATE (v0.78) — SIGNED, + = sweeping right, same frame as azErr and
+                    // _headingRateFilt. Atan2(x,z)+DeltaAngle rather than a raw subtraction because the
+                    // azimuth wraps: a plain difference spikes 360/dt (~21600 deg/s at the 60 Hz fixed step)
+                    // every time the marker crosses ±180°, and fed forward into omega that single frame is a
+                    // rail-to-rail bank command. DeltaAngle takes the short way round, so the wrap is a no-op.
+                    // Source is aimDir, not AimRig.AimForward directly: outside Fly Level they are the same
+                    // vector, and inside it aimDir is the LATCHED heading — the demand the loop is actually
+                    // tracking — so a marker sweep during a level hold can't inject a turn nobody asked for.
+                    float azNow  = Mathf.Atan2(aimDir.x,   aimDir.z)   * Mathf.Rad2Deg;
+                    float azPrev = Mathf.Atan2(_prevAim.x, _prevAim.z) * Mathf.Rad2Deg;
+                    float rawAR  = Mathf.DeltaAngle(azPrev, azNow) / dt;
+                    _aimAzRateFilt += (dt / (HdgRateTau + dt)) * (rawAR - _aimAzRateFilt);
                 }
+                else _aimAzRateFilt = 0f; // first frame after engage / aircraft change: no valid previous direction
                 _prevAim = aimDir; _prevAimValid = true;
                 const float aimStillRate = 3f; // deg/s — above frame noise (~0.8 deg/s), below a deliberate sweep
                 _settleOK = _aimRateFilt < aimStillRate;
@@ -633,6 +962,44 @@ namespace NuclearOptionMouseAim
                 float phi       = Mathf.Atan2(local.x, local.y) * Mathf.Rad2Deg;
                 float lateral   = Mathf.Sqrt(local.x * local.x + local.y * local.y);
                 float alignFrac = lateral > 1e-4f ? local.y / lateral : 1f;
+
+                // ROLL-INVARIANT BELOW-NESS (v0.85) — alignFrac above is measured in the AIRCRAFT's frame,
+                // so the aircraft's own bank changes it: a target straight down reads alignFrac = -1 wings
+                // level and exactly 0 at 90° of bank. The v0.67 below-hemisphere suppressor keys off it, so
+                // rolling deleted the very reason not to roll (that is the false ~85° bank equilibrium its
+                // own comment describes, expressed as a feedback path). Ask the same question in a
+                // HORIZON-referenced frame around the nose instead — same nose, same target, axes that
+                // depend only on t.forward, so no amount of roll can move the answer. Level flight makes
+                // upH == world up, so this equals alignFrac exactly with the wings level.
+                // Degenerate near the vertical (the horizon frame is undefined when the nose IS the up axis):
+                // fall back to the body-frame value, same guard style as hdgConf below.
+                Vector3 rightHW = new Vector3(t.forward.z, 0f, -t.forward.x); // = cross(worldUp, nose); |.| = cos(pitch)
+                float rhMag = rightHW.magnitude;
+                float alignFracH = alignFrac;
+                if (rhMag > 0.1f)
+                {
+                    rightHW /= rhMag;
+                    Vector3 upHW = Vector3.Cross(t.forward, rightHW);         // unit, ⊥ nose, in the vertical plane
+                    float yH = Vector3.Dot(aimDir, upHW), xH = Vector3.Dot(aimDir, rightHW);
+                    float latH = Mathf.Sqrt(xH * xH + yH * yH);
+                    alignFracH = latH > 1e-4f ? yH / latH : 1f;
+                }
+
+                // BEARING RATE (v0.85) — d(phi)/dt for the align channel's rate lead. DeltaAngle takes the
+                // short way round, so a sweep through ±180 reads as the small change it physically is
+                // instead of a 360/dt spike. Gated on the SAME conditioning floor the eAlign target uses:
+                // under it phi is junk, so the sample is dropped AND the previous one invalidated, which is
+                // what stops a near-boresight hold frame from seeding a bogus rate into the next maneuver.
+                if (lateral > EAlignLatGate)
+                {
+                    if (_prevPhiValid && dt > 1e-5f)
+                    {
+                        float rawPR = Mathf.DeltaAngle(_prevPhi, phi) / dt;
+                        _phiRateFilt += (dt / (HdgRateTau + dt)) * (rawPR - _phiRateFilt);
+                    }
+                    _prevPhi = phi; _prevPhiValid = true;
+                }
+                else { _phiRateFilt = 0f; _prevPhiValid = false; }
 
                 // REGIME BLEND — a continuous ramp from the fine direct-nudge law (small errors) to the
                 // roll-to-align law (big turns). 0 inside FineAngle, 1 at/above AlignAngle.
@@ -672,10 +1039,7 @@ namespace NuclearOptionMouseAim
                     if (prevNoseHW.sqrMagnitude > 1e-6f && noseHW.sqrMagnitude > 1e-6f)
                     {
                         float rawHR = Vector3.SignedAngle(prevNoseHW, noseHW, Vector3.up) / dt;
-                        const float hrTau = 0.35f; // v0.54: raised 0.18->0.35 — the ±3 deg/s ripple at 1.3-1.5 Hz was feeding the
-                                                   // brake-clamp rectifier (WOBBLE-FINDINGS UPDATE 4); ~2x more attenuation there
-                                                   // costs ~0.2 s of rollout timing. Still ponytail-fixed; promote to Cfg if tuning wants it.
-                        _headingRateFilt += (dt / (hrTau + dt)) * (rawHR - _headingRateFilt);
+                        _headingRateFilt += (dt / (HdgRateTau + dt)) * (rawHR - _headingRateFilt); // tau shared with the v0.78 marker rate
                     }
                 }
 
@@ -761,11 +1125,25 @@ namespace NuclearOptionMouseAim
                         if (_twc != null)
                         {
                             var (lo, hi) = _twc.GetAngleLimits();
-                            // ponytail: assumes maxAngle = engines-up/hover => tiltFrac 1 in hover. Orientation
-                            // UNCONFIRMED — one tiltwing transition flight must verify; flip to (hi-angle)/(hi-lo)
-                            // if the blend reads backwards in the [seam]/HUD readout.
+                            // O13 FIX (ledger O13/X30/H3) — THE TILTWING BRANCH WAS MISSING THE `1 −` ITS
+                            // NOZZLE TWIN HAS, and the hover end is 0.18, not 0. `GetAngleLimits` is innocent:
+                            // it forwards rotatingJoints[0]'s (minAngle,maxAngle) (:70286-70289 -> :70205-70208),
+                            // and `RotatorInput.Animate` sets currentAngle = Lerp(minAngle,maxAngle,t) (:70237),
+                            // so (angle−lo)/(hi−lo) recovers `t` = the game's tilt COMMAND customAxis1 — where
+                            // 1.0 is WING-BORNE (:70344 customAxis1 = Lerp(0.18,1,tiltAtSpeed)) and the hover
+                            // end is PINNED AT 0.18 (:70336/:70347/:70352 AutoHover => 0.18). That is the
+                            // opposite convention to the `_sds` line below, which is already right because
+                            // swivelPosition = 1 − customAxis1 (:69365-69366, hover => 0 at :69348). So map
+                            // [1 -> 0, 0.18 -> 1]. 0.18 is TiltWingController's archetype-wide hover reference,
+                            // a property of the game's controller and not of an airframe — ONE-LAW intact.
+                            // MEASURED PRE-FIX (R44, QuadVTOL1, speedRamp ≡ 0 so heliBlend IS tiltFrac):
+                            // 1.0000 sd 0.0000 on 9,602/9,602 rows at 150 m/s — i.e. tBankE *= (1−heliBlend)
+                            // deleted the whole bank-to-turn channel in the MOST wing-borne condition this
+                            // airframe has — and 0.1820 ± 0.0002 at the 70 m/s hover pin. Both endpoints of the
+                            // game's Lerp are therefore confirmed from flight, not just from source.
+                            // InverseLerp already Clamp01s, so the old Clamp01 is redundant.
                             if (hi - lo > 1f)
-                                tiltFrac = Mathf.Clamp01((_twc.GetWingAngle() - lo) / (hi - lo));
+                                tiltFrac = Mathf.InverseLerp(1f, 0.18f, (_twc.GetWingAngle() - lo) / (hi - lo));
                         }
                         else tiltFrac = Mathf.Clamp01(_sds.GetNozzleAngle() / 90f);
                         _heliBlend = Mathf.Max(_heliBlend, tiltFrac);
@@ -847,8 +1225,43 @@ namespace NuclearOptionMouseAim
                         // freeze) — the pre-C1 effFloor=0.3 gave this self-probe for free; C1 removed it,
                         // this restores it at the lower 0.15. Gated on a LIVE readable FBW (inside this
                         // block), so a probe miss still holds — no per-plane constant.
+                        // A/B LEVER (PitchEffRelax) — THE ELSE-BRANCH IS A LATCH, NOT A FLOOR, AND IT OWNS
+                        // ~95% OF EVERY FLIGHT. For any _pitchEff >= revThresh, Max(_pitchEff, revThresh) IS
+                        // _pitchEff, so pitchEffInst == _pitchEff, so pTau takes the release branch (it is
+                        // not `<`), so the filter update below is += k·0. Frozen — not decayed, not leaked.
+                        // The `|cmd| > 0.05` gate is open on only 5.3% of rows (R44 `oblique-6-c`, 48,085
+                        // rows, 10 airframes), so 94.7% of the time the estimator is holding a value it can
+                        // no longer revise, and nothing below the engage handler (`_pitchEff = 1f`) resets it.
+                        // WHAT GETS FROZEN IS A LAG SAMPLE, NOT AN AUTHORITY MEASUREMENT. `cmd` is the
+                        // setpoint THIS tick; `ach` trails it by the airframe's pitch time constant, so on a
+                        // step `ach/cmd` starts near 0 and climbs to 1 as the plant catches up — on a
+                        // perfectly HEALTHY airframe. The 0.10 s attack tau is faster than any airframe's
+                        // pitch response, so the filter grabs the BOTTOM of that transient and the gate then
+                        // closes on it. Measured: pEff < 0.95 on 97.4% of rows; latched by leg direction
+                        // (16 legs/cell) at Multirole1 0.465 DOWN / 0.740 UP, SmallFighter1 0.519 / 0.760,
+                        // Fighter1 0.661 / 0.786; and one leg freezes at 0.606 while |fbwPR|/|fbwTgtPR| reads
+                        // 1.048 — the plant is OVER-delivering at the instant the estimator calls it 60%
+                        // capable. Downstream that number multiplies the pitch P term (`pErrTerm *=`, below),
+                        // so fixed-wing pitch demand runs permanently at 0.47-0.80 off a frozen transient.
+                        // ON: with the gate CLOSED, relax toward 1. No command ⇒ no evidence of weakness ⇒
+                        // no grounds to keep de-rating — which is the ONE-LAW justification and also the
+                        // direction ledger K3 asks for (five terms only ever REDUCE authority, nothing
+                        // raises it; this un-freezes one of them). Handing the filter `1f` rather than
+                        // decaying by hand is deliberate: 1f > _pitchEff selects pEffRel, so the existing
+                        // filter IS the requested first-order decay toward 1 at the existing release tau —
+                        // no second tau, no new state. The MEASURING branch is untouched, so a weak or
+                        // reversed plant still de-rates the moment there is a command to measure against.
+                        // Strictly subsumes the v0.67 C1 latch-breaker: relaxing toward 1 passes through
+                        // revThresh on the way, so a latched-low estimate still re-establishes pitch.
+                        // FOR THE BATCH ANALYSIS: this also moves every scored leg's INITIAL CONDITION, not
+                        // just its steady state. Today each leg inherits the previous leg's latch (the `arm`
+                        // window latches ~0.749 before the first scored leg begins); under ON the mostly-
+                        // closed gate between legs relaxes it back toward 1, so a leg starts near 1 instead
+                        // of 0.749. Do not attribute the whole arm delta to steady-state de-rating.
+                        // Default OFF = the latch, bit-for-bit.
                         pitchEffInst = Mathf.Abs(cmd) > 0.05f ? Mathf.Clamp01(ach / cmd)
-                                                             : Mathf.Max(_pitchEff, PEffRevThresh);
+                                     : Arm(Cfg.PitchEffRelax) ? 1f
+                                                              : Mathf.Max(_pitchEff, PEffRevThresh);
                     }
                     catch { /* leave hold */ }
                 }
@@ -912,7 +1325,33 @@ namespace NuclearOptionMouseAim
                     // ponytail: fixed utilStart/floor/taus, promote to Cfg if flight tuning demands it.
                     const float utilStart = 0.6f, schedFloor = 0.3f, atkTau = 0.05f, relTau = 1.0f;
                     float aoaUtil  = Mathf.Max(aoaPredUp, -aoaPredDn) / Mathf.Max(1f, aoaCeil);
-                    float schedRaw = Mathf.Lerp(1f, schedFloor, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
+                    // #45 A/B LEVER (AoaSchedFloorRelative). The schedule's INPUT is already relative — aoaUtil
+                    // normalises by this airframe's own probed ceiling — while its OUTPUT terminates at the same
+                    // ABSOLUTE 0.3 for a 27 deg ceiling on an 8.7 t Fighter1 and a 10 deg ceiling on a 105 t
+                    // Darkreach. A hardcoded constant deciding an outcome is the ONE-LAW smell, and R32 measured
+                    // qSched at exactly 0.300 on 100.0% of the 2,314 rows past |AoA| 20 deg against 0.0% on all
+                    // 31 clean replicates of the same card and airframe (ledger K3/L3).
+                    // WHY aoaFade/aoaCeil AND NOT omegaMax OR _fbwMaxPitchVel. The floor multiplies a
+                    // DIMENSIONLESS stick demand, so the relative form has to be dimensionless too. Both rate
+                    // probes are rad/s, and their only dimensionless combination — omegaMax/_fbwMaxPitchVel —
+                    // collapses to EXACTLY 1 in the raw-law regime (assist off below 1.2x corner q, where
+                    // omegaMax IS _fbwMaxPitchVel, :1173), i.e. it would switch the schedule off entirely on
+                    // the Darkreach, which is the one airframe #45 is about. aoaFade and aoaCeil are both
+                    // degrees off the SAME probe two lines up, so their ratio is dimensionless with no invented
+                    // reference: it is the share of the airframe's usable AoA range that its own fade band
+                    // occupies — how coarse this envelope is relative to itself. A coarse envelope has less
+                    // room to schedule over, so terminating it as low as a fine one asks the law to give up
+                    // authority it never had. Fighter1 (lim 27): fade 6 / ceil 23 = 0.26, i.e. ~today's 0.30 on
+                    // the class the constant was fitted on. Darkreach (lim 10): fade 4 / ceil 8.5 = 0.47.
+                    // DIRECTION IS DELIBERATE: K3 is that the law already has five terms that only ever REDUCE
+                    // authority and nothing that raises it, so a sixth de-authorizing term is explicitly not
+                    // the fix; this arm reallocates the floor ACROSS airframes rather than lowering it
+                    // globally. Clamp01 because a very low ceiling can push fade/ceil past 1.
+                    // Default OFF = byte-identical to the shipped absolute floor.
+                    float schedFloorEff = Arm(Cfg.AoaSchedFloorRelative)
+                        ? Mathf.Clamp01(aoaFade / Mathf.Max(1f, aoaCeil))
+                        : schedFloor;
+                    float schedRaw = Mathf.Lerp(1f, schedFloorEff, Mathf.Clamp01((aoaUtil - utilStart) / (1f - utilStart)));
                     float schedTau = schedRaw < _alphaSchedFilt ? atkTau : relTau;
                     _alphaSchedFilt += (dt / (schedTau + dt)) * (schedRaw - _alphaSchedFilt);
                     qSched = Mathf.Min(qSched, _alphaSchedFilt);
@@ -976,7 +1415,46 @@ namespace NuclearOptionMouseAim
                 // Feeds ONLY the turn-rate bank paths (here + ApplyEvolvedLegacy's local copy); the
                 // linear servo (azBank/linBank above) and the coordPull release taper keep RAW azErr —
                 // release timing must track real arrival, not the prediction (v0.36→v0.37 mush lesson).
-                float azErrPred = azErr - _headingRateFilt * Cfg.TurnLeadTime.Value;
+                // RELATIVE-RATE LEAD (v0.83) — the lead was leading against the wrong rate. azErr is the
+                // angle between the nose heading and the marker heading, so its OWN derivative is
+                //     d(azErr)/dt = markerAzRate - noseHeadingRate,
+                // and the anticipatory term azErr + T*d(azErr)/dt is therefore
+                //     azErr - (_headingRateFilt - _aimAzRateFilt) * T.
+                // Through v0.82 the marker term was missing, i.e. the lead was the true derivative ONLY
+                // when the marker stood still — which is exactly the regime v0.51 was measured in (eight
+                // recordings of a pilot correcting onto a fixed point). Against a SWEEPING marker the nose
+                // is deliberately rotating AT the target, and the absolute-rate form read that tracking
+                // rotation as overshoot and braked it: R21 measured _headingRateFilt*T = 7.85 deg of lead
+                // against a real 9.31 deg error (84% of it removed), with headingRate - aimRate = +0.009
+                // deg/s — i.e. essentially ALL of the lead was cancelling rotation that was tracking the
+                // target. It also fought the v0.78 feed-forward directly: that term adds aimRate to omega
+                // at unit gain, while this one subtracted T*AssistTurnRateGain = 0.65*0.92 = 0.60 of the
+                // same rate back out again, so 60% of the feed-forward never reached the plant.
+                // With the relative rate the term becomes true PD damping on the azimuth error:
+                //   - stationary marker  -> _aimAzRateFilt == 0 -> byte-identical to v0.82;
+                //   - matched sustained turn -> the two rates cancel -> no braking, and the standing error
+                //     finally sees the full configured AssistTurnRateGain instead of the predFloor's 30%.
+                // BOUNDED BY CONSTRUCTION: the change can only move azErrPred by +T*_aimAzRateFilt, and the
+                // brake/floor clamp below still confines the result to [azErr*predFloor, azErr]. So neither
+                // sign of marker sweep can command more bank than the RAW error already justified — the
+                // v0.52 relay argument survives untouched.
+                // Feeds the SINGLE azErrPred site; ApplyEvolvedLegacy inherits it as a parameter, so the
+                // v0.51/v0.55 two-site lockstep is unaffected (there is only one lead computation).
+                // v0.99.1 — THE LEVER IS RETIRED, THE TERM STAYS RELATIVE. R39-D swept Cfg.RelativeTurnLead
+                // 8 lanes x n=8 (§5): the knob does its declared job — |leadDeg| 2.85 -> 0.08 deg, predFloor
+                // binding 98% -> 60% — and the standing error does not move, 0.2-3.8% against a 0.1-4.7%
+                // NULL contrast between two byte-identical configurations in the same batch (§6a). That is a
+                // verdict on the KNOB, not on the term: bankTR sat at or over the 72 deg MaxBank wall on
+                // 94-100% of settled samples, so the 3.33x larger error term had nowhere to go, and §8 says
+                // in as many words that this card cannot answer whether the term helps. So the retired lever
+                // collapses to its shipped DEFAULT (relative), not to the absolute form: absolute is the
+                // wrong derivative by construction, and it eats TurnLeadTime*AssistTurnRateGain = 0.60 of the
+                // unit-gain v0.78 feed-forward the SAME batch measured at 57% of the standing error. Nothing
+                // measured asks for that back. leadDeg stays a recorder column — it is still "the lead
+                // actually applied", now unconditionally the relative form.
+                float leadRate = _headingRateFilt - _aimAzRateFilt;
+                float leadDeg  = leadRate * Cfg.TurnLeadTime.Value; // deg of lead ACTUALLY applied (recorder column)
+                float azErrPred = azErr - leadDeg;
                 // BRAKE-ONLY LEAD (v0.52). Unclamped, the lead term closed its own fast loop: near
                 // boresight azErrPred is DOMINATED by -headingRate·lead (v51 recordings: 2.1-2.7× the
                 // real error), and the V-scaled atan slope (~44° bank/° at 470 m/s) turned that ±2°
@@ -991,9 +1469,45 @@ namespace NuclearOptionMouseAim
                 // into a bank target banging 0<->65 deg at ~1.5 Hz. Floor the prediction at a fraction
                 // of the real error instead: rollout still starts early (the lead's job), but level
                 // flight is never commanded while error remains; the floor self-releases as azErr -> 0.
+                // v0.83: predFloor was reviewed for DELETION once the lead above went relative-rate, and
+                // KEPT. What it protects is the v0.54 rectifier, which lives entirely in the STATIONARY-
+                // marker regime (a pilot correcting onto a fixed point, heading-rate ripple pinning the
+                // prediction to 0 while degrees of real error remain) — and that regime is precisely where
+                // _aimAzRateFilt == 0 and the relative-rate lead is bit-identical to the absolute one. The
+                // relative form removes nothing this floor was defending against; deleting it would re-open
+                // the v0.53 0<->65 deg bank sawtooth. What the v0.83 change DOES do is make the floor
+                // self-release in the sustained-tracking case: with the tracking rotation no longer
+                // subtracted, azErrPred lands near azErr instead of at 0.30*azErr, so the floor stops being
+                // the binding constraint (R21: binding on 100% of the settled window, holding the effective
+                // proportional gain at 0.28 of a configured 0.92) without being removed from the regime it
+                // was built for.
                 const float predFloor = 0.30f; // ponytail: fixed fraction, promote to Cfg if flight tuning wants it
-                azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
-                                        : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
+                // #14 A/B LEVER (LeadFloorContinuous) — the STEP, not the floor value, is what is under test.
+                // Written as a ratio r = (lead that SHRINKS the error) / |azErr|, the shipped clamp is
+                // f(r) = clamp(1 − r, predFloor, 1): slope −1 up to r = 1 − predFloor, then a CORNER where the
+                // slope jumps to 0 and the lead stops contributing at all. That corner is a discontinuity in
+                // the derivative sitting inside a loop whose whole failure mode is relaying on
+                // discontinuities, and R21 measured it binding on 100.0% of the settled window (ledger L7;
+                // GATE-CHATTER RR 6.5-36.1 near a crossing, beating every sham by 2-16x and surviving both
+                // skip controls). ON replaces it with the same map made C-infinity:
+                //     f(r) = predFloor + (1 − predFloor) · exp(−r / (1 − predFloor))
+                // f(0) = 1 and f'(0) = −1, so it is EXACT to first order in the lead — a small lead behaves
+                // identically — and it approaches predFloor asymptotically instead of arriving at it, so the
+                // floor is never a binding constraint and there is no corner to latch. The v0.52 relay
+                // argument is untouched by construction: f is in [predFloor, 1] for all r, so azErrPred keeps
+                // azErr's sign and |azErrPred| <= |azErr| exactly as the clamp guaranteed. r <= 0 (a lead that
+                // would GROW the error) still returns the raw error, same as the clamp's upper bound.
+                // Default OFF = byte-identical to the shipped step.
+                if (Arm(Cfg.LeadFloorContinuous))
+                {
+                    float shrink = azErr >= 0f ? leadDeg : -leadDeg;   // + = the lead moves the error toward 0
+                    azErrPred = azErr * (shrink <= 0f ? 1f
+                        : predFloor + (1f - predFloor)
+                          * Mathf.Exp(-shrink / Mathf.Max(1e-4f, Mathf.Abs(azErr) * (1f - predFloor))));
+                }
+                else
+                    azErrPred = azErr >= 0f ? Mathf.Clamp(azErrPred, azErr * predFloor, azErr)
+                                            : Mathf.Clamp(azErrPred, azErr, azErr * predFloor);
                 // v0.58 heading deprojection (see hdgConf above). Pure multiplicative, applied AFTER the
                 // brake/floor clamp so the clamp bounds scale coherently (h·clamp(x,a,b) = clamp(h·x,h·a,h·b));
                 // azErr and _headingRateFilt inflate by the same 1/cos(pitch), so scaling the result
@@ -1013,6 +1527,39 @@ namespace NuclearOptionMouseAim
                 const float azRampW = 1.5f; // deg; regime constant (geometry of the hand-off, not per-plane). LOCKSTEP with EL.
                 float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
                 float omegaDes = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;            // rad/s, signed
+                // MARKER-RATE FEED-FORWARD (v0.78) — the standing sustained-turn lag. In the turn360 card the
+                // marker sweeps at a constant 12.066 deg/s and the aircraft ACHIEVES that rate (12.02 deg/s,
+                // ±0.01 across four replicates) while parked on a 9.54 deg azimuth lag (stdev 0.021 deg).
+                // Nothing is saturated: |outP| max 0.587, |outR| max 0.793, 5.17 g of a 9 g limit, AoA 7.7 of
+                // a 27 deg ceiling. That is not a fault, it is what a PURE-PROPORTIONAL loop must do. The only
+                // integral term on this axis is _iYaw, and it winds on fineBlend = clamp01(1 - off/FineAngle),
+                // which is EXACTLY 0 at off = 9.5 with FineAngle 6 — the capture shows both integrators flat at
+                // 0.000 for the whole 30 s. So the rate has to be BOUGHT with error: e_ss = w/K = 12.07/1.31 =
+                // 9.2 deg, which reproduces the measurement to a tenth of a degree.
+                // Supply the rate instead of making the loop earn it. Gain is exactly 1.0 and there is no
+                // multiplier to tune: matching the marker's own azimuth rate is KINEMATICS, not a per-plane
+                // constant, so this satisfies the generality rule by construction. Added BEFORE the
+                // achievability cap below, so the probed per-airframe omegaMax bounds the feed-forward exactly
+                // like the proportional demand — it can never command a turn this airframe cannot fly — and
+                // yawCapped therefore still reflects the TOTAL demand.
+                // SAFE BY CONSTRUCTION: _aimAzRateFilt is identically zero whenever the marker is stationary,
+                // and every other card segment (micro1-10, fine, az10/az30/az90/az150, elUp, elDn, reversal,
+                // astern) commands a STEP to a fixed direction and then holds it. The feed-forward contributes
+                // nothing there and those metrics cannot move. Only turn360 — and a human tracking a moving
+                // marker — sees any change at all, which is exactly why this is scoreable in one session.
+                // MEASURED CHANNEL (v0.99.1, R39-D §4/§4a — 8 lanes x n=8, debugtests/R39-D-sustained-ab.md).
+                // Worth 55-58% of the standing azimuth error: fixedWindowOffDeg 5.08-6.38 -> 1.46-2.18 deg on
+                // 7 of 8 lanes, rms down 8/8, and aimRate identical on both arms so it is the law consuming
+                // the marker rate, not the stimulus changing. It delivers that through TARGET BANK, NOT roll
+                // stick — bankTR +10.4 to +15.4 deg, achieved bank +4 to +14 deg, while mean |outR| is
+                // 0.0068-0.0109 on BOTH arms. Roll stick is the servo term that HOLDS a trimmed bank; it is
+                // the wrong observable for a term that moves the bank TARGET, and reading it as one is what
+                // made GENERALITY-REVIEW finding 16 call this inert. Off, the aircraft SKIDS instead: mean
+                // |outY| 2-4x higher, _iYaw saturating against the deficit the bank channel should supply.
+                // MarkerRateFeedForward is the A/B lever: off = bit-identical to v0.77, no restart needed.
+                // LOCKSTEP: ApplyEvolvedLegacy's local omega copy adds the SAME term at the same point,
+                // under the same rule as the azErrPred / achievability-cap lockstep notes.
+                if (Arm(Cfg.MarkerRateFeedForward)) omegaDes += _aimAzRateFilt * Mathf.Deg2Rad;
                 // ACHIEVABILITY CAP (v0.55) — the low-speed anti-windup. Below corner speed the FBW's
                 // deliverable pitch rate collapses (x q_ratio, see the probe above) but the turn-rate
                 // demand didn't know that: it kept asking for a turn the plane can't fly, the bank target
@@ -1045,19 +1592,62 @@ namespace NuclearOptionMouseAim
                 // signal as the proportional term (so it reinforces), gated to the fine cone (fineBlend),
                 // leaked toward zero so it can't run away, hard-capped, and suspended on manual override /
                 // Fly Level. As the error -> 0 the steady value -> 0, so it stays convergent (no limit cycle).
+                // CLOSURE-STALL GATE (v0.83) — gate the integrator on error PERSISTENCE, not error
+                // MAGNITUDE. fineBlend answers "is the error small"; the question that decides whether an
+                // integral term belongs is "has the proportional path failed to close this error". Measure
+                // that as a DIMENSIONLESS ratio — what fraction of the nose's own rotation this tick is
+                // actually going into shrinking the error:
+                //     closeFrac = (d(off)/dt shrinking) / (total nose rotation rate)
+                // 1 = every degree the nose sweeps is a degree of error closed (a slew converging normally);
+                // 0 = the nose is rotating hard and the error is not moving (tracking a sweeping marker
+                // from behind — R21: nose 11.58 deg/s, error closing 0.033 deg/s, closeFrac 0.003).
+                // A RATIO on purpose: an absolute deg/s "is it closing" threshold would be a per-airframe
+                // constant in disguise (what counts as slow closure on a 19 deg/s fighter is fast on a
+                // trainer), which the one-law rule forbids. noseTurnDeg is roll-blind (it differences the
+                // FORWARD axis), so a pure roll-in cannot fake closure in either direction.
+                float closeFrac = 1f; // no valid previous sample => assume closing => never wind on frame 1
+                if (_prevOffTrk >= 0f && dt > 1e-5f)
+                    closeFrac = Mathf.Clamp01(((_prevOffTrk - off) / dt) / Mathf.Max(noseTurnDeg / dt, 1e-3f));
+                _prevOffTrk = off;
+                // PERSISTENCE. The ratio alone cannot tell "stalled forever" from "hasn't started yet":
+                // the instant a marker jumps, closure is 0 and the raw ratio screams stall. Only TIME
+                // separates them, so hold it through an asymmetric filter — slow to believe a stall, quick
+                // to drop it. This is the anti-windup for the whole change: through a full-authority roll-in
+                // the gate only reaches ~0.25, and the moment the pull starts closing the error it collapses
+                // inside 0.2 s, so the existing leak has the entire pull phase to bleed off whatever wound.
+                // ponytail: 4 s attack — long against the law's own worst LEGITIMATE "not closing yet"
+                // transient (a full roll-in is MaxBankAngle/BankSlewRate = 1.2 s at stock), short against a
+                // sustained track (a 30 s turn360 segment). Replace with 4*MaxBankAngle/BankSlewRate if an
+                // airframe ever shows a roll-in past ~2 s. Release matches the existing _closeRateFilt tau.
+                const float stallAttackTau = 4.0f, stallReleaseTau = 0.2f;
+                float stallInst = 1f - closeFrac;
+                float stallTau  = stallInst > _stallFilt ? stallAttackTau : stallReleaseTau;
+                _stallFilt += (dt / (stallTau + dt)) * (stallInst - _stallFilt);
+
                 float iCap = Cfg.FineIntegralCap.Value;
+                float iGate = 0f; // the wind gate ACTUALLY applied this frame (recorder column iGate)
                 if (Cfg.FineIntegralGain.Value > 0f && iCap > 0f && !flyLevel)
                 {
                     float ki = Cfg.FineIntegralGain.Value, leak = Cfg.FineIntegralLeak.Value;
+                    // MAX, not replace: inside the fine cone the old blend still owns the gate, so fine
+                    // capture is unchanged wherever the error is closing (stall ~0 there). yawCapped
+                    // suppresses only the NEW path — winding against a turn demand the airframe cannot
+                    // fly is the one way a persistence gate can wind forever, and it is exactly the
+                    // regime a low-limit STOL trainer lives in. The existing !yawCapped guard on _iYaw
+                    // makes this redundant for yaw and load-bearing for pitch, which in a banked turn is
+                    // the axis actually flying the turn. IntegralStallGate off => iGate == fineBlend,
+                    // i.e. bit-identical to v0.82.
+                    iGate = Mathf.Max(fineBlend,
+                        Arm(Cfg.IntegralStallGate) && !yawCapped ? _stallFilt : 0f);
                     if (_engP > 0f) _iPitch = 0f; // you own pitch — don't wind against your stick
                     else if (aoaGateUp >= 1f && aoaGateDn >= 1f) // v0.55 anti-windup: FREEZE while the AoA
                     // ceiling is biting — winding in nose-up bias the ceiling won't let fly would just
                     // dump in as a lurch on unload. Freeze (hold), not reset: the fine bias is still valid.
-                        _iPitch = Mathf.Clamp(_iPitch + (-local.y * ki * fineBlend - _iPitch * leak) * dt, -iCap, iCap);
+                        _iPitch = Mathf.Clamp(_iPitch + (-local.y * ki * iGate - _iPitch * leak) * dt, -iCap, iCap);
                     if (_engY > 0f) _iYaw = 0f;
                     else if (!yawCapped) // v0.55 anti-windup: same freeze while the turn-rate demand is
                     // beyond the achievable pitch rate — the heading can't close any faster than the cap.
-                        _iYaw   = Mathf.Clamp(_iYaw   + ( local.x * ki * fineBlend - _iYaw   * leak) * dt, -iCap, iCap);
+                        _iYaw   = Mathf.Clamp(_iYaw   + ( local.x * ki * iGate - _iYaw   * leak) * dt, -iCap, iCap);
                 }
                 else { _iPitch = _iYaw = 0f; }
 
@@ -1070,8 +1660,7 @@ namespace NuclearOptionMouseAim
                 // below (slew, manual override, write-out, anomaly/recorder/phase) is SHARED — only the
                 // per-axis shaping differs here. pullGate/yawScale/coordPull are surfaced for the debug trace.
                 float tgtP, tgtR, tgtY, pullGate, yawScale, coordPull;
-                _tBankFlown = targetBank; // the law overwrites this with its own slewed tBankE below
-                ApplyEvolvedLegacy(t, local, off, vMag, sens, fineGain, alignFrac, bigTurn, targetBank, azErr, azErrPred,
+                ApplyEvolvedLegacy(t, local, vMag, sens, fineGain, alignFrac, alignFracH, bigTurn, azErr, azErrPred,
                     phi, lateral, pitchRate, yawRate, rollRate, pitchDamp, damp, assist, dt, omegaMax, qSched,
                     out tgtP, out tgtR, out tgtY, out pullGate, out yawScale, out coordPull);
 
@@ -1139,8 +1728,13 @@ namespace NuclearOptionMouseAim
                 // touching it, the instructor flies it. Pitch/yaw hand back to their proportional pull;
                 // roll hands back to the instructor's bank-to-turn (which levels the wings on-target). The
                 // chase keeps running underneath (_out*), so the handback is seamless on every axis.
+                // v0.87: `!_uncrewed` — the whole block is about the HUMAN. RewiredPlayer() is player 0,
+                // one input device per process, so without this gate a drone would be flown by whatever
+                // the pilot's stick happened to be doing, and (worse) AimRig.SetAimForward below would
+                // drag HIS marker onto the DRONE's nose. The gate is on the block, not inside it, so a
+                // drone never reads the stick at all.
                 float pOut = _outP, rOut = _outR, yOut = _outY;
-                if (Cfg.ManualOverride.Value)
+                if (Cfg.ManualOverride.Value && !_uncrewed)
                 {
                     var pl = RewiredPlayer();
                     if (pl != null)
@@ -1149,7 +1743,7 @@ namespace NuclearOptionMouseAim
                         float ret = Cfg.ManualReturnTime.Value;
                         float axP = pl.GetAxis("Pitch"), axR = pl.GetAxis("Roll"), axY = pl.GetAxis("Yaw");
                         float handoff = Cfg.ManualHandoffTime.Value;
-                        bool anyInput = Mathf.Abs(axP) > dz || Mathf.Abs(axR) > dz || Mathf.Abs(axY) > dz;
+                        bool anyInput = ManualStickInput(); // same axes/deadzone, one definition (see above)
 
                         if (handoff > 0f)
                         {
@@ -1239,14 +1833,16 @@ namespace NuclearOptionMouseAim
                 // per completed turn — the "how did the planned path actually work out" record.
                 if (Cfg.AnomalyLogging.Value)
                 {
-                    DetectAnomalies(aircraft, off, bank, targetBank, bigTurn, yawRate, rollRate, aoaNow, azErr, dt);
+                    DetectAnomalies(aircraft, off, bank, bigTurn, yawRate, rollRate, aoaNow, azErr, dt);
                     TrackManeuver(aircraft, off, phi, bank, rollRate, dt);
                 }
 
                 // MANEUVER RECORDER (v0.35): when the user has armed a capture (RecordKey), write the live
                 // control state to the CSV at RecordRateHz. Reuses everything already computed this frame —
                 // no recompute. Throttling/IO live inside Sample(); it's a no-op when not recording.
-                if (ManeuverRecorder.IsRecording)
+                // v0.86: THIS aircraft's recorder (one dictionary probe) — N drones write N CSVs.
+                var rec = ManeuverRecorder.For(aircraft);
+                if (rec.IsRecording)
                 {
                     float elevErr = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f))
                                    - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
@@ -1258,12 +1854,18 @@ namespace NuclearOptionMouseAim
                     if (fbwResolved && _fbwFbw != null)
                         try { fbwTgtPR = _fbwFbw.GetTargetPitchAngVel(); fbwPR = _fbwFbw.GetPitchAngVel(); }
                         catch { /* leave 0 */ }
-                    ManeuverRecorder.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
+                    rec.Sample(off, azErr, elevErr, phi, bigTurn, bank, targetBank,
                         _outP, _outR, _outY, pitchRate, yawRate, rollRate, _yawEffFilt, _yawWeak,
                         spdR, aoaNow, aircraft.gForce, LastPhase, flyLevel, _engP, _engR, _engY, _heliBlend, _vFwd,
                         _rollRateFilt, _iPitch, _iYaw, bankTR, bankBlend, _headingRateFilt, azErrPred, _tBankFlown,
                         aircraft.flightAssist, fbwTgtPR, fbwPR,
-                        tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn);
+                        tgtPRaw, aoaGateUp, aoaGateDn, aoaRecover, qSched, _pitchEff, _settleOn, _aimAzRateFilt,
+                        iGate, leadDeg, _belowSup, _blendW, _phiLead,
+                        // v1.0.0 PROBE LIVENESS. fbwResolved is ResolveFbw's return (the probe), NOT the
+                        // narrower `fbwOk` local a few lines up. The canard bit is the bound controller,
+                        // the same thing the [canard] line reports as `field=`.
+                        fbwResolved, _rsCtrl != null, _heloOk,
+                        aircraft); // M0: the recorder reads alt/airDensity/pos/vel off it (fail-soft)
                 }
 
                 // Chase trace. Normal cadence ~2.5/sec; inside 10deg ("fine capture") ~5/sec at higher
@@ -1288,6 +1890,13 @@ namespace NuclearOptionMouseAim
                         float elevE = (Mathf.Asin(Mathf.Clamp(aimDir.y, -1f, 1f)) - Mathf.Asin(Mathf.Clamp(t.forward.y, -1f, 1f))) * Mathf.Rad2Deg;
                         float spd  = aircraft.rb != null ? aircraft.rb.velocity.magnitude : -1f;
                         string f = fine ? "0.000" : "0.00";
+                        // v1.0.1 — scoped swap, not Inv(), because this line mixes interpolation holes with
+                        // a dozen bare `.ToString(f)` calls: those render to a string BEFORE interpolation,
+                        // so Inv() cannot reach them and would leave the trace half-converted. The swap
+                        // covers both kinds at once. (Verbose DebugLogging only — off by default.)
+                        var prevCulture = System.Globalization.CultureInfo.CurrentCulture;
+                        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+                        try {
                         WTMouseAimPlugin.Log.LogInfo(
                             $"[chase] t={Time.time:0.000} off={off:0.000}deg phi={phi:0.0} bigTurn={bigTurn:0.00} elevE={elevE:0.00} azE={azErr:0.00} azPred={azErrPred:0.00} noseTurn={noseTurnDeg:0.000} " +
                             $"fineG={fineGain:0.00} pull={pullGate:0.00} yawSc={yawScale:0.00} phase={LastPhase} tgtBank={targetBank:0.0} yawWeak={_yawWeak:0.00} assist={assist:0.00} coordPull={coordPull:0.000} iP/iY=({_iPitch.ToString(f)},{_iYaw.ToString(f)}){(flyLevel ? " LVL" : "")} " +
@@ -1296,6 +1905,8 @@ namespace NuclearOptionMouseAim
                             $"out P/R/Y=({_outP.ToString(f)},{_outR.ToString(f)},{_outY.ToString(f)}) " +
                             $"fin=({ci.pitch:0.00},{ci.roll:0.00},{ci.yaw:0.00}) man=({_engP:0.0},{_engR:0.0},{_engY:0.0}) " +
                             $"spd={spd:0} bank={bank:0.0} g={aircraft.gForce:0.0}");
+                        }
+                        finally { System.Globalization.CultureInfo.CurrentCulture = prevCulture; }
                     }
                 }
             }
@@ -1324,14 +1935,21 @@ namespace NuclearOptionMouseAim
         //        degrees until |azErr| is also small, so the law doesn't level early and park short.
         // Everything else (pitch, yaw, fine integrator winding, roll-rate low-pass) is byte-for-byte
         // Legacy — the same convergence properties, same anti-PIO, same no-bunt gate.
-        private static void ApplyEvolvedLegacy(
-            Transform t, Vector3 local, float off, float vMag, float sens, float fineGain, float alignFrac, float bigTurn,
-            float targetBank, float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
+        private void ApplyEvolvedLegacy(
+            Transform t, Vector3 local, float vMag, float sens, float fineGain, float alignFrac, float alignFracH, float bigTurn,
+            float azErr, float azErrPred, float phi, float lateral, float pitchRate, float yawRate, float rollRate,
             float pitchDamp, float damp, float assist, float dt, float omegaMax, float qSched,
             out float tgtP, out float tgtR, out float tgtY,
             out float pullGate, out float yawScale, out float coordPull)
         {
-            // off/vMag are used here (unlike Legacy where vMag was unused).
+            // vMag is used here (unlike Legacy, where it was unused). `off` and `targetBank` were
+            // parameters until v0.96 and were never read: change 2a computes its own tBankE locally, so
+            // the caller's weakness-gated targetBank was dead the moment Legacy was removed in v0.60,
+            // and `off` went the same way. Apply still keeps both as locals, but for DIFFERENT reasons
+            // now: `off` is read by DetectAnomalies, while `targetBank` survives for exactly one purpose —
+            // writing CSV column 8, which is retained under the name `targetBankDead` so the column
+            // indices of 3,098 archived captures do not shift. Nothing reads it as a control signal any
+            // more; the anomaly path moved to `_tBankFlown` with the column rename.
 
             // PITCH — identical to Legacy.
             pullGate = Mathf.Lerp(1f, Mathf.Clamp01(alignFrac), Cfg.RollPitchCoordination.Value * bigTurn);
@@ -1351,6 +1969,11 @@ namespace NuclearOptionMouseAim
             const float azRampW = 1.5f; // deg; regime constant. MUST match the shared site.
             float azTR = azErrPred * Mathf.Clamp01((Mathf.Abs(azErr) - 0.5f) / azRampW);
             float omega  = azTR * Mathf.Deg2Rad * Cfg.AssistTurnRateGain.Value;                              // rad/s, signed
+            // MARKER-RATE FEED-FORWARD (v0.78) — LOCKSTEP with Apply's shared omegaDes site; the full measured
+            // rationale lives there. Same term, same unit gain, and applied at the same point: BEFORE the
+            // achievability cap below, so omegaMax bounds it too. A sustained marker sweep is now paid for by
+            // the feed-forward instead of by a standing azimuth lag (measured 9.54 deg at 12.07 deg/s).
+            if (Arm(Cfg.MarkerRateFeedForward)) omega += _aimAzRateFilt * Mathf.Deg2Rad;
             // v0.55 ACHIEVABILITY CAP — the SAME clamp Apply's shared bankTR block applies to omegaDes
             // (see the comment there); the two sites MUST stay in lockstep, same rule as the azErrPred
             // note above. At low speed this shrinks the bank target physically instead of letting it slam
@@ -1458,7 +2081,16 @@ namespace NuclearOptionMouseAim
             // it is a stale hold, not a live reading — scaling by it there would apply a meaningless number.
             // Rotorcraft keep pre-v0.64 behaviour exactly.
             const float effFloor = 0.3f; // regime constant (revThresh is the shared PEffRevThresh field)
-            if (!_collective) pErrTerm *= _pitchEff >= PEffRevThresh ? Mathf.Max(effFloor, _pitchEff) : _pitchEff;
+            // #20 HYGIENE (ledger X5). `>=` -> `>`. The v0.67 self-probe LPFs toward revThresh FROM BELOW and
+            // asymptotes there, so `_pitchEff` parks on EXACTLY 0.150 and the `>=` branch then clamps demand
+            // back UP to effFloor — feeding 30% pitch into the one state the gate exists to stop feeding.
+            // Signature over the 1,032 archived captures (627,110 rows, R28-R32): 2,811 rows read exactly
+            // 0.150 and only 8 read anything above it up to 0.152, i.e. the LPF parked on its own target.
+            // Moves 0.45% of corpus rows, all at the boundary, and cannot regress anything: a plant that has
+            // genuinely recovered reads strictly above the threshold and is untouched. NOT an experiment —
+            // an A/B here would report a null (the branch is dormant at card entry conditions) and that null
+            // would read as "the diagnosis was wrong" when it is not.
+            if (!_collective) pErrTerm *= _pitchEff > PEffRevThresh ? Mathf.Max(effFloor, _pitchEff) : _pitchEff;
             tgtP = Mathf.Clamp(((pErrTerm - coordPull) * qSched + _iPitch + pitchRate * pitchDamp) * Cfg.PitchGain.Value, -1f, 1f);
 
             // YAW — Legacy, plus the hover-regime authority boost (v0.43). With the wings held level by the
@@ -1498,12 +2130,37 @@ namespace NuclearOptionMouseAim
             // 3/s slew there (the v0.57 dead-astern relay fix, the ONE place the slew is genuinely needed).
             // The lateral gate zeroes eAlign where phi is ill-conditioned (both local.x/local.y ~0), so a
             // near-boresight HOLD frame can't seed the next real maneuver with saturated junk.
-            // ponytail: phiWrapGate is the geometric atan2 wrap boundary and eAlignLatGate the atan2
-            // conditioning floor (~sin FineAngle) — regime constants, not per-plane; promote to Cfg only if
-            // flight tuning demands.
+            // ponytail: phiWrapGate is the geometric atan2 wrap boundary and EAlignLatGate (class-level since
+            // v0.85) the atan2 conditioning floor (~sin FineAngle) — regime constants, not per-plane; promote
+            // to Cfg only if flight tuning demands.
             const float phiWrapGate = 135f;    // deg; |phi|>135 is the only place phi is discontinuous (±180 wrap)
-            const float eAlignLatGate = 0.10f; // ~sin(FineAngle 6°); below this |lateral| phi is meaningless
-            float eAlignTgt = (lateral > eAlignLatGate) ? Mathf.Clamp(phi / 90f, -1.5f, 1.5f) : 0f;
+            // v0.85 ALIGN-RATE LEAD. phi IS this channel's error and the map below was pure proportional on
+            // it — a P-only loop against a plant with real roll inertia, which overshoots by construction and
+            // keeps commanding roll into a rotation already bought. Lead phi by its own measured rate before
+            // the map, exactly as azErrPred leads azErr for the turn command, so the align command rolls out
+            // early instead of at the crossing. Sign: with a stationary marker a right roll swings the target
+            // left in the body frame, so d(phi)/dt = -rollRate — phi + T*phiRate is therefore a genuine
+            // derivative brake on roll, and the ±1.5 clamp still bounds it.
+            //   NOT the same term as the servo's existing -rollRateF*RollDamping below, which brakes the roll
+            //   AXIS. _phiRateFilt is the bearing's TOTAL rate: it also sees the pitch/yaw closure (in a
+            //   below-nose pushover the bearing sweeps with the nose while roll rate is ~0, and the align
+            //   channel should stand down for exactly that) and the MARKER's own motion, so a marker sweeping
+            //   around the boresight is TRACKED, not braked — the v0.83 relative-rate lesson.
+            //   Stood down inside the wrap region: there phi is discontinuous and the two-rate slew below is
+            //   the mechanism that owns it, so a lead would be differentiating the very thing that slew exists
+            //   to reject. Wrapping is therefore unnecessary too — |phi| <= 135 plus a bounded lead cannot
+            //   cross ±180 into a sign inversion.
+            // ONE LAW: no new constant and no per-airframe number. The lead TIME reuses Cfg.RollDamping — the
+            // roll channel's already-tuned derivative time, in seconds, against the same physical loop — and
+            // the lead ANGLE is that time times a LIVE measured rate, so a sluggish airframe generates a small
+            // lead and a fast-rolling one a large one, automatically. Same argument as the v0.78 feed-forward:
+            // the tuning-free part is the kinematics.
+            // ponytail: RollDamping is the reused derivative time; split it out only when a capture shows the
+            // align channel wants a different lead than the wings-level channel (the probe-based replacement
+            // would be a measured stick->roll-rate lag, i.e. a roll twin of _pitchEff).
+            _phiLead = (Arm(Cfg.AlignRateLead) && Mathf.Abs(phi) <= phiWrapGate)
+                     ? _phiRateFilt * Cfg.RollDamping.Value : 0f;
+            float eAlignTgt = (lateral > EAlignLatGate) ? Mathf.Clamp((phi + _phiLead) / 90f, -1.5f, 1.5f) : 0f;
             // Two-rate slew (single MoveTowards, so it's continuous at the gate — no exit snap if phi sweeps
             // back below 135° before the slow slew converged): 3/s inside the wrap region (the anti-relay
             // clamp — the ONE place phi is discontinuous), 30/s elsewhere (fast catch-up ≈ pass-through;
@@ -1535,10 +2192,33 @@ namespace NuclearOptionMouseAim
             // the target. Keyed to LIVE geometry only: Clamp01(-alignFrac)=belowness; (1-lateralHold) limits
             // it to the azErr≈0 hang (a genuine down-LATERAL with large azErr keeps its roll-and-pull); the
             // bigTurn taper hands full roll-and-pull back for large below-reorientations. No per-plane constant.
+            // v0.85 — THE SUPPRESSOR WAS DISARMED BY THE SYMPTOM IT SUPPRESSES. Measured over 11 captures of
+            // the elDn segment (a 20° down step), late 60% of the block: mean off 6.92° ± 2.40, bank rocking
+            // ±43.3° at ~0.3 Hz, outR sign flips 0.58/s, 24% REGRESSING ticks and ~3x the jerk of any other
+            // segment — against its MIRROR elUp (a LARGER step, upper hemisphere, same law) at 0.03° with the
+            // roll stick never moving. corr(|azErr|, blendWeight) = +0.918: the blend weight was being raised
+            // by the azimuth error that roll-to-align was itself creating. Two paths did that, and both are
+            // fixed here rather than damped:
+            //   1. alignFrac is BODY-frame, so the aircraft's own bank changed the answer — at 90° of bank a
+            //      straight-down target reads as exactly abeam and belowness goes to 0. Rolling deleted the
+            //      reason not to roll; that IS the false ~85° equilibrium the v0.67 note describes, written as
+            //      a feedback path. Use the ROLL-INVARIANT alignFracH (see its derivation in Apply) instead —
+            //      identical wings-level, and no longer erasable by the transient it is supposed to prevent.
+            //   2. The (1 - lateralHold) factor gated the suppressor on azimuth error, which is the symptom:
+            //      lateralHold > 0 on 88% of ticks in that window and it removed 51% of the intended
+            //      suppression. DELETED. Its stated job — "a genuine down-LATERAL keeps its roll-and-pull" —
+            //      is already done twice over: Clamp01(-alignFracH) is itself a continuous belowness (a target
+            //      below AND abeam reads ~0 and is barely suppressed), and the bigTurn taper below hands full
+            //      roll-and-pull back for any large below-reorientation. Deleting it removes the ONLY term
+            //      here that let the loop's own output re-open the gate.
+            // Still live geometry only, still no per-plane constant, and still exactly zero for any target at
+            // or above the nose — the hemisphere that already converges to 0.03° is untouched by construction.
             const float downAlignTaper = 0.3f; // top fraction of the bigTurn ramp over which roll-to-align returns
-            float belowSuppress = Mathf.Clamp01(-alignFrac) * (1f - lateralHold)
-                                * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
+            float belowSuppress = Arm(Cfg.BelowAlignSuppress)
+                ? Mathf.Clamp01(-alignFracH) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper)
+                : Mathf.Clamp01(-alignFrac) * (1f - lateralHold) * Mathf.Clamp01((1f - bigTurn) / downAlignTaper);
             blendWeight *= (1f - belowSuppress);
+            _belowSup = belowSuppress; _blendW = blendWeight; // recorder: which path ran, and the loop gain itself
             float rollErr = Mathf.Lerp(eFine, eAlign, blendWeight);
 
             // ROLL-RATE LOW-PASS — identical to Legacy (anti high-speed roll PIO).
@@ -1563,14 +2243,21 @@ namespace NuclearOptionMouseAim
         // Event-only anomaly logger (v0.25). Each detector keeps small rolling state and fires at most
         // once per cooldown, writing a single compact [anomaly] line. Runs every FixedUpdate while flying,
         // so it catches the exact frame a command goes wrong without the per-frame [chase] spam.
-        private static void DetectAnomalies(Aircraft ac, float off, float bank, float targetBank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
+        // Reads `_tBankFlown` (the tBankE the roll servo really flew this tick) directly rather than taking a
+        // bank target as a parameter. It USED to take Apply's `targetBank`, the yawWeak-gated linear/atan
+        // blend that no live law has flown since v0.60 — 17.6% of `place-390` rows have that at < 0.05 deg
+        // while tBankE is > 2 deg, so both consumers here (the over-roll test and the trail's tgtBank field)
+        // were comparing achieved bank against a number nothing commanded. Dropping the parameter instead of
+        // passing `_tBankFlown` into it is deliberate: there is now no way to hand this the wrong bank.
+        // ApplyEvolvedLegacy writes `_tBankFlown` before Apply reaches this call, so it is current.
+        private void DetectAnomalies(Aircraft ac, float off, float bank, float bigTurn, float yawRate, float rollRate, float aoaNow, float azErr, float dt)
         {
             float now = Time.time;
             float spdNow = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
 
             // Stash this frame in the ring buffer FIRST (logs nothing; dumped only if an event fires below).
             _ring[_ringHead] = new AnFrame {
-                t = now, off = off, bank = bank, tgtBank = targetBank,
+                t = now, off = off, bank = bank, tgtBank = _tBankFlown,
                 p = _outP, r = _outR, y = _outY, yr = yawRate, rr = rollRate, rf = _rollRateFilt, spd = spdNow, g = ac.gForce };
             _ringHead = (_ringHead + 1) % _ring.Length;
             if (_ringCount < _ring.Length) _ringCount++;
@@ -1606,14 +2293,17 @@ namespace NuclearOptionMouseAim
 
             // OVER-ROLL — actual bank overshot what the law actually asked for. GATED to the PURE fine regime
             // (bigTurn <= 0, i.e. off < FineAngle): only there does the fine bank servo alone govern roll, so
-            // targetBank is the real commanded bank. Above FineAngle the v0.26 body-frame roll-to-align law
-            // legitimately commands more bank than the azimuth servo would, so comparing to targetBank there
+            // the commanded bank is the whole story. Above FineAngle the v0.26 body-frame roll-to-align law
+            // legitimately commands more bank than the azimuth servo would, so comparing there
             // false-fires all through a normal turn (the bigTurn<0.5 gate let that happen — v0.26.1 fix). Also
             // require the bank to be DEEPENING (roll rate still increasing |bank|, same sign as bank) so a
             // turn-exit roll-out — bank momentarily above target but actively levelling — doesn't trip it.
-            if (bigTurn <= 0f && Mathf.Abs(bank) > Mathf.Abs(targetBank) + Cfg.AnomalyOverRollDeg.Value
+            // The reference is `_tBankFlown` (tBankE): the DEAD `targetBank` this used to read is exactly
+            // 0 on a large minority of rows where the servo is flying real bank, so it manufactured
+            // over-roll events out of the difference between two different signals.
+            if (bigTurn <= 0f && Mathf.Abs(bank) > Mathf.Abs(_tBankFlown) + Cfg.AnomalyOverRollDeg.Value
                 && Mathf.Sign(rollRate) == Mathf.Sign(bank))
-                Anomaly("over-roll", $"bank={bank:0.0} target={targetBank:0.0}", ref _anOverRollT, now, ac, off, bank);
+                Anomaly("over-roll", $"bank={bank:0.0} target={_tBankFlown:0.0}", ref _anOverRollT, now, ac, off, bank);
 
             // HUNT — rapid output sign-flapping on pitch or yaw within a 1 s window while the error is NOT
             // meaningfully closing: a limit cycle / wing-rock rather than honest convergence.
@@ -1751,7 +2441,14 @@ namespace NuclearOptionMouseAim
         // No per-anomaly gain snapshot: gains are logged once at startup + on every change ([config] lines)
         // and embedded in each recording's header, so repeating them here only burned log/context. Instead
         // we tag the active control law and, when a recording is running, the CSV it belongs to.
-        private static void Anomaly(string type, string detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
+        // v1.0.1 — `detail` is a FormattableString, NOT a string, and that one word is the whole fix for
+        // the eight call sites below: an interpolated literal binds to whichever the parameter asks for,
+        // so every `Anomaly("over-roll", $"bank={bank:0.0} …")` now arrives UNFORMATTED and is rendered
+        // invariantly here instead of in the ambient (possibly comma-decimal) culture at the call site.
+        // Formatting at the caller is what put "bank=-40,4" in the field logs; a string parameter cannot
+        // be fixed here at all, because by then the damage is done. Zero call-site edits, and a ninth
+        // detector added later is invariant for free.
+        private void Anomaly(string type, System.FormattableString detail, ref float lastStamp, float now, Aircraft ac, float off, float bank)
         {
             if (now - lastStamp < 1f) return; // per-type cooldown
             lastStamp = now;
@@ -1759,11 +2456,16 @@ namespace NuclearOptionMouseAim
             _anomalyIndex++;
             LastAnomalyIndex = _anomalyIndex; LastAnomalyType = type; LastAnomalyTime = now;
             float spd = ac.rb != null ? ac.rb.velocity.magnitude : -1f;
-            string rec = ManeuverRecorder.CurrentFile;
+            string rec = ManeuverRecorder.For(ac).CurrentFile;   // v0.86: THIS aircraft's capture
+            // Inv() on each piece, and note `detail` is rendered explicitly rather than interpolated as
+            // {detail}: interpolating a FormattableString would call its plain ToString() and re-introduce
+            // the ambient culture inside an otherwise-invariant line.
             string line =
-                $"[anomaly #{_anomalyIndex}] {type} t={now:0.000} {detail} off={off:0.0} bank={bank:0.0} phase={LastPhase} " +
-                $"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} " +
-                $"law=EvolvedLegacy{(rec.Length > 0 ? $" rec={rec}" : "")}";
+                WTMouseAimPlugin.Inv($"[anomaly #{_anomalyIndex}] {type} t={now:0.000} ")
+              + System.FormattableString.Invariant(detail)
+              + WTMouseAimPlugin.Inv($" off={off:0.0} bank={bank:0.0} phase={LastPhase} ")
+              + WTMouseAimPlugin.Inv($"out P/R/Y=({_outP:0.00},{_outR:0.00},{_outY:0.00}) spd={spd:0} g={ac.gForce:0.0}{(FlyLevelActive ? " LVL" : "")} ")
+              + $"law=EvolvedLegacy{(rec.Length > 0 ? $" rec={rec}" : "")}";
             WTMouseAimPlugin.Log.LogWarning(line);
             AnomalyLog.Write(line);
             if (Cfg.AnomalyContext.Value) DumpTrail(now);
@@ -1773,7 +2475,7 @@ namespace NuclearOptionMouseAim
         // event is visible (how the wag built, how the bank blew past its target) without per-frame spam.
         // Throttled to once per second across all anomaly types so a multi-type frame doesn't repeat it.
         // Per frame: t | off / bank>tgtBank | P,R,Y outputs | yaw rate | spd. Oldest → newest, left → right.
-        private static void DumpTrail(float now)
+        private void DumpTrail(float now)
         {
             if (now - _lastTrailT < 1f || _ringCount == 0) return;
             _lastTrailT = now;
@@ -1783,7 +2485,7 @@ namespace NuclearOptionMouseAim
             {
                 int idx = ((_ringHead - 1 - i) % _ring.Length + _ring.Length) % _ring.Length;
                 AnFrame f = _ring[idx];
-                sb.Append($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}");
+                sb.Append(WTMouseAimPlugin.Inv($" {f.t:0.00}:{f.off:0}/{f.bank:0}>{f.tgtBank:0}/{f.p:0.00},{f.r:0.00},{f.y:0.00}/{f.yr:0.00}/{f.rr:0.00}/{f.rf:0.00}/{f.spd:0}"));
             }
             string line = sb.ToString();
             WTMouseAimPlugin.Log.LogWarning(line);
@@ -1814,7 +2516,7 @@ namespace NuclearOptionMouseAim
         // off, time-to-align (first |phi|<20°, "lift vector on target"), time-to-capture (first off<FineAngle),
         // and peak bank / G / roll rate — the "how did the planned path actually work out" record. Cheap: one
         // line per completed turn. Reset on engage alongside the anomaly state.
-        private static void TrackManeuver(Aircraft ac, float off, float phi, float bank, float rollRate, float dt)
+        private void TrackManeuver(Aircraft ac, float off, float phi, float bank, float rollRate, float dt)
         {
             float now = Time.time;
 
@@ -1840,12 +2542,12 @@ namespace NuclearOptionMouseAim
             if (_manvSettle >= 0.3f)
             {
                 float dur = now - _manvStartT;
-                string align   = _manvAlignT   >= 0f ? $"{_manvAlignT:0.00}s"   : "n/a";
-                string capture = _manvCaptureT >= 0f ? $"{_manvCaptureT:0.00}s" : "n/a";
+                string align   = _manvAlignT   >= 0f ? WTMouseAimPlugin.Inv($"{_manvAlignT:0.00}s")   : "n/a";
+                string capture = _manvCaptureT >= 0f ? WTMouseAimPlugin.Inv($"{_manvCaptureT:0.00}s") : "n/a";
                 WTMouseAimPlugin.Log.LogInfo(
-                    $"[maneuver] start={_manvStartOff:0}deg peak={_manvPeakOff:0}deg dur={dur:0.00}s " +
-                    $"toAlign={align} toCapture={capture} peakBank={_manvPeakBank:0}deg peakG={_manvPeakG:0.0} " +
-                    $"peakRollRate={_manvPeakRoll:0.00} overshoot={(_manvOvershot ? "Y" : "n")}");
+                    WTMouseAimPlugin.Inv($"[maneuver] start={_manvStartOff:0}deg peak={_manvPeakOff:0}deg dur={dur:0.00}s ") +
+                    WTMouseAimPlugin.Inv($"toAlign={align} toCapture={capture} peakBank={_manvPeakBank:0}deg peakG={_manvPeakG:0.0} ") +
+                    WTMouseAimPlugin.Inv($"peakRollRate={_manvPeakRoll:0.00} overshoot={(_manvOvershot ? "Y" : "n")}"));
                 _manvActive = false;
                 _manvSettle = 0f;
             }
@@ -1893,10 +2595,17 @@ namespace NuclearOptionMouseAim
                 catch { /* ignore — archetype info is best-effort */ }
                 WTMouseAimPlugin.Log.LogInfo(
                     $"[seam] now flying '{name}' — fixedWing={fixedWing} collective={!fixedWing} hasAutoHover={hasHover}{arch} " +
-                    $"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only).");
+                    WTMouseAimPlugin.Inv($"(takeoffDistance={aircraft.GetAircraftParameters().takeoffDistance:0.##}); hover regime ramps {Cfg.HeliHoverSpeed.Value:0}..{Cfg.HeliForwardSpeed.Value:0} m/s fwd (collective aircraft only)."));
             }
 
-            bool active = ChaseController.BeginFrame(aircraft, fixedWing, pilotStrength);
+            // TEST-CARD DEMAND (M1). Runs HERE, in the prefix, so the scripted aim direction for this
+            // fixed step is written BEFORE the postfix below calls Apply(), which reads
+            // AimRig.AimForward — same PlayerAxisControls invocation, so zero-tick lag by
+            // construction rather than by Harmony patch ordering or Unity's Update/FixedUpdate order
+            // (plan §5.1 M-1). No-op (two field reads) when no card is running.
+            ScenarioPlayer.For(aircraft).Tick(aircraft);
+
+            bool active = ChaseController.For(aircraft).BeginFrame(aircraft, fixedWing, pilotStrength);
 
             // Skip the native body ONLY in the cockpit. There, native's mouse virtual-joystick would
             // fight us for the stick, so we own it outright. In external/orbit views we let native RUN —
@@ -1910,10 +2619,17 @@ namespace NuclearOptionMouseAim
         private static void Postfix(PilotPlayerState __instance)
         {
             if (TryResolve(__instance, out var aircraft, out _, out _))
-                ChaseController.Apply(aircraft);
+            {
+                ChaseController.For(aircraft).Apply(aircraft);
+                // Throttle/brake ownership for a running card, on the FIXED step: this is the write
+                // that is guaranteed to be in place when Aircraft.FilterInputs consumes the inputs
+                // immediately after this postfix. PilotThrottlePatch below owns the Update-time half.
+                // No-op when no card is running.
+                ScenarioPlayer.For(aircraft).OwnInputs(aircraft);
+            }
         }
 
-        private static bool TryResolve(PilotPlayerState inst, out Aircraft aircraft, out bool fixedWing, out float pilotStrength)
+        internal static bool TryResolve(PilotPlayerState inst, out Aircraft aircraft, out bool fixedWing, out float pilotStrength)
         {
             aircraft = null; fixedWing = false; pilotStrength = 1f;
             // PilotPlayerState never populates base.aircraft (it uses pilot.aircraft directly and
@@ -1926,6 +2642,35 @@ namespace NuclearOptionMouseAim
             // GLOC: native zeroes inputs when pilotStrength < 0.2 (blackout). Read it so we can defer.
             pilotStrength = Traverse.Create(inst).Field("pilotStrength").GetValue<float>();
             return true;
+        }
+    }
+
+    // v0.74 — THROTTLE OWNERSHIP AT THE UPDATE SEAM.
+    //
+    // PlayerThrottleAxis1Controls runs in Update (NOT FixedUpdate) and is the only place the player's
+    // hardware throttle axis reaches ControlInputs.throttle. Owning throttle from the fixed-step
+    // postfix alone was not enough, for a reason that only shows up in flight: Airbrake.Update reads
+    // ControlInputs.throttle every RENDERED frame and opens the boards whenever it is exactly zero —
+    //     openAmount += (throttle == 0f ? +openSpeed : -openSpeed) * Time.deltaTime;
+    // With more rendered frames than fixed steps, every frame that native wrote the pilot's idle lever
+    // before our next fixed-step write cracked the airbrakes open and bled energy off-script. The
+    // pilot's own report: "the UX is showing me I'm modifying the throttle... there is a point at zero
+    // percent where the game goes into airbraking mode."
+    //
+    // Skipping native outright (rather than overwriting after it) means the hardware axis never
+    // reaches ControlInputs at all while a card runs, so the throttle HUD shows what the card is
+    // actually flying instead of what the lever says. It also freezes customAxis1, which native writes
+    // in the same method — deliberate: that axis is another uncontrolled input during a capture.
+    // simulatedThrottle keeps its value while skipped and resumes from the lever when the card ends.
+    [HarmonyPatch(typeof(PilotPlayerState), "PlayerThrottleAxis1Controls")]
+    internal static class PilotThrottlePatch
+    {
+        // Return false => skip native (the card owns the throttle this frame).
+        private static bool Prefix(PilotPlayerState __instance)
+        {
+            if (!ScenarioPlayer.PlayerPlaying) return true;                 // idle: two field reads
+            if (!PilotPlayerStatePatch.TryResolve(__instance, out var aircraft, out _, out _)) return true;
+            return !ScenarioPlayer.For(aircraft).OwnInputs(aircraft);
         }
     }
 }

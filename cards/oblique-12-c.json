@@ -1,0 +1,51 @@
+{
+  "name": "oblique-12-c",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "note": "CORNER-SPEED TWIN of 'oblique-12' — identical geometry, identical replicate count; the ONLY difference is the entry condition, which is 0.95x each lane airframe's OWN corner speed instead of a flat 250 m/s. That is what lets all ten fixed-wing keys fly one card: at 250 m/s CAS1 and COIN are refused pre-spawn (above 0.95x Vmax) and the roster is 8. 0.95 rather than 1.00 because CAS1's published cornerSpeed (200) is itself above 0.95x its Vmax (195.3). startSpeed 250 is retained as the fail-soft fallback ONLY: if the envelope cannot be read the resolver warns and degrades to exactly the 'oblique-12' condition, a known-good state, rather than to something novel. ONE test per card: 12 deg oblique steps, ABOVE FineAngle=6 and into the roll-to-align blend (full at AlignAngle=25). Same diamond geometry as oblique-2/-6, radius 8.49 deg. The DR/DL steps end below the horizon - the v0.85 elDn regime, reached obliquely. AIRFRAME: any jet at the fixedwing-v2 entry condition. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: this card last flew in R29 (v0.93.0), before Drone/DroneAltDeckM existed (v0.99), so every lane flew one deck.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 8,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 8.49
+    },
+    {
+      "tag": "obDR12",
+      "dur": 8,
+      "az": 8.49,
+      "el": 0
+    },
+    {
+      "tag": "obDL12",
+      "dur": 8,
+      "az": 0,
+      "el": -8.49
+    },
+    {
+      "tag": "obUL12",
+      "dur": 8,
+      "az": -8.49,
+      "el": 0
+    },
+    {
+      "tag": "obUR12",
+      "dur": 8,
+      "az": 0,
+      "el": 8.49
+    }
+  ]
+}

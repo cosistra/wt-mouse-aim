@@ -1,0 +1,918 @@
+# `captures.db` — the flight-capture index, for an agent who has never seen this repo
+
+`debugtests/captures.db` is a SQLite index over every recorder CSV the mod has ever written
+(**3098 captures / 13326 segments / ~2.61M recorder rows / 34 non-NULL run tags as of R43,
+2026-08-02** — the older "2576 / 11015 / ~2.12M as of R40" and "1604 / 7081 / ~954k as of R32" figures
+are retired; re-derive with `--stats` rather than trusting any number written here). It exists so a
+question spanning
+batches — *"does this effect hold in R28, R29 AND R30?"* — is one `GROUP BY`, not three tool runs
+stitched into prose.
+
+It is **derived and gitignored**. The CSVs under `<game>/BepInEx` are the source of truth; the `.db`
+is rebuilt in ~30 s and re-indexed warm in ~0.3 s over the whole corpus.
+
+```bash
+python debugtests/index-captures.py "<game>/BepInEx"   # build / refresh (idempotent, ~0.3 s warm)
+python debugtests/index-captures.py --stats            # WHAT IS IN HERE — run this first
+python debugtests/index-captures.py --check R29        # is that batch complete and intact?
+python debugtests/index-captures.py --query "SELECT …" # read-only by default
+```
+
+<!-- DB-INDEX:BEGIN -->
+## Index — read a slice, not the file
+
+**This file is ~46 KB (~11k tokens). Do not read it whole to write one query.** Find your row, read
+that section (`Read` with `offset`/`limit`, or grep the heading).
+
+| you want | section | line |
+|---|---|---|
+| the two rules that stop wrong answers | [The two rules](#the-two-rules) | 51 |
+| just run something | [the three built-in commands](#start-here-the-three-built-in-commands) | 68 |
+| **what a run tag flew, where its findings went** | [The batch index](#the-batch-index--what-each-run-tag-flew-and-where-its-conclusions-live) | 95 |
+| where a new analysis should land | [The doc convention](#the-doc-convention--batch-analyses-update-standing-docs) | 141 |
+| **column reference** — one row per CSV | [`captures`](#captures--one-row-per-csv-86-columns-today-the-sc_entry_ov_-ones-are-dynamic) | 166 |
+| column reference — one row per segment | [`segments`](#segments--one-row-per-capture-segment-62-columns-12-fixed--50-dynamic-metrics) | 217 |
+| raw recorder rows (opt-in) | [`rows`](#rows--raw-recorder-rows-opt-in) | 244 |
+| the card grid tables | [`cards`, `card_airframes`](#cards-card_airframes--the-card-grid-opt-in) | 252 |
+| **which metric is valid for which segment** | [The metric × segment-type matrix](#the-metric--segment-type-matrix) | 263 |
+| why my query returned NULL | [The three NULL idioms](#the-three-null-idioms) | 319 |
+| why a small effect is not real | [The resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check) | 375 |
+| which `sc_` column to join on | [The six `sc_` twins](#the-six-sc_-twins--which-one-to-join-on) | 426 |
+| **a worked query to copy** | [Cookbook](#cookbook) | 446 |
+| `--query` semantics | [`--query` behaviour](#--query-behaviour) | 606 |
+| everything that bit someone once | [Gotchas, condensed](#gotchas-condensed) | 634 |
+| **a dead column that still reads like signal** | gotcha 20 (`targetBank`), 22 (`outR`/`outP`) | 774 |
+| **can this corpus measure a frequency at all?** | gotcha 21 (16 Hz, Nyquist 8, the lag comb) | 803 |
+| does the nose ever move AWAY (backlog #33) | gotcha 23 (`retreatDeg` + `monotonicityIndex`) | 855 |
+| why a leg is not independent of the last one | gotcha 24 (`pEffEntry`, never pool across tags) | 871 |
+
+> **Every trap in this schema returns a plausible number instead of an error.** If you are about to
+> write SQL, read *The two rules* and the matrix row for your metric first — that is ~60 lines, and
+> it is the difference between a result and a retraction.
+
+<!-- DB-INDEX:END -->
+
+## The two rules
+
+1. **Every metric in here comes from `scorecard.py`.** `index-captures.py` imports it and stores what
+   `score_run()` returns. Nothing is re-derived — not a metric, not the RAILED threshold, not the
+   tag→type rule. If a metric changes there, re-index and the database follows. Do **not** "fix" a
+   number with SQL; fix it in `scorecard.py`.
+2. **Metrics are SPARSE by segment type, and columns are DYNAMIC.** A corpus-wide `avg(metric)`
+   silently averages whatever handful of rows happen to have it. See
+   [the matrix](#the-metric--segment-type-matrix) and [the NULL idioms](#the-three-null-idioms) —
+   both traps return a plausible number rather than an error.
+3. **A non-NULL pointing metric can still be float grain.** `off` resolves no finer than 0.0198°, and
+   `terminalOffDeg` is anchored at the segment END so it means different things on an 8 s and a 30 s
+   leg. Both produce a confident four-decimal number that orders nothing —
+   [the resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check).
+
+---
+
+## Start here: the three built-in commands
+
+| Command | Answers |
+|---|---|
+| `--stats` | Totals, one row per batch (mod version, captures, airframes, cards, aborts, `n_cols` era, whether raw rows are materialized), an `n_cols` histogram, per-airframe counts, parse-warning count. |
+| `--check [RUNTAG]` | Is a batch what you think it is: per-(airframe) capture counts with an **outlier flag**, `rec`-number gaps, aborted captures **with their stop reasons**, parse warnings, unknown segment tags. With no RUNTAG it scans every batch and prints only flagged lanes. |
+| `--diff RUNA RUNB [--metric M] [--tag T]` | Per `(airframe, card, tag)`: `mean ± stdev%` in both runs and the ratio B/A. Railed and `arm` segments excluded. This is the question the index was built for. |
+
+`--check` exists because a dead lane is invisible in every aggregate view. Real example — R29 flew ten
+lanes; nine flew 48 captures each and one did not:
+
+```
+=== R29 ===  captures 441  airframes 10  cards 6  aborted 1  rec 1..441  v0.93.0  2026-07-30 20:00
+airframe       caps  cells  min/cell  max/cell  firstRec  lastRec  abort  flag
+-------------  ----  -----  --------  --------  --------  -------  -----  --------------------------------
+Darkreach      9     6      1         2         10        90       1      ** 9 vs median 48 (19%)  ** STOPPED EARLY: last rec 90 of 441
+CAS1           48    6      8         8         6         438      0
+…
+  aborted captures:
+Darkreach  oblique-2-c  90   abort: aircraft gone
+```
+
+Any query that groups R29 by airframe will happily report a `Darkreach` mean over 30 segments
+next to nine 192-segment lanes. Run `--check` before trusting a batch.
+
+---
+
+## The batch index — what each run tag flew, and where its conclusions live
+
+**There are no per-batch findings documents any more.** They were consolidated 2026-08-02 (see
+[the doc convention](#the-doc-convention--batch-analyses-update-standing-docs) below); the
+conclusions live in the standing docs, and the raw evidence lives in `captures.db` plus
+`debugtests/archive/`. This table is how a citation of the form `R39-rotor 1d` or
+`R28-FINDINGS.md §3.2` — of which ~60 survive in `.cs` / `.py` / `cards/*.json` comments — still
+resolves.
+
+**Read a batch citation as "the finding, in the standing doc named here".** The letters/numbers in
+those citations (`H7`, `§5a`, `1d`, `F2`) were document-local and are gone; the finding is not.
+
+| run tag | mod | what flew | where its conclusions live now |
+|---|---|---|---|
+| **R21** | v0.83 | `fixedwing-v2`, sustained `turn360`, 10 replicates | `LAW-LEDGER.md` **S1–S3** (bank clamp is a bystander; `lateralHold` rails the bank pipeline; `_iPitch` dead outside the fine cone), **X8** (the clamp is NOT what holds the 9.4° lag), **L7** (`predFloor` binds 100%) |
+| **R22–R25** | v0.87–0.89 | Gates A–D, the instrument-validation ladder | `LAW-LEDGER.md` **§1.1 I1–I3** (now carrying the gate evidence inline), **X3** (aoaTrim theory disproved), **X4** (the retracted `ctrlReset` claim), **X11** (#23 "harmless" retired) |
+| **R26 / R27** | v0.90–0.92 | first drone batches | `LAW-LEDGER.md` **I4** (#29/#30/#37 instrument defects), **X7** (`aoaLimiterActivePct` is non-zero at corpus scale) |
+| **R28** | v0.93 | `oblique-12-*`, 8 airframes, 384 caps | `LAW-LEDGER.md` **D1, D10, I6, I7, L10, X10, X13, X14**. The down-step penalty's first measurement. Cited by `cards/oblique-12-fwd.json` / `-rev.json` as "F1" |
+| **R29** | v0.93 | `oblique-*`, 10 airframes, 441 caps | `LAW-LEDGER.md` **D1, D5, G1–G7, L1, L9, L11, X13, X15, O2** |
+| **R30** | v0.94 | `oblique-12-fwd`/`-rev` crossed design, 48 caps | `LAW-LEDGER.md` **D2, D3, D4, L8, X10** — direction, not position; the crossed control |
+| **R31** | v0.94 | `BelowAlignSuppress` sweep, 2 cards, 96 caps | `LAW-LEDGER.md` **D8–D12, I5, X12**, and the **BATCH SUSPECT** block at the head of the ledger (multi-card ABBA confound) |
+| **R32** | v0.95 | `darkreach-05`, 63 caps, 18 departures | `LAW-LEDGER.md` **K1–K5, P1–P3, L3–L5, X1, X2, X17, X18**; `LAW-CHARACTERIZATION.md` §7 **#45**, **#23**; `GENERALITY-REVIEW.md` finding 18 |
+| **R33** | v0.96.0 | `oblique-6-c`, 10 airframes, 77 caps | `LAW-LEDGER.md` **G2, G4, K6, L6, O4**; gotcha 12 below (the `gJitterG` r = 0.886 figure) |
+| **R35** | v0.96.2 | `oblique-6-dwell` + `alpha-steps`, 186 caps | `LAW-LEDGER.md` **I8** (float-grain distance law); the corrected `alpha-steps` figure is in `LAW-WEAKNESS-MAP.md` W4 |
+| **R36** | v0.97.1 | `oblique-6-dwell` ×2 launches, 64 caps (32 usable) | `LAW-LEDGER.md` **I8, I9** — the distance law without the airframe confound, and `fixedWindowOffDeg` as the metric `terminalOffDeg` was pretending to be |
+| **R37** | v0.97.2 | `oblique-6-dwell`, 125 caps, the clean batch | `LAW-LEDGER.md` **I9, I10** — the placement kill fixed 109/109; the ranking reproduces at ρ +1.000; 74% of legs at the resolution floor |
+| **R39** | v0.98.1 | five cards, 411 caps — the big batch | See the R39 sub-rows below. Six analyses (`A`–`F`) plus rotor and STOL |
+| R39 · `A` ranking | | `oblique-6-dwell` throttle contrast | `LAW-LEDGER.md` **G8** — the airframe spread survives at matched speed |
+| R39 · `B` card validity | | same, criterion B/D | `LAW-LEDGER.md` **X19** (`oblique-6-dwell` retired as a ranking instrument), **X20** (thrust-to-weight attribution refuted); `LAW-WEAKNESS-MAP.md` W1 |
+| R39 · `C` settle mode | | Darkreach azimuth mode | `LAW-LEDGER.md` **K7** (V-dependent, Darkreach-only, f ∝ V^0.305), **X21** (the wobble detector measured entry transients) |
+| R39 · `D` sustained A/B | | `e3-marker-ff`, `e2-rel-turn-lead`, 121 caps | `LAW-LEDGER.md` **D13** (the first above-floor steady-state pointing measurement), **A1** (`MarkerRateFeedForward`), **X22** (`RelativeTurnLead` spent); `GENERALITY-REVIEW.md` finding 16 |
+| R39 · `E` alpha | | `alpha-sweep`, 61 caps | `LAW-LEDGER.md` **X23** (the card cannot reach the alpha regime), **N1** (the AoA guard's 40% onset spread from two absolute constants); `cards/ALPHA-CARD-REDESIGN.md` |
+| R39 · `F` Darkreach damage | | ledger #51, third reproduction | `LAW-CHARACTERIZATION.md` §7 **#51**; `LAW-LEDGER.md` **X24** (`dmgFrac` structurally zero; `0.114` is subtree size, not four events) |
+| R39 · rotor | | `rotor-hover` + `rotor-bob`, 48 caps | **Superseded by R41** for the shipped law. `LAW-LEDGER.md` **H1** (the v0.58 branch never executed), **H2** (the hover bistability). Cited from `scorecard.py` (13×), `check-card.py`, `ChaseController.cs`, `Recording.cs`, `ScenarioPlayer.cs`, `cards/rotor-*.json` |
+| R39 · STOL | | `stol-steps` + `stol-sweep`, 53 caps | `LAW-LEDGER.md` **X25** — the card declared 90 m/s and flew 340–381; it is a second high-q dataset, not STOL data |
+| **R40** | v0.99.1 | `alpha-pullup`, `place-noop`, `place-deflect`, 109 caps | `LAW-LEDGER.md` **N2** (the law never backs off — commanding into the ceiling on 100% of gate-biting samples), **X26** (the #51 phenomenon did not reproduce; 32 clean placements) |
+| **R40** · metric repair | v0.99.1 | corpus-wide re-score, no flying | The **two corpus-wide invalidations** at the head of `LAW-LEDGER.md`, and the metric definitions in this file. Cited from `ScenarioPlayer.cs` |
+| **R41** | v1.0.0 | seven fixed-wing cards + three rotor, 451 caps | `LAW-LEDGER.md` **A1** (feed-forward off the rail), **A2** (the `e1*` nulls), **H3–H5** (rotorcraft), **I11** (the ring geometry), **X27** (replicate 1 is a different flight condition). Cited from `compare-runs.py` |
+| **R42** | v1.0.1 | the **rotor re-fly**: `rotor-hover` + `rotor-bistab` + `rotor-transition`, 3 rotorcraft, 14 lanes, 56 caps — R41's three rotor cards at the **shipped** `HeliForwardSpeed`/`HeliHoverSpeed` 60/20 instead of the stale v0.43 150/40 | `LAW-LEDGER.md` **H6** (`AttackHelo1` converges — R41's divergence was the config), **H7** (the blend-band standing residual, the first above-floor rotorcraft pointing measurement), **H2**/**H4**/**H5** amended, **L15** (candidate mechanism), **X29** (the divergence retracted), **X30** (`tiltFrac` runs backwards — O12 answered, and it corrects H3), **X31** (the `heliBlend` 0.455 arithmetic), **O13**/**O14** (new); `GENERALITY-REVIEW.md` finding 6 (consequence withdrawn, structure stands); `LAW-CHARACTERIZATION.md` §7 Tier 1(f), Tier 2, Tier 3 and the rotorcraft re-fly list. **R41 vs R42 is a clean one-knob intervention on an identical card/roster — but only on `AttackHelo1` above 20 m/s and `QuadVTOL1`'s `rotor-transition`; everywhere else both configs clamp `speedRamp` to 1.0 and the two batches are the same expression.** **RE-ANALYSED 2026-08-02 against the decompile, no new flying:** H7's mechanism is now closed-form (the game's `yawWeathervane` above 40 m/s, 5/5 tags) and **L15's "both channels de-rated" is RETRACTED** — `yawWeakFade` is bypassed on every rotorcraft row; O13 resolved (`GetAngleLimits()` innocent, the tiltwing branch is missing the `1f −`, hover reference 0.18) and X30's "monotone fall" corrected to a spawn transient. New homes: `LAW-WEAKNESS-MAP.md` **W9** (the leaky integrator) and **R24** (do-not-re-propose), `GENERALITY-REVIEW.md` findings **3** and **6**, `LAW-CHARACTERIZATION.md` §7 rotorcraft (a)/(d). |
+| **R43** | v1.0.3 | `hs-hold`, the **250–400 m/s hole** — 15 captures, **12 valid** (`Fighter1`/`Multirole1`/`SmallFighter1` × 4); `FastBomber1` killed at placement on 3/3 and retired | `LAW-LEDGER.md` **O11** (narrowed, still OPEN — the prescribed high-q test was flown and came back clean: 48 settled tails at 407–505 m/s / q 71.6–112.3 kPa, `outR` sd 0.0007–0.0045 against a 0.05 threshold, `wobbleEpisodesOutR` 0 on 48/48; what is left is the human-on-the-mouse condition a card cannot script), **X32** (`DroneAltDeckM` sets SPAWN altitude only — placement teleports every lane to the card's `startAlt`, so the card's declared 2500/5500 m q-contrast factor never existed); `GENERALITY-REVIEW.md` finding 5 (structural violation stands; the q-scaling it predicts is CONFIRMED in direction — Spearman(q, `outR` sd) +0.891 within `Multirole1` — at ~1/1000 of limit-cycle amplitude); `LAW-CHARACTERIZATION.md` §7 Tier 1 **(g)** and **(h)**; `cards/hs-hold.json` note + `cards/README.md` (card VALID but it **accelerates** — 341/352 m/s entry, 428/506/438 m/s by 90 s — and its q factor is confounded with airframe). Gotcha 16 below |
+| **R44** · control + q | v1.0.3 | `oblique-6-c` **80 caps / 10 lanes × 8 replicates** (the repeat-card control, 4th flight: R29→R33→R41→R44) and the `q-hi-300` / `q-lo-300` pair, **20 caps each**, 4 lanes × 5 replicates, identical geometry at 2500 m vs 8000 m | `LAW-LEDGER.md` **G9** (extended to v1.0.3 — the harness has not moved: Spearman +1.000 on the 10-airframe ranking, max per-airframe `rmsPointingErrorDeg` drift **0.56%**, mean 0.00%), **X34** (the q pair achieved a clean 1.44–1.52× q lever and the roll constants' predicted q-dependence did NOT appear — the card's own REFUTED criterion, and R43's `outR` sd evidence retracted as a quantisation artifact); `GENERALITY-REVIEW.md` finding 5 (consequence withdrawn, structure stands); gotcha 18 below; `cards/q-hi-300.json` / `-lo-300.json` notes |
+| **R44** · rotor | v1.0.3 | the rotorcraft half — `rotor-tilt-hold` **10/10** + `rotor-tilt-hold-lo` **10/10** (`QuadVTOL1`, the O13 pre-fix baseline pair) and `rotor-weathervane-35` **10/10** + `rotor-weathervane-60` **2 captures, 0 scored segments** (`AttackHelo1`/`UtilityHelo1`, the H7 tie-breaker; the game was closed before the 60 arm left its `arm` window) | `LAW-LEDGER.md` **O13** — the pre-fix baseline is RECORDED and the fix is UNBLOCKED: `heliBlend` **1.0000 ± 0.0000** (n=10, thr 1.00, 150–153 m/s) vs **0.1820 ± 0.0002** (n=10, thr 0.25, 67–72 m/s), i.e. the `≥ 0.8` criterion confirmed *at saturation*, and both ends of the game's `Lerp(0.18, 1, tiltAtSpeed)` measured from flight for the first time; **H7** — the residual reproduces on a second card (0.000/0.010° below 40 m/s vs 1.356/1.728/1.482° at 40.7–41.2 m/s, CV 0.6–1.2%, n=5) and **`heliBlend` is eliminated as the selector** (flat 0.655–0.749 while `\|off\|` moves 0.012 → 2.112 across the 40 m/s crossing), **but the discriminating 60 m/s arm is UNFLOWN and the card's own ">= 10–30° at 60 m/s" prediction is WITHDRAWN as stated — `beta` is an equilibrium, not an input**; **O14(c) CLOSED** (the v1.0.1 `arm=NULL` warm-up verified on 4/4 lanes). `GENERALITY-REVIEW.md` finding **19** (the tiltwing blend is throttle-latched — survives the O13 fix). `LAW-CHARACTERIZATION.md` §7 rotorcraft **(a)** DONE / **(d)** still open with a re-fly spec (re-cut both throttle pins from R44's observed `spd`: 0.45 put `AttackHelo1` at **41 m/s**, above its own control threshold, and `UtilityHelo1` at **90–120 m/s**). Card notes updated on all four. Gotcha 17 above |
+| **R44** | v1.0.3 | 229 captures, 14 cards, 13 airframes — including the **7-rung placement-speed ladder** (`place-440`, `-420`, `-400`, `-390`, `-375`, `-300` and the `place-440-noteleport` isolator), 77 of those captures, 27 aborted | `LAW-LEDGER.md` **X33** (the R43 "above ~400 m/s kills it" premise is REFUTED — 440 m/s is clean 10/10 with `DroneAltDeckM: 0`, 300 m/s is fatal 3/3 with the deck on) and **I12** (what actually predicts the kill: a **non-zero anchor placement on a variable-geometry airframe**, 31/31 vs 0/32, Fisher p = 4.1e-5 on the speed-and-deck-matched control); `LAW-CHARACTERIZATION.md` §7 Tier 1 **(i)** (the pre-spawn refusal / spawn-at-`startAlt` fix and its confirmation card); all seven `cards/place-*.json` notes. Gotcha 18 below |
+| **Discord v0.68 field bundle** | v0.68.0 | two users, six recordings, not a batch | `LAW-LEDGER.md` **X28** (the locale formatting bug, fixed v1.0.1) and **O11** (the high-q roll limit cycle); `GENERALITY-REVIEW.md` finding 5. Cited from `WTMouseAimPlugin.cs`, `Recording.cs` |
+
+**Raw evidence** for R28–R37 is in `debugtests/archive/R<n>-<date>/` (CSVs, sidecars, logs). Later
+batches are archived out of `<game>/BepInEx` with
+`python debugtests/index-captures.py "<game>/BepInEx" --archive debugtests/archive --run R<n>`.
+
+### The doc convention — batch analyses UPDATE standing docs
+
+**Do not create a new `R##-*.md`, `SESSION-*.md` or `*-FINDINGS.md`.** That habit produced 25 files
+that disagreed with each other and with the code, and cost more to keep straight than they were
+worth. A batch analysis lands as edits to the standing docs:
+
+| what you found | where it goes |
+|---|---|
+| a claim you can now believe, or one you must stop believing | `LAW-LEDGER.md` — ESTABLISHED / PLAUSIBLE / **REFUTED** / OPEN, one line, with batch + n + effect size |
+| an open action item | `LAW-CHARACTERIZATION.md` §7 — the durable backlog |
+| a ONE-LAW violation (a constant that should be a probe) | `GENERALITY-REVIEW.md` findings |
+| a ranked weakness, or a hypothesis to stop re-proposing | `LAW-WEAKNESS-MAP.md` (W-items, and its REFUTED / DO-NOT-RE-PROPOSE list) |
+| a schema/metric/SQL trap | this file |
+| a card's validity verdict | the card's own `note` field, plus `cards/README.md` |
+| what shipped | `CHANGELOG.md` (append-only) |
+
+Then **add a row to the batch index above** naming the run tag and where its conclusions went, and
+archive the raw captures. The ledger line is the finding; the CSVs are the evidence; nothing in
+between needs to exist. If a batch produced nothing that changes a standing doc, that is a result —
+record it as one line in the index and move on.
+
+---
+
+## Tables
+
+### `captures` — one row per CSV (86 columns today; the `sc_`/`entry_`/`ov_` ones are dynamic)
+
+Idempotency key is `file` (the basename). Re-indexing a capture keeps its `id`, so a `rows` foreign
+key stays meaningful.
+
+| column | type | provenance |
+|---|---|---|
+| `id` | INTEGER PK | synthetic |
+| `file` | TEXT UNIQUE | CSV basename — **the idempotency key** |
+| `path` | TEXT | absolute path at index time (may be stale if `<game>` moved) |
+| `mtime`, `size` | REAL, INTEGER | `os.stat` — the (mtime, size) pair that makes a warm re-index free |
+| `run_tag` | TEXT | CSV header `run=` (normalised to `R29`), else `-(R\d+)-` in the filename. **NULL on 63 legacy captures.** |
+| `mod_version` | TEXT | CSV header line (`# mouseaim recording  v0.94.0 …`) |
+| `session` | TEXT | CSV header `session=` — the process; `rec` restarts per session |
+| `rec` | INTEGER | CSV header `rec=` — per-process file counter, orders captures **in time** |
+| `drone` | INTEGER | `# drone N` header line — the lane. **NULL = hand-flown** (175 captures) |
+| `replicate` | INTEGER | **COMPUTED** — ordinal within `(session, drone, card)` by `rec`. Not in any artifact: `ScenarioPlayer.RunIndex` is never written to the CSV. |
+| `airframe` | TEXT | **sidecar** `jsonKey` — what `compare-runs.py` groups on and refuses to pool across. NULL without a sidecar (119 captures) |
+| `aircraft` | TEXT | `# aircraft 'FS-12'` — the unit NAME, not the key. Do not group on this. |
+| `card` | TEXT | `# card` header. NULL on 122 hand-flown/ad-hoc captures |
+| `arm` | INTEGER | regex `arm=(\d+)` off the `# config` line. **NULL when the capture is not part of an A/B** (only 107 captures have one) |
+| `arm_knob` | TEXT | regex `armKnob=` off `# config` — which lever the ABBA schedule swept |
+| `started` | TEXT | `# started` wall clock, LOCAL. The only reliable **time ordering** across batches |
+| `utc` | TEXT | sidecar `utc` |
+| `n_rows` | INTEGER | **COMPUTED** — sum of segment `samples` |
+| `n_cols` | INTEGER | **COMPUTED** — fields in the CSV header line. **This is the recorder-era key** (see below) |
+| `stop` | TEXT | the `# stop` footer, verbatim (carries the abort reason) |
+| `aborted` | INTEGER | scorecard's `provenance()` |
+| `config` | TEXT | the `# config` line verbatim — the law's knobs **as flown** |
+| `entry_note` | TEXT | the `# entry` line verbatim — the per-replicate reset provenance |
+| `ov_note` | TEXT | the `# override` line verbatim — knobs **the card** pinned for itself. **340 captures across 9 cards today** (corrected 2026-08-02; this said "0 real captures" from before the card-owns-every-run-parameter change): `alpha-pullup` 73, `oblique-6-dwell-t040` 64, `oblique-6-dwell-t100` 64, `stol-steps` 36, `stol-sweep` 36, `place-noop` 24, `rotor-transition` 16, `hs-hold` 15, `place-deflect` 12 |
+| `parse_warn` | TEXT | scorecard's own stderr for this file. **NULL on every row today** — a non-NULL here means dropped rows |
+| `sc_*` (45) | mixed | **sidecar** `<capture>.airframe.json` scalars, key-for-key. Absent → NULL |
+| `entry_*` (9) | mixed | parsed out of `# entry`. `a->b` becomes `_from`/`_to` |
+| `ov_*` | mixed | parsed out of `# override`; `/` in the key becomes `_` (`Control/BelowAlignSuppress` → `ov_Control_BelowAlignSuppress`) |
+
+Dynamic columns are declared `NUMERIC`, so SQLite's affinity keeps `0.35` a REAL and `true` a TEXT.
+They are added **on demand**: a new sidecar or entry field appears as a column on the next index run
+instead of silently vanishing. The flip side is that **a column only exists if some indexed capture
+produced it** — `no such column` from a query is usually "nothing in the corpus has that yet".
+
+Notable `sc_*` (all fail-soft on the mod side, so a NULL is "could not read it", never zero):
+`sc_massKg`, `sc_cornerSpeed`, `sc_turningRadius`, `sc_aircraftGLimit`, `sc_maxThrustN`,
+`sc_fuelKg`, `sc_wingAreaTotal`, `sc_dragAreaTotal`, `sc_alphaLimiter`, `sc_gLimitPositive`,
+`sc_maxPitchAngularVel`, `sc_infoStallSpeed`, `sc_infoMaxSpeed`, `sc_loadoutCount`,
+`sc_loadoutMassKg` (both **computed** from the loadout array), `sc_loadout` / `sc_fbwParameters`
+(JSON text — use `json_extract`). The Cl/Cd curves (`airfoils`, `airfoilAlphaDeg`) are dropped.
+
+**`sc_maxSpeed` is `aircraftParameters.maxSpeed`, a NORMALIZER that reads a flat 600 for every fast
+jet.** For a real Vmax use `sc_infoMaxSpeed`. See `AIRFRAMES.md` trap 5.
+
+### `segments` — one row per (capture, segment) (62 columns: 12 fixed + 50 dynamic metrics)
+
+> **Metric columns are newer than this database, and v1.0.5 both ADDED and DELETED some.**
+> `fixedWindowOffDeg`, `settleTime95` and `offFloorPct` (2026-08-01, see
+> [the resolution floor](#the-resolution-floor--the-trap-that-survives-every-null-check)), and then
+> `retreatDeg` / `retreatEpisodes` / `monotonicityIndex` / `pEffEntry` / `pEffTrendPerS` /
+> `wobble{Coherence,FreqHz,Episodes}RollRate` (2026-08-05) exist in `scorecard.py` but **appear in
+> SQLite only after a re-index** — `no such column` here means "re-index", not "never flown".
+> **In the same change `wobble{Coherence,FreqHz,Episodes}Out{R,P}` STOPPED BEING WRITTEN** (gotcha 22):
+> those six columns survive in an older database holding their historical values, and a fresh index
+> leaves them NULL. Do not filter on them.
+> It must be `--rebuild`: the warm path skips any capture whose
+> `(mtime, size)` is unchanged, and a metric change moves neither, so a plain re-run picks up nothing.
+> ```bash
+> python debugtests/index-captures.py "<game>/BepInEx" debugtests/archive --rebuild   # ~30 s
+> ```
+
+| column | type | provenance |
+|---|---|---|
+| `capture_id` | INTEGER FK → `captures.id` | `ON DELETE CASCADE` |
+| `seg_index` | INTEGER | order within the capture (PK is the pair) |
+| `tag` | TEXT | the `segTag` column — the card's own tag (53 distinct) |
+| `type` | TEXT | `scorecard.infer_type(tag)` via `TAG_TYPE_RULES`. **Decides which metrics exist** |
+| `samples` | INTEGER | rows in the segment |
+| `duration_s` | REAL | last `t` − first `t` |
+| `excluded` | INTEGER | `type = 'arm'` — the settling window, **no metrics at all** (1482 of 7081 rows) |
+| `railed` | INTEGER | `scorecard.is_railed()` — sat on a limit ≥90% of samples. **Its metrics are no signal, not a score** (285 rows) |
+| ~~`slack`~~ | INTEGER | **DEAD — no longer written (v0.99.1).** The SLACK flag and the `authorityUsedFrac` it thresholded were deleted: that quantity was `mean\|bank\|/maxBank`, not a fraction of authority, and it exceeded 1.0 in practice. The column survives in databases built before the change and holds its 8 historical rows; a fresh index leaves it NULL. **Do not filter on it.** See `R40-metric-repair.md`. |
+| `unknown_tag` | INTEGER | the tag matched no `TAG_TYPE_RULES` entry → scored with the generic set only (2 rows) |
+| `warnings` | TEXT | scorecard's RAILED/SLACK/unknown-tag prose, newline-joined. NULL = clean. **Match on the flags above, never on this prose** |
+| `skipped` | TEXT (JSON) | `{metric: reason}` for metrics that could not be computed. See [NULL idiom 3](#3-not-applicable-vs-not-measured--segmentsskipped) |
+| 50 metric columns | REAL | **`scorecard.score_run()`**, named exactly as scorecard names them |
+
+### `rows` — raw recorder rows, opt-in
+
+`--with-rows RUNTAG` materializes ONE batch. Columns: `capture_id`, `i` (row ordinal), then one
+column per CSV column (66 today). Everything else stays in CSV: all ~1.1M rows would be ~500 MB of
+mostly-unread steady state. **Today only R40 is materialized** (109 captures / 57,470 rows — corrected
+2026-08-02; this said R30, which has not been materialized since a `--rebuild`) — check
+`--stats`'s `--with-rows` column before writing a `rows` query, and materialize what you need.
+
+### `cards`, `card_airframes` — the card grid, opt-in
+
+`--cards cards/` loads `cards/*.json` as dimension tables so *"which grid cells have we NEVER
+flown?"* is a `LEFT JOIN`. `cards.card` is the **file basename** (the id the mod binds and the
+`# card` header carries), so it joins straight to `captures.card`. `card_airframes` expands the
+comma-list `airframe` field, one row per lane — and **only for cards whose list is real jsonKeys**:
+an empty field means "whatever `Cfg.DroneAirframe` says" and prose means the card predates v0.90.
+`cards.problems` carries `scorecard.card_setup_problems()`; NULL is clean.
+
+---
+
+## The metric × segment-type matrix
+
+Counts are live (`--stats` totals). `—` means **the metric does not exist for that type at all**;
+a number below the type's `n` means it exists but was skipped or is conditional.
+
+| metric (group) | oblique_step<br>4894 | sustained_turn<br>241 | micro/az/el_step<br>299 | fine_track<br>16 | reversal/astern<br>25 | unknown<br>124 | arm<br>1482 |
+|---|---|---|---|---|---|---|---|
+| `aoaPeakDeg` `gPeak` `gSustained` `gJitterG` `aoaLimiterActivePct` | all | all | all | all | all | 124 / 61¹ | — |
+| `bankClampActivePct` `bankDemandExcessDeg` `turnRateCapActivePct` `turnRateDemandRatio` (~~`authBank` `authAoa` `authStick` `authorityUsedFrac` — **all four DELETED v0.99.1**~~) | all | all | all | all | all | 120–124¹ | — |
+| `blendRailPct` | all | 217¹ | 64¹ | — ¹ | — ¹ | 1¹ | — |
+| `rmsPointingErrorDeg` `minOffDeg` `terminalOffDeg` `entryAzSign` `offFloorPct` | all | all | all | all | all | all | — |
+| `retreatDeg` `retreatEpisodes` `monotonicityIndex` (v1.0.5) | all⁵ | all⁵ | all⁵ | all⁵ | all⁵ | all⁵ | — |
+| `pEffEntry` `pEffTrendPerS` (v1.0.5) | all | all | all | all | all | all | — |
+| `fixedWindowOffDeg` | ≥8 s legs only³ | all | **—**³ | all | all | partial³ | — |
+| `settleTime95` | settled legs only⁴ | partial⁴ | partial⁴ | partial⁴ | partial⁴ | partial⁴ | — |
+| `overshootAzDeg` `overshootElDeg` | partial² | partial² | partial² | all | partial² | partial² | — |
+| `settleBandDeg` `demandDeg` `riseTime90` `settleTime` `overshootDeg` | partial² | **—** | partial² | **—** | settle/overshoot only | **—** | — |
+| `meanTurnRateDegS` `deltaTAS` `deltaEnergyHeightM` | **—** | all | **—** | **—** | **—** | **—** | — |
+| `stickFlipRate{P,R,Y}` `wobbleEpisodes{Bank,AzErr,RollRate,OutY,Aoa}` | all | **—** | **—** | all | all | **—** | — |
+| `wobbleFreqHz*` `wobbleCoherence*` | rare²·⁶ | **—** | **—** | rare²·⁶ | rare²·⁶ | **—** | — |
+| ~~`wobble{Episodes,FreqHz,Coherence}Out{R,P}`~~ | **DELETED v1.0.5 — gotcha 22.** Historical values only; a fresh index leaves them NULL |||||||
+| `rollCmdMedian` `yawCmdMedian` `bothActivePct` `rollYawOpposedPct` `rollYawAllocFrac` `rollBlendMean` | all | **—** | **—** | **—** | **—** | **—** | — |
+| `pitchAuthorityMedian` `pitchAuthorityAntiPhaseFrac` | **—** | **—** | **—** | **—** | 24 of 25 | **—** | — |
+
+¹ era / missing column — see NULL idiom 2 and 3.  ² conditional on the segment's own shape (no
+overshoot happened; the step was too short; `wobble_scan` only emits a frequency when it finds an
+episode). Both are legitimate NULLs; `count()` them.
+³ `fixedWindowOffDeg` is the mean `off` over a window **anchored at segment start** (7–8 s,
+`scorecard.FIXED_WINDOW_START_S`), so it is NULL — with a reason in `skipped` — on any segment
+shorter than 8 s. That is most `micro_step`/`az_step` segments and **every `oblique_step` before
+R35**, whose legs are 8 s exactly (measurable) or shorter (not). It is also NULL when the window mean
+lands under the resolution floor. ⁴ `settleTime95` is NULL when the segment never settles, which is
+not rare and **not random**: over R35's 384 scorable 30 s legs it is NULL on 43%, and the censoring
+tracks distance to the world origin (near lanes 192/192 settled, far lanes 26/192). `count()` it
+beside `avg()` or you are averaging the survivors.
+⁵ the three retreat metrics are withheld together, with a `NOT EXPOSED:` reason, on a segment whose
+`off` never reverses by more than the resolution floor — i.e. one that sat on the floor for its whole
+length. Everywhere else they publish. **`retreatDeg = 0` is not automatically good: read it with
+`monotonicityIndex`** (gotcha 23). ⁶ `wobbleFreqHz*`/`wobbleCoherence*` are additionally withheld
+when the settled window spans under 3 print quanta of that column (`scorecard.WOBBLE_MIN_QUANTA`,
+gotcha 22) — on R40+R44 that withholds `wobbleCoherenceBank` on ~97% of segments, which is the
+measurement, not a bug.
+
+**Segment types with metric columns that do not exist yet**, because nothing has flown them:
+`alpha_step` / `alpha_hold` (`aoaAboveCeilingPct`, `aoaCeilDeg`, `aoaPeakOverCeiling`,
+`aoaRecoverActivePct`, `commandIntoCeilingPct`, `qSchedMin`, `gateMinUp`, `gateMinDn`),
+`hover_hold` (`positionRMSM`, `driftRateMS`), `bobup` / `translate` (`demandM`, `overshootM`),
+`transition` (`altExcursionM`). Those cards exist in `cards/` and have never been run — see
+[cookbook Q10](#q10-which-grid-cells-have-we-never-flown--needs---cards-cards-first). `aoaAboveCeilingPct` is one
+of scorecard's four RAIL_METRICS, so `segments.railed` already accounts for it; you just cannot
+`SELECT` it today.
+
+### The idiom this matrix exists to force
+
+```sql
+-- ALWAYS: count(metric) beside avg(metric), never avg() alone.
+SELECT s.type, count(*) segs, count(s.meanTurnRateDegS) scored, avg(s.meanTurnRateDegS) mean
+  FROM segments s GROUP BY 1;
+```
+
+`avg()` ignores NULLs. `count(*)` counts rows. If the two disagree, the mean is over a subset —
+and a corpus-wide `avg(meanTurnRateDegS)` is 241 sustained turns hiding inside 7081 segments. The
+`scored` column is the difference between an answer and a coincidence.
+
+---
+
+## The three NULL idioms
+
+### 1. Sparse by segment type
+Covered above. Filter `s.type = …` or `s.tag = …` **explicitly**; never let the GROUP BY decide for
+you which types happened to have the column.
+
+### 2. Recorder era — filter on `captures.n_cols`
+The CSV grew from 38 to 64 columns across the corpus, and a metric needing a column that did not
+exist yet is simply absent:
+
+| `n_cols` | captures | mod versions | runs |
+|---|---|---|---|
+| 38 | 63 | (pre-run-tag) | — |
+| 44 | 20 | 0.64.0 | R1 |
+| 45 | 36 | 0.65.0–0.67.0 | R2, R3 |
+| 54 | 2 | 0.69.0 | R10 |
+| 56 | 25 | 0.71.0–0.76.0 | R11–R18 |
+| 57 | 5 | 0.77.0 | R19 |
+| 58 | 11 | 0.79.0 | R20, R21 |
+| **64** | **1442** | 0.87.0–0.94.0 | R22–R32 |
+
+```sql
+-- The trap and the fix in one query: 423 old segments contribute nothing to this mean.
+SELECT c.n_cols >= 64 modern, count(*) segs, count(s.blendRailPct) scored,
+       round(avg(s.blendRailPct), 2) mean
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.excluded = 0 GROUP BY 1;
+--  modern  segs  scored  mean
+--  0       423   0       None      <- pre-v0.85: no bWt column, so no blendRailPct at all
+--  1       5176  5176    5.57
+```
+
+`n_cols >= 64` is the practical "modern capture" filter. One caveat: `frameMs` exists from v0.86 but
+**means the fixed step, not the frame, until v0.92.1** — captures from R22–R27 read a constant
+16.70 ms. Filter `mod_version >= '0.92.1'` for anything about frame hitches.
+
+### 3. Not-applicable vs not-measured — `segments.skipped`
+When scorecard *could not* compute a metric it records why, as JSON, per segment. 423 segments carry
+one today:
+
+```sql
+SELECT json_extract(s.skipped, '$.blendRailPct') why, count(*) n,
+       group_concat(DISTINCT c.run_tag) runs
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE json_extract(s.skipped, '$.blendRailPct') IS NOT NULL GROUP BY 1;
+--  missing column: bWt (pre-v0.85 capture)  423  R1,R2,R3,R10,…,R21
+```
+
+Reasons seen in the corpus: `missing column: bWt (pre-v0.85 capture)` (423),
+`missing column(s): aoaGU/aoaGD` (63), `no cornerSpeed/gLimit on the '# fbw' header (pre-v0.55
+capture)` (8), `segment too short (<2 samples)` (1). **A NULL metric with an entry in `skipped` is a
+measurement that could not be taken; a NULL with no entry is a metric that does not apply.** Only the
+first is worth chasing.
+
+---
+
+## The resolution floor — the trap that survives every NULL check
+
+Every trap above is about a **missing** number. This one is about a number that is *present*,
+*non-NULL*, printed to four decimals, and **is not a measurement**.
+
+`off` is `Vector3.Angle(t.forward, aimDir)` — `acos(dot)` in float32, written `{off:0.00}`. Float32
+spacing below `dot = 1.0` is `5.96e-8`, so the smallest non-zero angle it can return is
+`sqrt(2·5.96e-8)` rad = **0.0198°**, and the first printed rung above zero is `0.02`. Proof rather
+than inference: across 279k R35 oblique rows the value `0.01` **never occurs**, while `0.00` (43,285)
+and `0.02` (15,122) both occur tens of thousands of times. `scorecard.OFF_FLOOR_DEG` (= 2 × that
+quantum, 0.0396°) is the threshold below which an `off`-derived number carries no orderable signal.
+
+**What it does to a ranking.** R35 (`oblique-6-dwell`, 30 s legs, six airframes flown on both a
+near lane group and a far one — same batch, same card, only the distance to the world origin
+differs) ranked by `terminalOffDeg`: near vs far Spearman **+0.03**. The same six cells ranked by
+`rmsPointingErrorDeg`: **+1.00**. By the new `fixedWindowOffDeg`: **+1.00**. Terminal error was
+ranking float grain — **94 of the 192 near-lane terminal windows read exactly 0.0000**, and three
+airframes tied there.
+
+```sql
+-- The floor, in one query -- NEEDS A --rebuild first (three of these columns are newer than the db).
+-- offFloorPct is the % of samples on the 0.00/0.02 rungs.
+SELECT c.airframe, count(*) legs,
+       sum(s.terminalOffDeg < 0.0396) at_floor, round(avg(s.offFloorPct),1) floor_pct,
+       round(avg(s.terminalOffDeg),4) term, round(avg(s.fixedWindowOffDeg),4) fixedwin
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R35' AND s.type = 'oblique_step' AND s.railed = 0
+ GROUP BY 1 ORDER BY fixedwin;
+```
+
+Reading rules, in order:
+
+1. **`terminalOffDeg` is not deleted and not redefined** — 5,692 archived segments and every existing
+   analysis key to it — but it is only a score when `terminalOffDeg >= 0.0396`. Below that, scorecard
+   emits an `AT THE RESOLUTION FLOOR` warning into `segments.warnings`; **filter on the metric, never
+   on that prose** (gotcha 9). On R35 it fires on 309 of 384 legs.
+2. **`terminalOffDeg` is anchored at the segment END, so it is not one quantity across leg lengths.**
+   An 8 s leg's terminal window scores a *mid-transient* and a 30 s leg's scores a settled residual.
+   R35 settled no earlier than **9.0 s** on any of the 384 legs (median 15.5 s), i.e. every 8 s
+   `oblique_step` in this corpus — 5,194 segments across 15 cards — ends before the response does.
+   Use `fixedWindowOffDeg` to compare an 8 s batch with a 30 s one: R33-terminal vs R35-terminal
+   correlates +0.10, R33-terminal vs R35-`fixedWindowOffDeg` +0.78.
+3. **`settleTime95` is the metric `terminalOffDeg` was being used as a proxy for** — first `t` after
+   which `off` stays inside `max(0.05°, 1.05 × terminalOffDeg)` for the rest of the segment, held at
+   least 1 s. Its virtue is that on a leg that is still decaying it returns **NULL**, not a plausible
+   wrong number. See matrix note ⁴ before averaging it.
+4. `minOffDeg` is at the floor almost everywhere on modern captures (R35: five of six airframes
+   average exactly 0.0000 on both lane groups). It answers "did it ever touch", not "how well".
+
+---
+
+## The six `sc_` twins — which one to join on
+
+Six sidecar scalars duplicate a fixed column. **Always use the fixed one:**
+
+| fixed (use this) | `sc_` twin | why the fixed one |
+|---|---|---|
+| `run_tag` | `sc_run` | `run_tag` is normalised `'R29'`; `sc_run` is the integer `29`. `WHERE sc_run = 'R29'` matches nothing |
+| `mod_version` | `sc_modVersion` | comes from the CSV header, so it survives a **missing sidecar** |
+| `session` | `sc_session` | same |
+| `rec` | `sc_rec` | same, and it is typed INTEGER |
+| `airframe` | `sc_jsonKey` | identical values (`airframe` is copied from it), but `airframe` is what's indexed and what `compare-runs.py` groups on |
+| `utc` | `sc_utc` | same value; `utc` is the documented one |
+
+**119 captures have no sidecar at all** (R1–R3 and the untagged legacy set): every `sc_*` is NULL
+there, and so is `airframe`. `session` still works on all 119 and `mod_version`/`rec` on 56 of them,
+because those come from the CSV header — the 63 oldest (`n_cols = 38`) predate the header carrying
+them. `sc_csv` is the sidecar's own record of its CSV name — not a join key, use `file`.
+
+---
+
+## Cookbook
+
+Every query below was **run against the live DB and works today** unless marked otherwise. Paste
+them into `--query "…"` (read-only) or `sqlite3 debugtests/captures.db`.
+
+`stdev(x)` and `median(x)` are registered by `index-captures.py` — SQLite ships neither. `stdev` is
+the **SAMPLE** standard deviation (n−1), matching `compare-runs.py`'s `statistics.stdev` exactly, and
+returns NULL below n=2. They are **not available in a bare `sqlite3` shell**; use `--query` for
+anything using them.
+
+#### Q1. Orientation — *works today*
+```bash
+python debugtests/index-captures.py --stats
+python debugtests/index-captures.py --check          # every batch, flagged lanes only
+```
+
+#### Q2. Rank airframes by a metric within one batch — *works today*
+```sql
+SELECT c.airframe, count(s.terminalOffDeg) n, round(avg(s.terminalOffDeg),4) mean,
+       round(stdev(s.terminalOffDeg),4) sd
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R29' AND s.type = 'oblique_step' AND s.railed = 0
+ GROUP BY 1 ORDER BY mean;
+--  trainer 192 0.0622 … SmallFighter1 192 0.2926 … Darkreach 30 2.605  <- n=30: the dead lane
+```
+**Swap the metric for `fixedWindowOffDeg` (or `rmsPointingErrorDeg`) before you believe an ordering
+like that.** Several of those means are under the `off` column's 0.0396° resolution floor, where the
+ranking is float grain — that is
+[the trap this exact query walked into](#the-resolution-floor--the-trap-that-survives-every-null-check).
+
+#### Q3. Does the effect hold across batches? — *works today*
+```sql
+SELECT c.run_tag, c.mod_version, count(s.terminalOffDeg) n,
+       round(avg(s.terminalOffDeg),4) mean, round(median(s.terminalOffDeg),4) med
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.tag = 'obUL12' AND s.railed = 0
+ GROUP BY 1,2 ORDER BY min(c.started);        -- ORDER BY started, NOT run_tag: 'R10' < 'R2'
+```
+`min(c.started)` is the only correct chronological order — run tags sort lexicographically.
+
+#### Q4. A/B one lever inside a batch, by arm — *works today*
+```sql
+SELECT c.arm_knob, c.arm, s.tag, count(*) n, round(avg(s.terminalOffDeg),4) mean,
+       round(stdev(s.terminalOffDeg),4) sd
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R31' AND c.airframe = 'Fighter1'
+   AND c.arm IS NOT NULL AND s.excluded = 0 AND s.railed = 0
+ GROUP BY 1,2,3 ORDER BY s.tag, c.arm;
+```
+`s.excluded = 0` is not optional — without it every `arm` window shows up as a row with `n=0` and a
+NULL mean. Never pool across `airframe`: `compare-runs.py` refuses to, and so should you.
+
+#### Q5. Noise floor per cell — *works today*
+```sql
+SELECT c.airframe, c.card, s.tag, count(*) n, round(avg(s.terminalOffDeg),4) mean,
+       round(100.0*stdev(s.terminalOffDeg)/abs(avg(s.terminalOffDeg)),1) sd_pct
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE c.run_tag = 'R30' AND s.excluded = 0 AND s.railed = 0
+ GROUP BY 1,2,3 HAVING n >= 3 ORDER BY sd_pct DESC;
+```
+This is the number an A/B has to beat. `--diff RUNA RUNB` is the two-run form.
+
+#### Q6. Railed cells — where a gain change physically cannot move anything — *works today*
+```sql
+SELECT c.run_tag, c.airframe, s.tag, count(*) n,
+       round(avg(s.bankClampActivePct),1) bank, round(avg(s.turnRateCapActivePct),1) turn
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE s.railed = 1 GROUP BY 1,2,3 ORDER BY n DESC LIMIT 20;
+```
+
+#### Q7. ~~Slack segments — the law, not the airframe, is the limit~~ — **REMOVED (v0.99.1). Does not work; do not restore.**
+Both the `slack` flag and `authorityUsedFrac` were **deleted** from `scorecard.py`. The query below
+is kept only so nobody re-derives it from scratch:
+```sql
+-- DEAD. authorityUsedFrac and slack are no longer written. Returns nothing on a fresh index.
+-- SELECT c.run_tag, c.airframe, s.tag, count(*) n, round(avg(s.authorityUsedFrac),3) used
+--   FROM segments s JOIN captures c ON c.id = s.capture_id  WHERE s.slack = 1 GROUP BY 1,2,3;
+```
+**Why it was deleted rather than re-thresholded:** `authorityUsedFrac` was `mean|bank| / maxBank` —
+a bank-angle ratio, not a fraction of authority. It read **0.977–1.084** on R39 `alpha_hold`, i.e.
+a "fraction used" above 1.0, which is the tell that the apparatus was never connected to the
+quantity. It fired 8 times in 9,137 segments in its whole life, all 8 in one cell.
+**The gap is still real: nothing in the corpus detects "the law is leaving authority unused."**
+A replacement needs a normalizer of the form `omega_target = min(omega_avail, off/tau)` —
+`LAW-CHARACTERIZATION.md` §7 #36. See `R40-metric-repair.md` and `LAW-WEAKNESS-MAP.md` W5.
+
+#### Q8. Why is this metric NULL? — *works today*
+```sql
+SELECT json_extract(s.skipped, '$.blendRailPct') why, count(*) n,
+       group_concat(DISTINCT c.run_tag) runs
+  FROM segments s JOIN captures c ON c.id = s.capture_id
+ WHERE json_extract(s.skipped, '$.blendRailPct') IS NOT NULL GROUP BY 1;
+```
+
+#### Q9. Entry-condition provenance across batches — *works today*
+```sql
+SELECT run_tag, count(*) n, round(avg(entry_snapBackM),1) snapback,
+       round(max(entry_snapBackM),1) worst
+  FROM captures WHERE entry_snapBackM IS NOT NULL GROUP BY 1 ORDER BY worst DESC;
+```
+`entry_*` is what the per-replicate reset had to undo. A batch whose `snapBackM` is climbing is a
+batch whose replicates were drifting further apart before each reset.
+
+> **`entry_snapBackM = 0` is a stratum, not a reading — filter it out of any A/B.** The FIRST placement
+> of a lane is the one that *captures* the run anchor, so it cannot snap back to it: it writes back the
+> speed and altitude the aircraft already had and the replicate flies from the spawn state, while every
+> later replicate arrives teleported and decelerated. `ArmOf` is `((i+1)>>1)&1`, so index 0 is **arm 0
+> on every ABBA card ever flown** — the stratum is 12.5% of one arm and 0% of the other. On R41
+> `e1-below-suppress`/`FastBomber1` that single capture turned a 0.2% null into an apparent **30% knob
+> effect** (`LAW-LEDGER.md` X27). **Add `AND entry_snapBackM <> 0` to any
+> query that groups by `arm`.** `compare-runs.py` does this for you; raw SQL does not.
+> `NULL` is different again — no `# entry` line at all, i.e. an ungated card — and means *unknown*,
+> not zero.
+
+#### Q10. Which grid cells have we NEVER flown? — *needs `--cards cards/` first*
+```bash
+python debugtests/index-captures.py --cards cards/
+```
+```sql
+SELECT ca.card, group_concat(ca.airframe) never_flown
+  FROM card_airframes ca
+  LEFT JOIN captures c ON c.card = ca.card AND c.airframe = ca.airframe
+ WHERE c.id IS NULL GROUP BY 1 ORDER BY 1;
+--  alpha-steps   Fighter1,Multirole1,SmallFighter1,trainer,VTOLTrainer1,EW1,FastBomber1,Darkreach
+--  oblique-05    CAS1,COIN
+```
+
+#### Q11. Frame hitches — *needs `--with-rows`; only R40 is materialized today*
+```bash
+python debugtests/index-captures.py --with-rows R40
+```
+```sql
+SELECT c.run_tag, c.airframe, r.segTag, count(*) rows_over_25ms, round(max(r.frameMs),1) worst
+  FROM rows r JOIN captures c ON c.id = r.capture_id
+ WHERE r.frameMs > 25 GROUP BY 1,2,3 ORDER BY rows_over_25ms DESC;
+```
+Only meaningful for `mod_version >= '0.92.1'` — before that `frameMs` recorded the fixed step, a
+constant. The drone launch stagger exists precisely so a hitch does not land on the same segment in
+every lane; this is how you check it did not.
+
+#### Q12. What did a card pin for itself? — *works, and returns 340 captures over 9 cards*
+```sql
+SELECT run_tag, card, count(*) n, ov_note FROM captures
+ WHERE ov_note IS NOT NULL GROUP BY 1,2,4;
+```
+~~Empty because no shipped card uses `config`.~~ **Corrected 2026-08-02 — this is now the record of
+record for what a card actually pinned**, since THE TEST CARD OWNS EVERY RUN PARAMETER (`CLAUDE.md`
+conventions). `alpha-pullup` 73 captures, `oblique-6-dwell-t040`/`-t100` 64 each, `stol-steps` /
+`stol-sweep` 36 each, `place-noop` 24, `rotor-transition` 16, `hs-hold` 15, `place-deflect` 12. **Read
+it before believing any `# config` line**: `ov_*` is what the card pinned, `config` is what the law ran
+with, and where a card declares a knob the card wins.
+
+#### Q13. Which columns can I even select? — *works today*
+```bash
+python debugtests/index-captures.py --query "SELECT * FROM segments LIMIT 0" --format csv
+python debugtests/index-captures.py --query "SELECT * FROM captures LIMIT 0" --format csv
+```
+
+---
+
+## `--query` behaviour
+
+- **Read-only by default** (`file:…?mode=ro`). A write is refused with a line naming `--write`, not a
+  traceback. The db costs ~30 s over 344 MB to rebuild; a mistyped query should not be able to cost
+  that.
+- **`--format table|csv|json`** — `csv` and `json` are the machine-readable forms.
+- **`--limit N`** — default 1000, `0` for no cap. Truncation prints a loud `*** TRUNCATED` line on
+  stderr; a silently truncated result set is a wrong answer that looks right.
+
+## Gotchas, condensed
+
+1. `avg()` without `count()` beside it — the whole of rule 2.
+2. `ORDER BY run_tag` — lexicographic, so `R10 < R2`. Use `min(started)`.
+3. Forgetting `s.excluded = 0` — 1482 `arm` windows with no metrics, silently in your GROUP BY.
+4. Forgetting `s.railed = 0` — 285 segments whose numbers are limits, not scores.
+5. Pooling across `airframe` — `compare-runs.py` refuses to; the grouping is `(airframe, card, tag)`.
+6. `s.tag` alone as a key — tags are unique per card **by convention only**, and it already leaks
+   (`hover`/`bobup` are shared by the rotor disk cards and the built-in `rotorcraft-v2`). Group by
+   `(card, tag)`.
+7. `sc_maxSpeed` is a normalizer (flat 600). Use `sc_infoMaxSpeed`.
+8. `aircraft` is the unit name, `airframe` is the jsonKey. Group on `airframe`.
+9. Matching on `segments.warnings` prose instead of the `railed`/`unknown_tag` flags — a
+   reword away from silently marking the corpus clean. (`slack` is **dead**, see Q7 — a
+   `WHERE slack = 1` now marks the corpus clean by construction.)
+9b. **`WHERE dmgFrac = 0` as "undamaged" — it selects EVERYTHING and is the sharpest live instance
+   of the zero-vs-never-measured trap.** The column is a guaranteed constant: **641,555 rows, 0
+   non-zero, against 8 known damage aborts.** The recorder writes the row *after* the abort check,
+   so a damaged replicate's damage is never written. The real damage signal is **the abort itself
+   and the truncated capture** (`# stop` reason), plus the sidecar's `detachedRatioAtStart`. Four
+   analyses have already been misled by this constant. Fix is `LAW-CHARACTERIZATION.md` §7 (Tier 1e:
+   write the row before the abort check).
+10. Assuming a metric column exists. It is created only when some capture produced it; `no such
+    column` means "never flown", not "typo".
+11. Ranking anything on `terminalOffDeg` without checking it is above `0.0396` — the `off` column's
+    resolution floor. It is non-NULL, four decimals wide, and orders nothing;
+    [see above](#the-resolution-floor--the-trap-that-survives-every-null-check). Same query, same
+    trap, pooling an 8 s leg with a 30 s one: that column is anchored at the segment END, so it is
+    two different quantities. Use `fixedWindowOffDeg` / `settleTime95`.
+12. Comparing replicate spread across batches without checking `gJitterG` first. The game's world
+    origin follows the OPERATOR'S CAMERA (`OriginShift`, decompile `:19365`), and a lane's physics
+    jitter — which is the dominant term in `terminalOffDeg` scatter (r = 0.886 over 9 lanes,
+    the R33 batch; `LAW-LEDGER.md` I8) — moves with it, **mid-batch, without warning and in opposite directions on
+    different lanes**. Check the per-*replicate* series, not the mean: R33's flip is invisible in a
+    lane average. A noise floor quoted without its `gJitterG` is one session's camera position.
+13. **`settleTime95 = 0.0` on a MONOTONE DIVERGENCE — it reads as "settled instantly" and it is the
+    opposite.** The band is `max(0.05, 1.05 × terminalOffDeg)` held to the segment end
+    (`scorecard.SETTLE95_FRAC`), and `terminalOffDeg` is anchored at that end — so on a leg whose `off`
+    ramps monotonically UP to its own maximum, every earlier sample is inside 1.05× that maximum and
+    the metric returns **0.0**. Live instance: R41 `AttackHelo1 · rotor-bistab` returned
+    `settleTime95` **0.0 / 0.0 / 0.9 / 1.6** on the four legs where `|azErr|` grew to 19–30° and the
+    pedal railed 66% of samples; the same cells in R42, which genuinely converge, return **7.4–24.9**.
+    The censoring the metric was designed for (NULL on a still-decaying leg) only catches a
+    *decaying* tail. **`settleTime95` near 0 with a large `fixedWindowOffDeg` is a divergence, not a
+    fast settle** — read the pair, never the one.
+14. **`aoaPeakDeg` / `aoaLimiterActivePct` / `gPeak` are meaningless on ANY rotorcraft segment**, not
+    just the slowest. `aoa` is the angle of a near-zero velocity vector off the nose, so it is noise
+    amplified: across all 28 R42 rotorcraft cells `aoaPeakDeg` averages **68–177°**, including 143–177°
+    on the yaw legs. They are non-NULL, plausibly formatted, and in the generic metric block that
+    applies to every type — so nothing filters them out for you. Filter `airframe NOT IN
+    ('AttackHelo1','UtilityHelo1','QuadVTOL1')` for anything AoA-derived, and see
+    `LAW-CHARACTERIZATION.md` §7 Tier 2.
+15. **Trusting a knob's SHIPPED default over the capture's own `# config` line.** `Cfg` values persist
+    in `<game>/BepInEx/config/com.no.wtmouseaim.cfg` and drift silently across versions. R41 flew its
+    entire rotorcraft batch on `heliFwd=150 heliHover=40` — a **v0.43** pair, 39 versions stale —
+    while every doc quoted the shipped 60/20, and that alone produced a published law verdict
+    (`AttackHelo1` diverges) which R42 retracted (`LAW-LEDGER.md` X29). The `config` column is the
+    capture's own record of the levers **as flown**; a two-batch comparison must diff it first:
+    `SELECT run_tag, count(*), config FROM captures WHERE run_tag IN (...) GROUP BY 1,3`.
+    **The same trap one level up: `cards/*.json` in the repo is not the card that flew.** The grid is
+    copied into `<game>/BepInEx/config/wtmouseaim-cards` **by hand**, so the deployed copy can be
+    older *or newer* than the batch. R44 is the worked example — `q-hi-300`/`q-lo-300` flew **4 lanes /
+    20 captures** off their airframe list because the card carried no `count` at the time; `count: 12`
+    was committed four minutes *after* the batch ended and re-deployed three minutes after that, so
+    both the repo file and the deployed file now claim a 12-lane / 60-capture card that has never run.
+    `check-card.py`'s cost estimate reads the same field and will quote the number that did not fly.
+    **What flew is in `LogOutput.log`, on the launch line** — `[drone] card '<name>' (…): airframe …
+    [card], N drone(s) [card '<name>' count | airframe list (K named)]` — and it names the *source* of
+    every value, which is the whole reason that line prints. Cross-check against the corpus with
+    `SELECT card, count(DISTINCT drone) lanes, count(*) caps FROM captures WHERE run_tag = '…' GROUP BY 1`.
+
+16. **Reading `entry_alt_from` as the altitude a capture FLEW.** It is where the drone was *before*
+    placement; `entry_alt_to` is where the card put it, and that is always the card's own `startAlt`.
+    `Drone/DroneAltDeckM` splits the fleet across two **spawn** decks, and placement then collapses
+    them: across R41 + R42 + R43 every card has **exactly one distinct `entry_alt_to`**, while
+    `entry_alt_from` spans thousands of metres. R43's `hs-hold` was designed around a 2500 m vs 5500 m
+    q contrast and all 12 valid captures flew **4000 m** (`LAW-LEDGER.md` **X32**). So there is no
+    altitude factor anywhere in the corpus, and `alt` is the column to group on if you want the one
+    that was flown:
+    `SELECT run_tag, card, count(DISTINCT CAST(entry_alt_to AS INT)) FROM captures GROUP BY 1,2`
+    returns 1 for every row in the table today. Corollary: **on a fixed-`startAlt` card the only q
+    lever is speed**, and speed is set per-airframe by `startSpeedCorner`, so q comes out confounded
+    with airframe unless the card crosses it some other way.
+
+17. **A capture that died inside its `arm` window still has `segments` rows, so a capture-count or a
+    segment-count reports data that does not exist.** `excluded = 1` segments carry **no metrics at
+    all** by construction (`type = 'arm'`), so `count(*)` over `captures` or over `segments` counts
+    them exactly like a scored capture and the query returns a plausible small-n instead of zero.
+    R44's `rotor-weathervane-60` is the worked example: 2 captures, 76 and 27 rows (1.5 s / 0.5 s of
+    a 186 s card), **one `arm` segment each plus one stray `unsegmented` row, and zero scored
+    segments** — the game was closed before the card left its settling window. Reading "2 captures"
+    as "an underpowered sample" rather than "no sample" is the whole trap; there was nothing to be
+    underpowered *with*. Always qualify:
+    ```sql
+    -- captures that actually produced SCORED data, not merely rows
+    SELECT ca.card, count(DISTINCT ca.id) caps, count(*) scored_segs
+      FROM captures ca JOIN segments s ON s.capture_id = ca.id
+     WHERE ca.run_tag = 'R44' AND s.excluded = 0 GROUP BY 1;
+    ```
+    Two cheap corroborating tells on the same rows: `captures.stop` is **NULL** when the footer never
+    got written (a truncated run), and `captures.arm` is NULL on the anchor replicate anyway
+    (`LAW-LEDGER.md` **X27**), so a truncated card very often leaves behind *only* anchor replicates —
+    i.e. the surviving captures are the ones that were armed as neither arm.
+
+18. **`sd(outR)` in a settled tail is a COUNT OF PRINT QUANTA, not an amplitude — the stick columns
+    have a resolution floor of their own, and it is coarser than `off`'s.** `outP`/`outR`/`outY` are
+    written `{0.000}` (`Recording.cs:590`), so the quantum is **1e-3 of full stick**. In R44's
+    `q-hi-300`/`q-lo-300` settled tails (t ≥ 10 s of a 20 s `fine_track`, 6 410 rows) `outR` occupies
+    **14 distinct values** on the high-q card and 32 on the low-q one, spanning ±0.007 / ±0.009, with
+    **~34% of samples reading exactly `0.000`**; per-cell `sd` is **0.0010–0.0021 — one to two
+    quanta.** A between-condition difference of 0.0002 is a fifth of a print step and orders nothing,
+    exactly as `terminalOffDeg` below 0.0396° orders nothing (gotcha 11). **`stickFlipRate{P,R,Y}` is
+    the same floor after a sign test:** every one of those 40 segments scored `stickFlipRateR` = 0.05
+    or 0.10 — literally **1 or 2 sign changes in 20 s**, one of which is the commanded reversal — and
+    the two cards' means are *identical to four decimals* (0.0564 vs 0.0564, n=32 each).
+    **Both were R43's evidence for the q-dependence of the roll constants; its quoted `outR` sd range
+    0.0007–0.0045 is 0.7–4.5 quanta, the low end sub-quantum** (`LAW-LEDGER.md` **X34**). Rules:
+    - Below ~0.01 of stick, use a **physical** column instead — `rollRate` is also `{0.000}` but in
+      rad/s, so the same motion occupies 46–63 codes rather than 14, i.e. ~4× the usable resolution.
+    - `wobbleEpisodes*` = 0 and `wobbleFreqHz*` = NULL are the *correct* readings on such a signal,
+      not a null result to report; the detector is refusing to fit noise.
+    - `count(DISTINCT r.outR)` over the window you are about to take an `sd` of is the one-line check.
+
+19. **`replicate` is COMPUTED per `(session, drone, card)`, and a lane RESPAWN gets a NEW `drone`
+    id** — so every retry after a fatal abort restarts the count and reads `replicate = 1`. R44's 27
+    `FastBomber1` placement kills are all `replicate = 1` and that is **not** evidence that only the
+    anchor replicate is affected; it is 9 lanes × 3 spawn attempts, each attempt a fresh `drone`.
+    The log line that goes with it (`suite ended with 1 of 5 replicate(s) ABORTED`) is the same
+    artefact read from the other side: a fatal abort ends the suite, so the tally is always *one*
+    aborted out of however many the queue held. **`entry_respawn` is the column that tells them
+    apart** (NULL = first spawn, 1/2 = retry), and the physically meaningful "is this an anchor
+    placement" test is `entry_snapBackM = 0`, never `replicate = 1`:
+    ```sql
+    SELECT card, drone, replicate, entry_respawn, entry_snapBackM, aborted
+      FROM captures WHERE run_tag = 'R44' AND airframe = 'FastBomber1' ORDER BY rec;
+    ```
+
+20. **`targetBank` (CSV column 8) IS A DEAD COLUMN and it disagrees with the live one 4–18% of the
+    time.** It is the REMOVED Legacy law's bank target: `ApplyEvolvedLegacy` — the only fixed-wing law
+    since v0.60 — has never read it, computes its own `tBankE = Clamp(bankTR, ±MaxBank)` and flies
+    that. The column is still written, still four decimals wide, and still looks like the outer loop's
+    command. Rows where the dead column reads < 0.05° while the live `tBankE` reads > 2°:
+
+    | card | mean \|targetBank\| (dead) | mean \|tBankE\| (live) | rows dead<0.05 AND live>2 |
+    |---|---|---|---|
+    | `place-390` | 0.45 | 2.38 | **17.6%** |
+    | `place-375` | 0.41 | 2.07 | **11.7%** |
+    | `oblique-6-c` | 2.61 | 3.37 | **11.3%** |
+    | `place-300` | 0.37 | 1.71 | 7.7% |
+    | `place-deflect` | 56.45 | 20.32 | 0% (2.8× the other way) |
+
+    **This has already produced a published wrong inference:** `LAW-LEDGER.md` **O11**'s field
+    evidence — *"over a 22.7 s hold, `targetBank` mean −0.162°, i.e. the outer loop commanding
+    nothing, while the inner servo swings ±0.5 stick"* — reads the dead column, and "the outer loop
+    was commanding nothing" is exactly the artefact it manufactures on 4–18% of rows. Re-derive that
+    claim on `tBankE` before building on it.
+    - **Demand** (was the clamp active?) → **`bankTR`**, which is what `scorecard.bankClampActivePct`
+      has read since R40; that metric's docstring carries the three-regime proof that `targetBank` is
+      **not salvageable** (in two of its three regimes it carries no clamp information at all, and
+      inverting the third needs `hdgConf`, which is not a recorded column).
+    - **Target actually flown** (lag, tracking) → **`tBankE`**.
+    - `scorecard.py` derives **no** metric from `targetBank` today and its selftest pins that.
+      `analyze-wobble.py`'s two readers were repointed in v1.0.5 (`bankTR clamped %`,
+      `bank lags tBankE by`); the `--digest` signal list still plots it, deliberately, because a
+      digest is a picture of what the recorder wrote.
+
+21. **EVERY FREQUENCY IN THIS DATABASE COMES OFF A 16 Hz SERIES DECIMATED FROM A 60 Hz LOOP WITH NO
+    ANTI-ALIAS FILTER. Nyquist is 8 Hz, and above ~1.5 Hz the estimator can only report a COMB.**
+    `Cfg.RecordRateHz = 20` and `Recording.cs:533` is a bare time-throttle (`minDt = 1/RecordRateHz`,
+    instantaneous values, no averaging) — a pure decimator. Measured over all 242,067 materialized
+    rows: `frameMs` mean **16.721 ms (59.8 Hz loop)**, and the inter-sample gap is **not uniform** —
+    60,770 gaps of 0.050 s against 180,953 of 0.066–0.067 s, a repeating 3-sample cycle whose mean is
+    exactly **0.0625 s = 16.0 Hz**. Three consequences, and the third is the one nobody had written
+    down:
+    - **Anything above 8 Hz folds into the reported band with nothing flagging it.** A 10 Hz actuator
+      mode reports as 6 Hz. The loop runs at 59.8 Hz, so modes up to ~30 Hz exist physically.
+    - **Rate-limiter saturation shorter than 62.5 ms is invisible**, so `stickRailPct*` and every
+      railed-interval count is a **lower bound of unknown tightness**, not a count. `stickFlipRate*`
+      counts sign changes in a 16 Hz series and cannot tell a 3 Hz oscillation from a 13 Hz one.
+    - **The autocorrelation lag is an integer number of samples, so the frequencies that can be
+      REPORTED are quantised to `1/(k·0.0625)`** — spacing `Δf ≈ f²·dt`, i.e. **6% at 1 Hz, 12% at
+      1.9 Hz, 17% at 2.7 Hz**. The corpus shows the comb directly: 2,706 published `wobbleFreqHz*`
+      values pile onto 2.29 (k=7), 2.67 (k=6) and 3.20 (k=5) Hz with **empty bins between them**. So
+      the *"2.1–2.7 Hz cluster"* is not a cluster — it is the two lowest available lags in that band,
+      and 176 of those values sit on 2.67 Hz, which is also **half the 5.33 Hz sample-clock pattern**.
+      Treat any reported frequency above ~1.5 Hz as "somewhere in this decade", never as a
+      measurement. Below ~1 Hz the comb is dense and the numbers are fine (56.6% of published values
+      are under 1 Hz).
+    - **Verdict for a describing-function test.** A predicted ~1.9 Hz onset can be *detected* (inside
+      the band, well clear of DC) but cannot be *confirmed to a frequency*: the instrument can only
+      return 1.78 or 2.00 Hz. **If the prediction is the point, raise `Cfg.RecordRateHz` from 20 to
+      50–60 first** — one default, no code, Nyquist moves to 25–30 Hz and the comb at 1.9 Hz tightens
+      from 12% to ~3%. Cost is ~3.7× the rows and CSV bytes. Learning this after the batch flies
+      would cost the batch.
+
+22. **The `outR`/`outP` settled-window oscillation metrics were DELETED (v1.0.5), and every
+    surviving one is now gated on the column's print quantum.** This is gotcha 18 turned into code.
+    Measured over the ~700 settled windows of R40+R44, sd in units of the column's own print step:
+    `outR` **1.18** (median 6 distinct codes per window), `outP` 1.47, `pitchRate` 1.41, `bank` 2.49,
+    `yawRate` 3.39, `azErr` 3.62, `rollRate` **4.88** (21 codes), `outY` 5.46, `aoa` 44.3. The tell
+    that this was not academic: **`outR` published a confident `wobbleFreqHz` on 15.1% of segments —
+    the second-highest rate of any signal, above every physical one** — while 83.9% of its windows
+    spanned under 3 quanta. An autocorrelation will always find a period in a signal dithering between
+    two codes.
+    - **Rescued onto a physical column:** `outR` → **`rollRate`** (achieved roll rate, 4× the usable
+      resolution, and the only signal that moved coherently in R44's crossed-q pair).
+    - **Deleted with no replacement:** `outP`. Its rate twin `pitchRate` measures 1.41 quanta, *worse*
+      than `outP` itself, so the pitch axis has no adequately-resolved settled-window signal. It is
+      not uncovered: `aoa` (44 quanta) is in the list and `pitchAuthority*` answers the relay question.
+    - **Kept:** `outY` (5.46 quanta — these cards put the command in the yaw channel) and
+      `stickFlipRate{P,R,Y}`, whose 0.05 dead-band is **50** print quanta. What `stickFlipRate*`
+      cannot do is separate two quiet segments — R44's two cards both scored 0.0564 to four decimals.
+    - **The general guard:** `wobbleFreqHz*`/`wobbleCoherence*` are withheld with a `NOT EXPOSED:`
+      reason whenever the settled window's sd is under `scorecard.WOBBLE_MIN_QUANTA` (3) print steps.
+      This is what makes the *replacement* trustworthy rather than swapping one under-resolved column
+      for another: it withholds `wobbleCoherenceBank` on ~97% of R40+R44 segments, because `bank` at
+      `{0.0}` is 2.49 quanta in a fine tail.
+
+23. **`retreatDeg = 0` is not "it converged" — read it with `monotonicityIndex`.** The three v1.0.5
+    retreat metrics (backlog **#33**) answer *"does the nose ever move AWAY from the commanded
+    direction"* off the `off` series. The entry transient is excluded by dropping the leading run of
+    SHRINKING rises (a transient is a decay), which is what makes the metric mean anything — but it
+    also means **a single monotone divergence is one rise with nothing before it, so it cannot be
+    shown to be non-decaying and scores `retreatDeg` 0.0 / 0 episodes.** `monotonicityIndex`
+    (net progress ÷ gross zigzag path, [−1, 1]) is the one that goes **negative** there. That is the
+    same shape gotcha 13 catches from the other side, and the pair separates them cleanly on real
+    captures: R41 `rotor-bistab`/`AttackHelo1` scores `monotonicityIndex` **−0.061, negative on 46 of
+    56 legs**, against R42's converging twins at **+0.411, negative on 6 of 56** — while
+    `settleTime95` says R41 "settled" in **3.7 s** and R42 in **13.8 s**, i.e. exactly backwards.
+    Validation against `LAW-LEDGER.md` **S5**: over the 15 archived `elDn`/`elUp` capture pairs, every
+    one of the 15 converging `elUp` legs scores **exactly 0.000° / 0 episodes**, against
+    **3.09 ± 3.12° on their `elDn` twins** (8 of 15 non-zero, mean 5.79° among those; the 7 zeros are
+    the v0.72/R13-era `elDn` legs, which really did converge — the limit cycle appears from v0.73 on).
+
+24. **A per-leg metric is NOT independent of the leg before it, and the direction is in the tag.**
+    `_pitchEff` latches (see `pEffEntry`), so every leg enters carrying the previous leg's terminal
+    value — the `arm` window latches ~0.749 before the first scored leg begins, and the latched value
+    is **direction-dependent**: `Multirole1` 0.465 DOWN vs 0.740 UP, `SmallFighter1` 0.519 vs 0.760.
+    A real capture reads `pEffEntry` 0.608 / 0.523 / 0.523 / 0.586 across its four legs. Two rules:
+    - **Never pool across leg tags.** Nothing in the tooling does it for you and nothing does it to
+      you: `scorecard.py` scores per segment, and both `index-captures.py --diff` and `compare-runs.py`
+      group by `(airframe, card, tag)`. Direction is encoded in the tag itself (`obDR6` vs `obUL6`),
+      so grouping by tag preserves it. The only place pooling happens is hand-written SQL — i.e.
+      gotcha 1 and rule 2, now load-bearing for the `PitchEffRelax` A/B.
+    - **Watch `pEffTrendPerS` beside `stickFlipRateP`.** Inside a rail-to-rail relay the measuring
+      gate reopens at every zero crossing (~0.1 s against a 1.0 s release tau), so a *relaxing*
+      estimator can ratchet UP during an oscillation instead of between legs. Positive trend on a leg
+      with a high flip rate means the arm is adding energy to a cycle, not removing a de-rating.
+
+25. **A SINGLE-PASS CARD ALIASES "preceding leg" WITH "current tag" — so you cannot control for both.**
+    Every `oblique-*` card except the fwd/rev pair flies a fixed leg order once per capture (`repeat`
+    counts *replicates*, not passes), so each tag has exactly one predecessor and one slot. The
+    one-line check, which returns `1` for every tag on such a card:
+    ```sql
+    WITH t AS (SELECT s.capture_id cid, s.seg_index si, s.tag,
+                      LAG(s.tag) OVER (PARTITION BY s.capture_id ORDER BY s.seg_index) prev
+                 FROM segments s JOIN captures c ON c.id = s.capture_id
+                WHERE c.card = :card)
+    SELECT tag, count(DISTINCT prev) n_predecessors, count(DISTINCT si) n_slots
+      FROM t WHERE prev IS NOT NULL GROUP BY 1;
+    ```
+    "Controlling for the current leg's tag" therefore removes **100 %** of the predecessor variance,
+    and no amount of `n` fixes it — it is aliasing, not power. This killed the first stated test of
+    the filter-carry-over hypothesis, which had been written against `oblique-6-c`.
+    **The corpus contains exactly one design that IS identified:** `oblique-12-fwd` / `oblique-12-rev`
+    (R30 n=48, R31 n=96) fly the same diamond in reversed order, so two tags keep their predecessor
+    across the swap (they are the placebo) and two change it. That crossing is what produced `D14`,
+    and it is reusable for any question of the form "does what happened *before* this leg matter?" —
+    not just direction. Ledger `D14`, `L18`, `L8`.
+
+26. **A DILUTION FIGURE IS ONLY MEANINGFUL ON THE CARD THE CONTRAST ACTUALLY FLEW.** Ledger `X36`.
+    A claim that "73.4 % of the flagship card sits below the `azTR` presence gate, so every
+    turn-rate-path A/B was ~4× diluted" was arithmetically exact and completely wrong: `oblique-6-c`
+    carries `"armToggle": "none"` and `arm` is NULL on all 304 of its captures. The turn-rate A/Bs
+    flew on `e2-rel-turn-lead` and `e3-marker-ff` — sustained sweeps where the gate is **open on
+    99.6–99.7 %** of scored rows, and where the restricted re-cut is identical to four decimals
+    (dilution **1.004×**). **Before quoting an exposure or dilution number, run
+    `SELECT DISTINCT card, arm_knob FROM captures WHERE arm IS NOT NULL`** and check the claim
+    against *those* cards. This is the third finding of this shape in the corpus (`X12`, the
+    `BelowAlignSuppress` validation gap, and now this), which is why it is a gotcha and not a
+    footnote.

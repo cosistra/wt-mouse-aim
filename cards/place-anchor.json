@@ -1,0 +1,30 @@
+{
+  "name": "place-anchor",
+  "cls": "Plane,Tiltwing,VTOL",
+  "step": 0.02,
+  "airframe": "FastBomber1, QuadVTOL1, Multirole1",
+  "note": "THE CONFIRMATION CARD FOR THE v1.0.4 PLACEMENT FIX (LAW-CHARACTERIZATION.md §7 Tier 1 (i), ledger I12). WHAT IT TESTS: R44 established that the surviving placement kill is a non-zero ANCHOR placement on a variable-geometry airframe -- 31 of 31 dead at dz = +/-1500 m against 0 of 32 at dz = 0, over 230-440 m/s, Fisher p = 4.1e-5 for the airframe co-factor. It is not speed (X33, refuted at both ends) and not displacement size (the same airframe survives 26.3 km mid-run snapbacks and 3894 m of mid-run altitude change). The dz comes from ONE place: DroneAltDeckM spawns the lane at startAlt +/- spread/2 and the card's first placement then teleports it to startAlt (X32). v1.0.4's fix is TestDrone.DeckSpreadFlown -- a card that declares startAlt collapses the deck to zero, so the anchor placement's dPos is exactly (0,0,0) and the aircraft is levelled and given its velocity without being moved. THIS CARD IS THE LETHAL CONFIGURATION, UNCHANGED: it still pins DroneAltDeckM 3000 and still declares startAlt 4000, which on the v1.0.3 build is 100% fatal to FastBomber1 and was the exact combination that killed place-300/375/390/400/420/440. If the fix is live the launch log says so ('DroneAltDeckM = 3000 m ... is IGNORED on this launch'), the fleet flies one ring at 4000 m, and nothing dies. PASS: 30 of 30 captures complete (6 lanes x 5 replicates), entry_alt_from == entry_alt_to == 4000 on EVERY replicate 1, snapBackM = 0 on every replicate 1, zero 'abort: aircraft gone' at 0.0 s. FAIL: any lane gone at 0.0 s -- and if it is a FastBomber1 or QuadVTOL1 lane specifically, the collapse did not reach the spawn. WHY THREE AIRFRAMES: FastBomber1 and QuadVTOL1 are the corpus's only two variable-geometry keys (sc_wingAngleMaxDeg non-NULL), i.e. the only two with a geometry controller that writes a Transform on an unparented AeroPart while slewing -- SwingWingController.RotatorInput.Animate (:68680-68703) and TiltWingController.RotatorLinkage (:70141-70146). Multirole1 is the fixed-wing control: it survived the lethal configuration 8 of 8 in R44 and must keep surviving, or the fix broke something unrelated. QuadVTOL1 HAS NEVER BEEN GIVEN A NON-ZERO ANCHOR, which §7 (i) called the open half of I12 -- note that this card can no longer answer it and does not try to: under the fix a non-zero anchor placement is structurally unreachable from any card, which is the point. The mechanism half of I12 stays PLAUSIBLE and is now unfalsifiable in-harness; that is the correct price. THE ENTRY SPEED IS CORNER-RELATIVE AND §7's SPEC WAS WRONG -- this is the one place the shipped card deliberately departs from the plan, per the standing 'declare what the card will actually fly' rule. §7 (i) specified startSpeed 250 for all three keys. QuadVTOL1's Vmax is 148.6 m/s (AIRFRAMES.md), so EntrySpeedFlyable's 0.95x Vmax ceiling of 141.2 would have REFUSED both QuadVTOL1 lanes before they spawned -- the card would have flown 4 lanes, written 20 captures, and silently dropped the airframe it was written for while the 30-of-30 criterion failed for a reason that has nothing to do with placement. startSpeedCorner 1.00 places each key at its own manoeuvring point instead: FastBomber1 200, Multirole1 160, QuadVTOL1 ~120 m/s (its FBW corner is unread, so TryEnvelope fails soft to the AI corner 120), all comfortably inside every envelope, and FastBomber1 lands nearest the 230-440 m/s band the kill was actually measured in. The absolute startSpeed 120 is the FAIL-SOFT ONLY (ResolveStartSpeed falls back to it when no corner is readable) and is deliberately set to a value legal for all three keys, so no probe outcome can cost this card a lane. GEOMETRY IS place-noop's, and for its reason: a single 3 s 'arm' segment, excluded from scoring on purpose. The readout is the ABORT, not a metric -- do not score this card on dmgFrac (the abort check runs before the row is written, so an aborted capture reads 0.0 by construction) and do not read its pointing numbers at all. repeat 5 is 4k+1 per X27, and it buys the within-card control for free: replicate 1 is the ANCHOR placement (the one under test) and replicates 2-5 are MID-RUN placements, which I12 measured as 0 of 86 fatal. If the fix works, replicate 1 is indistinguishable from 2-5. Throttle 0.40 is place-noop's and is immaterial over 3 s. The rotor pins are declared because cls names Tiltwing/VTOL and check-card requires them; they do not decide anything here -- QuadVTOL1's heliBlend is tilt-angle driven, not speed driven, and R44 measured it railed at 1.0000 +/- 0.0000 at 152 m/s (ledger O13), so the 60/20 pair is recorded for repeatability and nothing else.",
+  "startSpeed": 120,
+  "startSpeedCorner": 1.0,
+  "startAlt": 4000,
+  "count": 6,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.40" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" },
+    { "key": "Control/HeliForwardSpeed", "value": "60" },
+    { "key": "Control/HeliHoverSpeed", "value": "20" }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 3.0,
+      "az": 0.0,
+      "el": 0.0
+    }
+  ]
+}

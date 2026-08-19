@@ -1,0 +1,27 @@
+{
+  "name": "stol-steps",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1",
+  "note": "THE LOW-q ARM OF THE BELOW-NOSE DEFECT. Mirrored pairs only - 30 deg az right/left about a -15/+15 datum, 40 deg el down/up about a -20/+20 datum - so an asymmetry shows as a difference between two equal steps rather than as one absolute number. The question it now exists to answer is R39-stol 4's: elDn40 terminalOffDeg spans 0.091 deg (COIN) to 8.771 deg (Multirole1), x96, with R^2 of V/Vcorner alone = 0.609, and the mechanism is a stable FALSE BANK EQUILIBRIUM (tBankE == bankTR == -39.7 deg matching an actual bank of -42 deg, commanded by 1.77 deg of azimuth error, because phi = atan(omega*V/g) and V was 367 m/s). Does that error fall with speed WITHIN each airframe? Watch tBankE and bank over the last 4 s, not the pointing error: 42 deg held against 1.77 deg of azErr at 367 m/s is the failure; 1.1 deg held against 0.14 deg at 231 m/s is the same law behaving. ENTRY REWRITTEN 2026-08-02 - IT NO LONGER FLIES 90 m/s AND CANNOT BE COMPARED WITH ANY CAPTURE BEFORE THIS EDIT. The 90 m/s absolute entry FAILED preflight and could never have worked: it is 0.56x Multirole1's FBW corner of 160, under the 0.75x breakpoint where targetPitchAngVel's max(V, 0.75*Vc) goes flat (decompile :65032), the placement writes the speed once and NOTHING holds it, and the throttle floor is MinThrottle 0.25 (EntryThrottle snaps anything lower to the 0.70 DEFAULT, so the ~0.10 the arithmetic wants is unreachable). R39-stol measured the consequence: 340-381 m/s against a declared 90, i.e. the fastest data in the batch on the card meant to be the slowest. Now startSpeedCorner 0.80, which fixes it three ways at once. (1) It is above the 0.75x authority knee on every lane, so the entry is holdable rather than a number the aircraft leaves. (2) It puts the WHOLE ROSTER at one dynamic pressure: qRatio = V^2*rho/(Vc^2*1.225) = 0.80^2 x rho_ratio(4000 m) = 0.64 x 0.6686 = 0.428, identical for every lane by construction, which is what a between-airframe comparison at low q actually requires. (3) 0.428 sits ABOVE the qSched = Clamp(qRatio, 0.3, 1) floor with 43% of margin, DELIBERATELY: the clamp fired for real for the first time on 2026-08-02 (19.9% of COIN's alpha-pullup slow-arm samples at 85 m/s against a 110 m/s corner), and at the old declared 90 m/s it would have put 6 of 10 airframes on the floor, so the corpus's first genuine low-q batch would have spent itself measuring a hardcoded constant instead of the law. This card is the ABOVE-the-clamp instrument; its sibling stol-sweep deliberately crosses it. Read qSchedMin per segment - it is what says which side a segment actually flew, and it should be ~0.43 and uniform here. DARKREACH IS NOT ON THE ROSTER and cannot be: its FBW corner (100) is only 1.50x its stall (66.7), the lowest ratio in the fleet, so 0.80x corner = 80 m/s is below 1.10x its density-corrected stall (89.7 m/s TAS at 4000 m) - it needs 0.90x corner to fly at all here, which is not low q for anyone else. One card is one test; the ninth airframe is the accepted cost. startAlt 4000 m leaves 3500 m of usable air above the 500 m floor for the deliberate 12 s 40-degree nose-down leg. ScenarioThrottle stays pinned at 0.25: with the entry now near the corner-speed knee the residual excess thrust is far smaller than the old 90 m/s case, but nothing holds the speed and the 'ENTRY CONDITION NOT HELD' log line is the instrument - grep for it before reading any score, and check spd at the end of the 6 s arm on the first capture. Set Drone/DroneAltDeckM = 0: at 3000 the upper deck is 5500 m, where 0.80x corner is under 1.10x the density-corrected stall for the slower lanes. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: R41 (v1.0.0) flew this card's 9 lanes at ONE spawn altitude (4000 m, spread 0), not the 3000 m shipped default.",
+  "startSpeed": 120,
+  "startSpeedCorner": 0.80,
+  "startAlt": 4000,
+  "repeat": 4,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.25" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
+  "segments": [
+    { "tag": "arm",    "dur": 6,  "az": -15, "el": 0 },
+    { "tag": "az30R",  "dur": 12, "az": 15,  "el": 0 },
+    { "tag": "az30L",  "dur": 12, "az": -15, "el": 0 },
+    { "tag": "arm",    "dur": 4,  "az": 0,   "el": 20 },
+    { "tag": "elDn40", "dur": 12, "az": 0,   "el": -20 },
+    { "tag": "elUp40", "dur": 12, "az": 0,   "el": 20 }
+  ]
+}

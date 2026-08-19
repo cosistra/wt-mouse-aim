@@ -4,13 +4,33 @@
 Stdlib only (no pandas). Usage:
     python analyze-wobble.py <recording.csv> [more.csv ...]   # wobble score + PASS/FAIL verdict
     python analyze-wobble.py --digest <recording.csv> [...]   # compact phase-segmented timeline
+    python analyze-wobble.py --digest --verbose <many.csv>    # full timelines past 10 captures
     python analyze-wobble.py --selftest                       # in-memory asserts, no file needed
 
-WOBBLE SCORE (default) — the metrics from the 2026-07 wobble investigation (see WOBBLE-FINDINGS.md):
+WHAT THIS TOOL IS FOR, AND WHAT IT MUST NO LONGER BE READ AS (v1.0.5). It implements the metrics of
+the 2026-07 wobble investigation, and `LAW-LEDGER.md` **X35** now REFUTES that investigation
+wholesale: its central artifact was `targetBank` square-waving 0<->cap, and no live law has written
+that column since v0.60 (see gotcha 20 and the two readers repaired below); its episode counts came
+from the ancestor of a detector that was counting ENTRY TRANSIENTS (318 corpus episodes -> 5 after
+the R40 repair, X21); its authority numbers were `authorityUsedFrac`-class, deleted rather than
+rescaled. Its conclusion -- *"unstable at every speed 70-390 m/s, speed only scales amplitude"* --
+is refuted by R43 flying that condition at 407-505 m/s clean 12 of 12, `wobbleEpisodesOutR` 0 on
+48 of 48.
+  **So the wobble is NOT a high-speed phenomenon and NOT an outer-loop one.** The single sustained
+  roll limit cycle the corpus has actually measured is `S5`'s `elDn`: BELOW-NOSE, at ordinary speed,
+  while the mirror step in the upper hemisphere converges to 0.03 deg. **Hemisphere, not speed.**
+  The `--digest` mode and the raw per-signal episode/lag/model-fit numbers below are all still
+  sound -- they report what the recorder wrote. What is refuted is the CONCLUSION that was drawn
+  from them, so treat this tool as a per-capture readout and take verdicts from `LAW-LEDGER.md`.
+  See also `LAW-CHARACTERIZATION.md` §6: at the default cone the sub-degree regime this
+  investigation never looked at is where the complaint actually lives.
+
+WOBBLE SCORE (default) — the per-capture readout:
   - oscillation episodes: sustained sign-alternation windows on bank / azErr / outR / outP / outY,
     with zero-crossing frequency, peak-to-peak amplitude, amplitude trend (grow/steady/decay)
-  - outR rail % (|outR| > 0.98) and targetBank clamp % (|targetBank| >= MaxBank-0.5)
-  - bank-vs-targetBank cross-correlation lag (the measured ~0.7 s actuation lag)
+  - outR rail % (|outR| > 0.98) and bank-demand clamp % (|bankTR| >= MaxBank-0.5)
+  - bank-vs-tBankE cross-correlation lag (the measured ~0.7 s actuation lag). Both of these read
+    `targetBank` no longer — that column is dead; see the block at the reading site.
   - corr(azErr, bankTR) (the P-only outer-loop fingerprint; ~+0.9 pre-fix)
   - v0.55 model fit: pitchRate ~ -outP*G*9.81/V (the decompiled FBW g-command law), split at the
     airframe's corner speed (from the # fbw header when present, else 170 m/s). High-q corr should
@@ -35,14 +55,31 @@ DIGEST (--digest) — collapse consecutive same-phase rows into one segment each
 capture reads as a ~30-line timeline: per segment the phase, duration, the signals that actually
 moved (start->end, interior peak when it overshoots the endpoints) and per-axis stick sign-flip
 counts. Inline # cfg t=... changes and any [anomaly] lines from the sibling
-mouseaim-anomalies-<session>.log (matched by rec=<this file>) are slotted at their timestamp.
+mouseaim-anomalies-*.log (matched by rec=<this file>) are slotted at their timestamp.
 The raw CSV stays the ground truth — open raw rows only for a segment the digest flags.
+Past DETAIL_FILE_LIMIT captures --digest collapses one level further, to ONE line per file
+(digest_brief) — the same argument at batch scale; --verbose keeps the full timelines.
 """
 import csv, math, sys, os, re, statistics
 
+# Non-numeric columns. Single source of truth: scorecard.py imports this module already (as `aw`,
+# to reuse the episode detector / pitch_authority / etc. without reimplementing them) and has no
+# reason to be imported back, so this definition living HERE — not a second copy in scorecard.py —
+# is the direction that can't go circular. scorecard.py reads it as aw.STRING_COLS.
+# segTag (M0/M1, a test-card capture's per-row segment label) used to be missing from this set
+# entirely: every row of every test-card capture has a non-empty segTag, so float(r["segTag"])
+# raised on EVERY row and load() silently returned zero rows for every such capture (--digest and
+# the default score both printed "no data rows"). See CHANGELOG.
+STRING_COLS = {"phase", "controlLaw", "segTag"}
+
 
 def load(path):
-    """Return (meta, rows). meta = {cfg, headers[], cfg_marks[(t,text)], session}."""
+    """Return (meta, rows). meta = {cfg, headers[], cfg_marks[(t,text)], session}.
+
+    A row that fails to parse (some column outside STRING_COLS held a non-numeric value) is dropped
+    and counted; if any were, that's reported on stderr rather than staying silent -- a handful of
+    genuinely corrupt lines is plausible, but EVERY row (the segTag bug above) or any large fraction
+    almost always means STRING_COLS is missing an entry, not that the data is bad."""
     meta = {"cfg": "", "headers": [], "cfg_marks": [], "session": ""}
     data = []
     with open(path, newline="") as f:
@@ -64,12 +101,17 @@ def load(path):
             data.append(raw)
     rdr = csv.DictReader(data)
     out = []
+    dropped = 0
     for r in rdr:
         try:
-            out.append({k: (r[k] if k in ("phase", "controlLaw") else float(r[k]))
+            out.append({k: (r[k] if k in STRING_COLS else float(r[k]))
                         for k in r if r[k] is not None and r[k] != ""})
         except ValueError:
-            continue
+            dropped += 1
+    if dropped:
+        print(f"WARNING: {path}: dropped {dropped}/{dropped + len(out)} row(s) that failed to parse "
+              f"(non-numeric value in a column outside STRING_COLS={sorted(STRING_COLS)})",
+              file=sys.stderr)
     return meta, out
 
 
@@ -86,15 +128,26 @@ def crossings(ts, xs, dead):
     return idx
 
 
-def episodes(ts, xs, dead, min_dur=2.0, max_gap=2.5):
-    """Group sign-flips into sustained-oscillation episodes; report freq/amplitude/trend."""
+def episodes(ts, xs, dead, min_dur=2.0, max_gap=2.5, min_cross=4):
+    """Group sign-flips into sustained-oscillation episodes; report freq/amplitude/trend.
+
+    `min_cross` IS A FREQUENCY FLOOR, not just an evidence bar. `freq` below is
+    (len(seg)-1)/2/(t1-t0), so an episode sitting exactly on the minimum reports
+    (min_cross-1)/2/(t1-t0) -- a constant divided by whenever the last crossing landed, identical
+    for every signal of that length. At the default 4 that is 1.5/(t1-t0), which is how R39-C found
+    "0.319-0.328 Hz reproduced to three digits across three batches" to be 3/(2 x the entry
+    transient's fourth zero crossing) rather than a measured frequency. Callers that need the number
+    to BE a measurement must raise this; scorecard.wobble_scan passes 6 (2.5 cycles) and takes its
+    frequency from an amplitude-independent estimator instead. Default unchanged so this module's
+    own death-wobble scan, which wants the COUNT and reads freq only as a shape hint, is untouched.
+    """
     xi = crossings(ts, xs, dead)
     eps, start = [], 0
     for k in range(1, len(xi) + 1):
         if k == len(xi) or ts[xi[k]] - ts[xi[k - 1]] > max_gap:
             seg = xi[start:k]
             start = k
-            if len(seg) < 4:
+            if len(seg) < min_cross:
                 continue
             t0, t1 = ts[seg[0]], ts[seg[-1]]
             if t1 - t0 < min_dur:
@@ -316,11 +369,74 @@ def convergence(rows):
     return out
 
 
+# Below this many rows there isn't enough data for ANY discriminator below to mean something. A
+# run aborted seconds after it started (run key pressed again, altitude floor, aircraft lost) can
+# leave a handful of rows of pure entry-teleport transient -- and pitch_authority/model_fit don't
+# know that; they'll happily compute a confident-looking PASS or FAIL from it (observed: v0.74 R15
+# aborts with 1/2/8 rows produced "PASS" and a false "PITCH AUTHORITY REVERSED"). --digest has no
+# such floor (it just reports what little is there), so point there instead of guessing here.
+# ponytail: a flat row count, not calibrated against sample rate -- the shortest real card segment
+# is a 2s micro-step (~100 rows at the recorder's ~50 Hz), so 20 leaves wide margin without needing
+# to parse the recording rate. Raise/replace with a duration check if a legitimately shorter capture
+# format ever shows up.
+MIN_ROWS = 20
+
+# Per-signal dead-bands analyze() scans for oscillation episodes: |signal| below `dead` is noise
+# around zero, not a swing. SHARED, not private: scorecard.py held a byte-identical copy (its
+# WOBBLE_SIGNALS) because this was an inline literal, and two copies of a detector threshold is two
+# tools quietly answering the same question differently. The dependency runs scorecard -> here (it
+# already exec_module()s this file for episodes()/crossings()), so the definition has to live on
+# THIS side; importing scorecard from here would close the cycle.
+WOBBLE_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05),
+                  ("aoa", 2.0))
+
+# --- THE RECORDER'S PRINT QUANTUM, per column (Recording.cs:589-596) ------------------------------
+# The step between two adjacent values a column can EVER hold. Not a tolerance and not a guess: it is
+# the format string. `off`/`azErr`/`aoa` are "{0.00}", `bank` is "{0.0}", and every stick/rate column
+# is "{0.000}" -- but a stick channel is +-1 of full deflection while a rate column is rad/s, so the
+# same three decimals buy very different resolution per unit of physical motion.
+#
+# WHY THIS EXISTS AS A TABLE. R43 published Spearman +0.891 for "roll activity rises with q" off the
+# sd of `outR` in settled tails, and R44 retracted it: in those tails outR holds 14-32 distinct codes
+# with ~34% of samples exactly 0.000, so the sd being compared -- 0.0010-0.0021 -- was ONE TO TWO
+# print steps (LAW-LEDGER X34, CAPTURES-DB gotcha 18). An estimator that does not know a column's
+# quantum will fit the quantiser and report it with four confident decimals. Measured over the 700-ish
+# settled windows of R40+R44, sd in units of this quantum: outR 1.18, outP 1.47, pitchRate 1.41,
+# bank 2.49, yawRate 3.39, azErr 3.62, rollRate 4.88, outY 5.46, aoa 44.3.
+PRINT_QUANTUM = {"off": 0.01, "azErr": 0.01, "elevErr": 0.01, "aoa": 0.01, "bank": 0.1,
+                 "targetBank": 0.1, "outP": 0.001, "outR": 0.001, "outY": 0.001,
+                 "pitchRate": 0.001, "rollRate": 0.001, "yawRate": 0.001, "rollRateF": 0.001}
+
+# The subset of WOBBLE_SIGNALS that survives being asked a SETTLED-WINDOW question -- which is a
+# different question from the one WOBBLE_SIGNALS answers and needs a different signal list. This
+# module's own death-wobble scan is amplitude-gated (an outR episode must clear a 0.05 dead-band = 50
+# quanta, and the FAIL rule wants pp > 1.2, i.e. rail-to-rail), so quantisation cannot reach it. A
+# settled-tail oscillation estimator is the opposite regime by construction: it looks at what is left
+# AFTER the transient, which on these cards is a few print steps of stick.
+#   * outR is OUT and `rollRate` replaces it -- the achieved roll rate is a physical measurement,
+#     4x better resolved (21 distinct codes per settled window against outR's 6), and it is the one
+#     signal that moved coherently in R44's crossed-q pair.
+#   * outP is OUT with no replacement: `pitchRate` measures 1.41 quanta, no better than outP's 1.47,
+#     so the pitch axis has NO adequately resolved settled-window signal. It is not left uncovered --
+#     `aoa` (44 quanta) is in this list and pitch_authority() answers the relay question.
+#   * outY STAYS: 5.46 quanta, the best-resolved stick channel in the corpus, because these cards put
+#     the command in the yaw channel (median |outY| 0.032 against |outR| 0.004).
+# scorecard.wobble_scan gates each of these per-segment on PRINT_QUANTUM anyway; this list is the
+# static half of the same judgement, so a signal that can never resolve is never asked.
+SETTLED_SIGNALS = (("bank", 3.0), ("azErr", 0.5), ("rollRate", 0.05), ("outY", 0.05), ("aoa", 2.0))
+
+
 def analyze(path):
     meta, rows = load(path)
     cfg = meta["cfg"]
     if not rows:
         print(f"{path}: no data rows")
+        return
+    if len(rows) < MIN_ROWS:
+        dur = rows[-1]["t"] - rows[0]["t"]
+        print(f"\n=== {path}")
+        print(f"  UNUSABLE: only {len(rows)} sample(s) ({dur:.1f}s) -- too few to score (aborted "
+              f"or truncated capture). Use --digest to see what little was recorded.")
         return
     human = [r for r in rows if r.get("engP", 0) or r.get("engR", 0) or r.get("engY", 0)]
     auto = [r for r in rows if not (r.get("engP", 0) or r.get("engR", 0) or r.get("engY", 0))]
@@ -335,11 +451,27 @@ def analyze(path):
         print(f"  config: {' '.join(w for w in cfg.split() if w.startswith(('law=', 'trGain', 'leadT', 'aOffP')))}")
 
     rail = 100.0 * sum(1 for x in col("outR") if abs(x) > 0.98) / max(1, len(auto))
-    tb = col("targetBank")
-    clamp = 100.0 * sum(1 for x in tb if abs(x) >= 71.5) / max(1, len(auto))
-    lag, lc = xcorr_lag(ts, tb, col("bank"))
-    print(f"  outR railed {rail:.1f}%   targetBank clamped {clamp:.1f}%   "
-          f"bank lags targetBank by {lag:.2f}s (corr {lc:+.2f})   corr(azErr,bankTR) {corr(col('azErr'), col('bankTR')):+.2f}")
+    # `targetBank` (CSV column 8) IS DEAD and both numbers below used to be read off it. It is the
+    # REMOVED Legacy law's bank target: ApplyEvolvedLegacy, the only fixed-wing law since v0.60, has
+    # never read it and flies its own tBankE = Clamp(bankTR, +-MaxBank). scorecard.py moved
+    # bankClampActivePct off it in R40 and its docstring carries the full three-regime proof that it
+    # is NOT SALVAGEABLE; this is the same repair on this module's two remaining readers.
+    #   * the clamp % is the DEMAND against the wall, so it reads `bankTR` -- the same quantity
+    #     scorecard's bankClampActivePct reads, deliberately, so the two tools cannot disagree.
+    #   * the actuation lag is bank against the target actually flown, so it reads `tBankE`.
+    # Measured disagreement on the corpus (rows where the dead column reads < 0.05 deg while the live
+    # one reads > 2 deg): place-390 17.6%, place-375 11.7%, oblique-6-c 11.3%, place-300 7.7%. That
+    # artefact is what ledger O11's "the outer loop was commanding nothing" was reading.
+    have = set(rows[0])
+    tgt = "tBankE" if "tBankE" in have else None
+    dem = "bankTR" if "bankTR" in have else None
+    clamp = (100.0 * sum(1 for x in col(dem) if abs(x) >= 71.5) / max(1, len(auto))) if dem else None
+    lag, lc = xcorr_lag(ts, col(tgt), col("bank")) if tgt else (None, None)
+    print(f"  outR railed {rail:.1f}%   "
+          + (f"bankTR clamped {clamp:.1f}%   " if clamp is not None else "bankTR clamped n/a   ")
+          + (f"bank lags tBankE by {lag:.2f}s (corr {lc:+.2f})   " if lag is not None
+             else "bank-vs-tBankE lag n/a (pre-tBankE capture)   ")
+          + f"corr(azErr,bankTR) {corr(col('azErr'), col('bankTR')):+.2f}")
 
     corner = fbw_corner(meta)
     mf = model_fit(auto, corner)
@@ -381,11 +513,27 @@ def analyze(path):
     # hard maneuvering, the same pp on a 10-deg Trainer is a blow-through cycle.
     lim = fbw.get("alphaLimiter") or 12.5
     pump_pp, pump_pp_grow = max(10.0, 0.8 * lim), max(6.0, 0.5 * lim)
-    for name, dead in (("bank", 3.0), ("azErr", 0.5), ("outR", 0.05), ("outP", 0.05), ("outY", 0.05),
-                       ("aoa", 2.0)):
+    # WHICH HEMISPHERE (v1.0.5). The one sustained roll limit cycle the corpus has actually measured
+    # is below-nose (`LAW-LEDGER.md` S5: `elDn` mean off 6.92 deg, bank half-amplitude 43.3 deg, while
+    # the LARGER mirror step `elUp` settles to 0.03 deg / 0.11 deg). Nothing in this tool read
+    # `elevErr` before, so every episode it has ever printed was hemisphere-anonymous -- and X35's
+    # retraction of "unstable at every speed" leaves hemisphere as the live discriminator. One column
+    # on the episode line; no verdict keys off it, because which way that cuts is still open.
+    # Sign convention VERIFIED against the card's own mirror pair rather than assumed: on
+    # fixedwing-v2 R19-01, `elDn` reads elevErr mean -11.02 (min -49.98) and `elUp` +3.52 (max
+    # +29.94), so NEGATIVE elevErr = marker BELOW the nose (`ChaseController.cs:1847`, asin of
+    # aimDir.y). Reported as a PERCENTAGE, not a below/above label, because this module's episode
+    # scan is whole-file and its windows straddle segment boundaries -- a categorical label would
+    # average two hemispheres into one confident wrong word. ~50% means the episode crossed.
+    elev = col("elevErr")
+    def hemi(t0, t1):
+        w = [e for ti, e in zip(ts, elev) if t0 <= ti <= t1]
+        return 100.0 * sum(1 for e in w if e < 0) / len(w) if w else 0.0
+    for name, dead in WOBBLE_SIGNALS:
         for e in episodes(ts, col(name), dead):
             print(f"  [{name:7s}] t {e['t0']:.1f}-{e['t1']:.1f} ({e['dur']:.1f}s) "
-                  f"{e['freq']:.2f} Hz  pp {e['pp']:.2f}  {e['trend']}")
+                  f"{e['freq']:.2f} Hz  pp {e['pp']:.2f}  {e['trend']}  "
+                  f"below-nose {hemi(e['t0'], e['t1']):3.0f}%")
             # 0.25-2.0 Hz: covers both the v0.50 slow outer-loop cycle (0.3-0.85 Hz) and the
             # v0.51 fast lead-loop chatter (1.1-1.35 Hz) — the band was 0.3-0.9 and PASSed the latter.
             if name == "bank" and e["dur"] > 4 and 0.25 <= e["freq"] <= 2.0 and e["pp"] > 15:
@@ -482,25 +630,38 @@ def seg_flips(segrows):
     return out
 
 
-def load_anomalies(csv_path, session):
-    """[(t, type, line)] from the sibling anomaly log, filtered to rec=<this csv>."""
-    if not session:
-        return []
-    logp = os.path.join(os.path.dirname(csv_path), f"mouseaim-anomalies-{session}.log")
+def load_anomalies(csv_path):
+    """[(t, type, line)] from the sibling anomaly log(s), filtered to rec=<this csv>.
+
+    Scans every mouseaim-anomalies-*.log next to the CSV instead of rebuilding one filename from
+    the header's session id. That reconstruction was simply wrong -- the log is named
+    mouseaim-anomalies-<version>-R<run>-<session>.log, so f"mouseaim-anomalies-{session}.log" never
+    matched, the open() raised OSError, and the bare `except OSError: pass` turned it into "0
+    anomalies" on every digest ever run. R18 had 11 anomalies per run and the digest showed none.
+    Every anomaly line already carries rec=<csv>, so that filter is the ground truth and the
+    filename does not have to be one. A directory listing is also cheap next to parsing the CSV.
+    """
+    d = os.path.dirname(csv_path) or "."
     base = os.path.basename(csv_path)
-    out = []
     try:
-        with open(logp) as f:
-            for line in f:
-                if f"rec={base}" not in line:
-                    continue
-                mt = re.search(r"\bt=([\d.]+)", line)
-                mty = re.search(r"\[anomaly[^\]]*\]\s+(\S+)", line)
-                if mt:
-                    out.append((float(mt.group(1)), mty.group(1) if mty else "anomaly", line.strip()))
+        names = sorted(n for n in os.listdir(d)
+                       if n.startswith("mouseaim-anomalies-") and n.endswith(".log"))
     except OSError:
-        pass
-    return out
+        return []
+    out = []
+    for name in names:
+        try:
+            with open(os.path.join(d, name)) as f:
+                for line in f:
+                    if f"rec={base}" not in line:
+                        continue
+                    mt = re.search(r"\bt=([\d.]+)", line)
+                    mty = re.search(r"\[anomaly[^\]]*\]\s+(\S+)", line)
+                    if mt:
+                        out.append((float(mt.group(1)), mty.group(1) if mty else "anomaly", line.strip()))
+        except OSError:
+            continue
+    return sorted(out)
 
 
 def digest(path):
@@ -509,7 +670,7 @@ def digest(path):
         print(f"{path}: no data rows")
         return
     segs = segment(rows)
-    anoms = load_anomalies(path, meta["session"])
+    anoms = load_anomalies(path)
     fbw = fbw_params(meta)
     t0, tN = rows[0]["t"], rows[-1]["t"]
     events = sorted([(t, f"# cfg {txt}") for t, txt in meta["cfg_marks"]]
@@ -549,6 +710,25 @@ def digest(path):
     rate = len(rows) / (tN - t0) if tN > t0 else 0.0
     print(f"footer: {tN - t0:.1f}s, {len(rows)} samples (~{rate:.0f} Hz), "
           f"{len(segs)} segments, {len(anoms)} anomalies")
+
+
+# Past this many CSVs --digest prints digest_brief() instead: ~30 lines x 300 captures is 9000 lines
+# of mostly steady state, which is the same unreadability the digest exists to fix, one level up.
+DETAIL_FILE_LIMIT = 10
+
+
+def digest_brief(path):
+    """One line per capture — the digest's own footer, without the timeline. Enough to spot the odd
+    one out in a batch (a short run, a missing anomaly-free run, a wrong sample rate); re-run
+    --digest on just that file, or with --verbose, for the timeline."""
+    _meta, rows = load(path)
+    if not rows:
+        print(f"  {os.path.basename(path):<58} no data rows")
+        return
+    t0, tN = rows[0]["t"], rows[-1]["t"]
+    rate = len(rows) / (tN - t0) if tN > t0 else 0.0
+    print(f"  {os.path.basename(path):<58} {tN - t0:6.1f}s {len(rows):6d} rows (~{rate:2.0f} Hz) "
+          f"{len(segment(rows)):3d} seg {len(load_anomalies(path)):3d} anom")
 
 
 def selftest():
@@ -612,6 +792,86 @@ def selftest():
     total, _, _, _ = buzz_scan(rows)
     assert total > 0.0  # buzz on both sides of the gap still found
 
+    # v0.71/defect-2 regression: a test-card capture's segTag column used to make load() drop EVERY
+    # row -- float(r["segTag"]) raised on literally every row, since segTag wasn't in the old
+    # ("phase","controlLaw") tuple, so --digest and the default score both printed "no data rows"
+    # for every card capture. Write a REAL tiny CSV (the bug is in how load() reads a file end to
+    # end, not just in the dict comprehension in isolation) and confirm both rows now survive.
+    import tempfile, io, contextlib
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", newline="") as f:
+            f.write("# mouseaim recording v0.71.0 run=R1 rec=1 session=test\n"
+                    "t,off,segTag\n"
+                    "0.0,1.5,arm\n"
+                    "0.1,1.2,az10\n")
+        _, rows = load(tmp_path)
+        assert len(rows) == 2, rows                                  # neither row silently dropped
+        assert rows[0]["segTag"] == "arm" and rows[1]["segTag"] == "az10", rows
+        assert isinstance(rows[0]["off"], float) and rows[0]["off"] == 1.5, rows
+    finally:
+        os.remove(tmp_path)
+
+    # A row that's genuinely corrupt (non-numeric value in a REAL numeric column) is still dropped
+    # -- that part was never wrong -- but must now be COUNTED and warned about, not silently eaten.
+    fd2, tmp_path2 = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd2, "w", newline="") as f:
+            f.write("t,off,segTag\n0.0,1.5,arm\n0.1,notanumber,az10\n0.2,1.1,az10\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            _, rows2 = load(tmp_path2)
+        assert len(rows2) == 2, rows2                    # the one bad row dropped, the other two kept
+        assert "WARNING" in buf.getvalue() and "1/3" in buf.getvalue(), buf.getvalue()
+    finally:
+        os.remove(tmp_path2)
+
+    # The anomaly sidecar is found by SCANNING, not by rebuilding its name from session= (which was
+    # wrong for every real capture -- see load_anomalies). Lay out a directory the way the mod
+    # actually writes one: the log name carries version+run BEFORE the session id, and holds a line
+    # for a different recording that must not leak into this one's digest.
+    tmpd = tempfile.mkdtemp()
+    try:
+        csvp = os.path.join(tmpd, "mouseaim-rec-v0.9.0-R7-02-fixedwing-v2-20260101-120500.csv")
+        with open(csvp, "w", newline="") as f:
+            f.write("# mouseaim recording v0.9.0 run=R7 rec=2 session=20260101-120000\n"
+                    "t,off,segTag\n0.0,1.5,arm\n")
+        with open(os.path.join(tmpd, "mouseaim-anomalies-v0.9.0-R7-20260101-120000.log"), "w") as f:
+            f.write(f"[anomaly] overshoot t=12.5 rec={os.path.basename(csvp)} detail\n"
+                    "[anomaly] over-roll t=99.0 rec=some-other-run.csv detail\n")
+        got = load_anomalies(csvp)
+        assert len(got) == 1, got                        # the other recording's line stayed out
+        assert got[0][0] == 12.5 and got[0][1] == "overshoot", got
+
+        # digest_brief: the >10-capture substitute for a ~30-line timeline. ONE line, and it must
+        # still carry the numbers a batch is scanned for (duration/rows/segments/anomalies) --
+        # a roll-up that drops the anomaly count would hide the one file worth opening.
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            digest_brief(csvp)
+        line = buf2.getvalue().rstrip("\n")
+        assert line.count("\n") == 0, line
+        assert "1 rows" in line and "1 seg" in line and "1 anom" in line, line
+    finally:
+        import shutil; shutil.rmtree(tmpd)
+
+    # v0.74 R15 regression: a run aborted seconds in leaves a handful of rows of pure entry-
+    # teleport transient (observed: spd 250->669, aoa swinging to -84 deg, all inside 8 rows / 0.4s).
+    # analyze() used to compute a confident PASS/FAIL straight off that garbage; it must now refuse.
+    fd3, tmp_path3 = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd3, "w", newline="") as f:
+            f.write("t,off,fbwTgtPR,fbwPR\n"
+                    + "".join(f"{i * 0.067:.3f},1.0,0.2,-0.2\n" for i in range(8)))  # 8 rows: < MIN_ROWS
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            analyze(tmp_path3)
+        out = buf.getvalue()
+        assert "UNUSABLE" in out and "8 sample" in out, out
+        assert "VERDICT" not in out, out                  # no PASS/FAIL computed from 8 rows
+    finally:
+        os.remove(tmp_path3)
+
     print("selftest OK")
 
 
@@ -619,11 +879,20 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    verbose = "--verbose" in args
+    args = [a for a in args if a != "--verbose"]
     if args[0] == "--selftest":
         selftest()
     elif args[0] == "--digest":
-        for p in args[1:]:
-            digest(p)
+        paths = args[1:]
+        if verbose or len(paths) <= DETAIL_FILE_LIMIT:
+            for p in paths:
+                digest(p)
+        else:
+            print(f"{len(paths)} captures (over DETAIL_FILE_LIMIT={DETAIL_FILE_LIMIT}) -- one line "
+                  f"each; re-run with --verbose, or on a subset, for the full timelines.")
+            for p in paths:
+                digest_brief(p)
     else:
         for p in args:
             analyze(p)

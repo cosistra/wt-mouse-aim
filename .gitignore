@@ -25,9 +25,10 @@ plans/
 .claude/worktrees/
 
 # Flight recordings + python cache (local debug data). Capture folders under debugtests/ are
-# per-session dumps (CSV + LogOutput.log + anomaly logs) — local only. The tools at debugtests/
-# root ARE committed: check-architecture.py (release gate + Stop hook), analyze-wobble.py,
-# replay-pitcheff.py.
+# per-session dumps (CSV + LogOutput.log + anomaly logs) — local only, and that includes
+# debugtests/archive/ (index-captures.py --archive). The tools at debugtests/ root ARE committed:
+# check-architecture.py (release gate + Stop hook), analyze-wobble.py, scorecard.py and the rest.
+# (replay-pitcheff.py used to be named here; deleted in v0.96 — pEff is a CSV column now.)
 debugtests/*/
 debugtests/*.csv
 __pycache__/

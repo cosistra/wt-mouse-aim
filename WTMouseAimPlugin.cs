@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
@@ -19,9 +20,23 @@ namespace NuclearOptionMouseAim
     {
         public const string PluginGuid    = "com.no.wtmouseaim";
         public const string PluginName    = "WT Mouse Aim";
-        public const string PluginVersion = "0.68.0";
+        public const string PluginVersion = "1.0.5";
 
         internal static ManualLogSource Log;
+
+        // v1.0.1 — EVERY NUMBER THE MOD WRITES INTO AN ARTIFACT GOES THROUGH HERE (or through the
+        // scoped swap in ManeuverRecorder.Sample). String interpolation formats with the AMBIENT
+        // culture, and nothing in this mod ever set one, so on a comma-decimal locale (ro/de/fr/es/…)
+        // the recorder wrote "0,22" into a comma-DELIMITED CSV and destroyed its own file — a posted
+        // capture parsed as 0 rows, 1652/1652 dropped. The anomaly log, the '# config' header and the
+        // '# fbw' header had it too, so a locale user could not hand in a usable artifact at all.
+        // See debugtests/DISCORD-V68-TRIAGE.md §1 for the field bundle that surfaced it.
+        //
+        // Deliberately NOT CultureInfo.DefaultThreadCurrentCulture in Awake, which would be a one-line
+        // fix: that culture belongs to the whole Unity process, and flipping it would restyle the
+        // GAME's own HUD/menu numbers for every non-English player. A mod does not mutate process
+        // state it does not own. The cost of doing it honestly is this wrapper at each write site.
+        internal static string Inv(System.FormattableString fs) => System.FormattableString.Invariant(fs);
 
         // Session id (v0.44): one short wallclock-derived id per game session, stamped into the startup
         // log line, every recording CSV header and the anomaly file header — the human-visible join key
@@ -78,11 +93,20 @@ namespace NuclearOptionMouseAim
             harmony.PatchAll(typeof(CockpitCameraPatch));
             harmony.PatchAll(typeof(CameraOrbitPatch));
             harmony.PatchAll(typeof(CameraSwitchStatePatch));
+            // The drone seam is patched UNCONDITIONALLY, even with Drone/DroneEnabled off: the flag is
+            // live-tunable from F1, so a conditional patch would need a restart to take effect. The
+            // postfix costs one integer compare per aircraft per fixed step while no drone is alive.
+            harmony.PatchAll(typeof(TestDronePatch));
             // ponytail: the load line is a LOAD LINE — version + keys + where the history lives.
             // (It used to mirror the entire changelog; that lives in CHANGELOG.md now.)
             Logger.LogInfo($"{PluginName} v{PluginVersion} loaded — WT-style mouse-aim instructor (EvolvedLegacy law). "
                 + $"Keys: [{Cfg.ToggleKey.Value}] master on/off, [{Cfg.FlyLevelKey.Value}] fly level, "
                 + $"[{Cfg.RecordKey.Value}] maneuver recorder, F1 config, RMB free-look. "
+                // Card keys belong here too: CLAUDE.md promises this line lists every active binding.
+                + $"Cards: [{Cfg.ScenarioRunKey.Value}] run, [{Cfg.ScenarioRecordKey.Value}] record, "
+                + $"[{Cfg.ScenarioAbortKey.Value}] abort, [{Cfg.ScenarioEntryKey.Value}] on-condition. "
+                + $"Drones ({(Cfg.DroneEnabled.Value ? "on" : "off")}): [{Cfg.DroneSpawnKey.Value}] spawn, "
+                + $"[{Cfg.DroneDespawnKey.Value}] despawn all. "
                 + "Version history: CHANGELOG.md.");
             Logger.LogInfo($"[session] run R{RunIndex}  id {SessionId}  ({RunTag}) — recordings, the anomaly file and this log share this id for cross-referencing.");
         }
@@ -103,6 +127,13 @@ namespace NuclearOptionMouseAim
                 _toastOn = Cfg.Enabled.Value;
             }
 
+            // FRAME TIME, sampled here because here is the only place it is real: Time.unscaledDeltaTime
+            // returns fixedUnscaledDeltaTime (a constant) when read from FixedUpdate, which is where
+            // this lived until v0.92.1 and why the recorder's `frameMs` column held one value for a
+            // whole 352-capture batch. Unconditional, like the AimRig call below — it is a recorder
+            // signal, not a drone signal, and the harness's own gate is inside it.
+            TestDrone.SampleFrameTime();
+
             AimRig.Update();
 
             // Fly Level toggle (v0.24). Edge-triggered; needs an aircraft to latch the heading onto.
@@ -110,19 +141,51 @@ namespace NuclearOptionMouseAim
                 Input.GetKeyDown(Cfg.FlyLevelKey.Value) &&
                 AimRig.TryGetContext(out var ac, out _) && !ac.disabled)
             {
-                ChaseController.ToggleFlyLevel(ac);
+                ChaseController.For(ac).ToggleFlyLevel(ac);
             }
 
             // Maneuver recorder toggle (v0.35). Ungated by aircraft/Enabled so it can always be stopped;
             // it only writes rows while the chase is actually flying (Sample is called from Apply).
             if (Input.GetKeyDown(Cfg.RecordKey.Value))
             {
-                bool on = ManeuverRecorder.Toggle();
+                bool on = ManeuverRecorder.ToggleLocal();   // v0.86: the LOCAL player's recorder
                 _toastUntil = Time.time + 2f;
                 _toastOn = on; // reuse the toast: cyan "REC" on, amber off (label switched in OnGUI)
                 _toastRec = true;
             }
             else if (Time.time >= _toastUntil) { _toastRec = false; }
+
+            // Scenario player (M1). Key EDGES are a per-frame thing, so they're read here; everything
+            // that has to be deterministic (the card clock, the demand write) happens on the fixed
+            // step inside ScenarioPlayer.Tick. Ungated by Enabled so a running card can always be
+            // stopped, and idle unless one of these is pressed.
+            if (Input.GetKeyDown(Cfg.ScenarioRunKey.Value))    ScenarioPlayer.ToggleSuite();
+            if (Input.GetKeyDown(Cfg.ScenarioRecordKey.Value)) ScenarioPlayer.ToggleRecord();
+            if (Input.GetKeyDown(Cfg.ScenarioAbortKey.Value))  ScenarioPlayer.AbortLocal("abort key");
+            if (Input.GetKeyDown(Cfg.ScenarioEntryKey.Value))  ScenarioPlayer.ForceEntryNow();
+
+            // Uncrewed test drones (v0.81, phase 1). Gated on DroneEnabled so the keys are DEAD, not
+            // merely harmless, while the harness is off — F2/F9 are otherwise perfectly ordinary keys
+            // and nobody expects a flight-control mod to consume them.
+            if (Cfg.DroneEnabled.Value)
+            {
+                if (Input.GetKeyDown(Cfg.DroneSpawnKey.Value))   TestDrone.RequestLaunch();
+                if (Input.GetKeyDown(Cfg.DroneDespawnKey.Value)) TestDrone.DespawnAll();
+            }
+
+            // Sandbox (v0.95): put the OPERATOR airborne. Deliberately OUTSIDE the DroneEnabled gate
+            // above — this is for hand-flying the law, not part of the harness, and needing to arm
+            // the drone subsystem to use it would be a lie about what it does.
+            if (Input.GetKeyDown(Cfg.SandboxKey.Value)) PlayerSpawn.Trigger();
+        }
+
+        // The mod's only fixed-step hook that exists independently of an aircraft. The drone harness
+        // needs one: its launch stagger has to be counted on the same clock the run is measured on
+        // (not a coroutine, and not the render frame), and with zero drones alive there is no pilot of
+        // ours for the drone seam's per-pilot postfix to fire on. Also where frame time is sampled.
+        private void FixedUpdate()
+        {
+            TestDrone.FixedTick();
         }
 
         // True while the active toast is a recorder toast (so OnGUI labels it REC/REC OFF, not ON/OFF).
@@ -130,6 +193,12 @@ namespace NuclearOptionMouseAim
 
         private void OnGUI()
         {
+            // v0.86: the recorder and the card player are per-aircraft now, so the HUD reads the LOCAL
+            // player's — never a drone's, exactly as it already did for ChaseController.Player. Both are
+            // null until he has an aircraft, so every read below is null-guarded.
+            var rec  = ManeuverRecorder.Player;
+            var card = ScenarioPlayer.Player;
+
             // Master-toggle toast — drawn BEFORE the overlay/enabled guard so it confirms an OFF flip too.
             if (Time.time < _toastUntil)
             {
@@ -137,8 +206,9 @@ namespace NuclearOptionMouseAim
                 // REC/master toasts are cyan-on / amber-off.
                 GUI.color = _toastOn ? new Color(0.3f, 0.9f, 1f, 0.95f) : new Color(1f, 0.7f, 0.3f, 0.95f);
                 const float tw = 300f;
-                string msg = _toastRec ? (_toastOn ? $"MouseAim  REC START  {ManeuverRecorder.Tag}"
-                                                   : $"MouseAim  REC STOP  {ManeuverRecorder.Tag}")
+                string tag = rec != null ? rec.Tag : "";
+                string msg = _toastRec ? (_toastOn ? $"MouseAim  REC START  {tag}"
+                                                   : $"MouseAim  REC STOP  {tag}")
                                        : (_toastOn ? "WT MouseAim  ON"      : "WT MouseAim  OFF");
                 GUI.Label(new Rect((Screen.width - tw) * 0.5f, Screen.height * 0.12f, tw, 24f), msg);
                 GUI.color = tc;
@@ -146,15 +216,42 @@ namespace NuclearOptionMouseAim
 
             // Persistent recording indicator — drawn BEFORE every gate (even on the clean HUD / mod-off)
             // so a running capture is always visible. Top-centre, red, with elapsed time + sample count.
-            if (ManeuverRecorder.IsRecording)
+            if (rec != null && rec.IsRecording)
             {
                 var rc = GUI.color;
                 GUI.color = new Color(1f, 0.25f, 0.2f, 0.95f);
                 const float rw = 300f;
                 GUI.Label(new Rect((Screen.width - rw) * 0.5f, Screen.height * 0.08f, rw, 24f),
-                    $"● REC  {ManeuverRecorder.Tag}  {ManeuverRecorder.Elapsed:0.0}s  ({ManeuverRecorder.Samples})");
+                    $"● REC  {rec.Tag}  {rec.Elapsed:0.0}s  ({rec.Samples})");
                 GUI.color = rc;
             }
+
+            // Scenario NOTICE — why a card refused to start, or that it just moved the aircraft onto
+            // its entry condition. Drawn before every gate (and whether or not a card is running,
+            // since the common case is that one DIDN'T start): pressing the run key must never look
+            // like pressing a dead key. Amber, just under the card indicator.
+            string notice = ScenarioPlayer.Notice;
+            if (!string.IsNullOrEmpty(notice))
+            {
+                var nc = GUI.color;
+                GUI.color = new Color(1f, 0.75f, 0.2f, 0.95f);
+                const float nw = 640f;
+                GUI.Label(new Rect((Screen.width - nw) * 0.5f, Screen.height * 0.09f, nw, 24f), notice);
+                GUI.color = nc;
+            }
+
+            // Scenario/test-card indicator — like the REC indicator, drawn BEFORE every gate so a
+            // running card is visible even on the clean HUD: which card, which segment, time left.
+            if (card != null && card.Active)
+            {
+                var cc = GUI.color;
+                GUI.color = new Color(0.5f, 1f, 0.5f, 0.95f);
+                const float cw = 520f;
+                GUI.Label(new Rect((Screen.width - cw) * 0.5f, Screen.height * 0.05f, cw, 24f), card.HudLine);
+                GUI.color = cc;
+            }
+
+            DrawRunBoard();
 
             if (!Cfg.ShowOverlay.Value || !Cfg.Enabled.Value)
                 return;
@@ -162,6 +259,12 @@ namespace NuclearOptionMouseAim
                 return;
             if (ac.disabled) // plane destroyed/disabled — nothing to aim, so draw nothing
                 return;
+
+            // v0.82: the instructor is per-aircraft now, so the HUD reads the LOCAL PLAYER's
+            // controller rather than a set of statics. Null until it has flown one fixed step (and
+            // after a respawn), so every read below carries its pre-0.82 static default as the
+            // fallback — the overlay looks identical, it just can no longer show a drone's numbers.
+            var chase = ChaseController.Player;
 
             // G-LOC fade-to-black (v0.55): progressively grey the whole screen as the pilot's G-tolerance
             // drops toward the 0.2 blackout point, so third-person pilots (who get none of the game's
@@ -171,7 +274,7 @@ namespace NuclearOptionMouseAim
             if (Cfg.GLocFadeEnabled.Value)
             {
                 // t = 0 at the onset, 1 at the 0.2 blackout point (InverseLerp clamps and stays 1 below it).
-                float ft = Mathf.InverseLerp(Cfg.GLocFadeOnset.Value, 0.2f, ChaseController.PilotStrength);
+                float ft = Mathf.InverseLerp(Cfg.GLocFadeOnset.Value, 0.2f, chase != null ? chase.PilotStrength : 1f);
                 float alpha = ft * Cfg.GLocFadeMaxAlpha.Value;
                 if (alpha > 0f)
                 {
@@ -220,20 +323,20 @@ namespace NuclearOptionMouseAim
             if (Cfg.ShowDebugHud.Value)
             {
                 string ctrl = !Cfg.WriteControl.Value ? "overlay-only"
-                            : ChaseController.IsFlying ? "FLYING (mod owns stick)"
+                            : chase != null && chase.IsFlying ? "FLYING (mod owns stick)"
                             : "native";
-                string spd = ChaseController._collective
-                    ? $"spd={ChaseController._speed:0} m/s (fwd={ChaseController._vFwd:0}, heliBlend={ChaseController._heliBlend:0.00})"
-                    : $"spd={ChaseController._speed:0} m/s";
+                string spd = chase != null && chase._collective
+                    ? $"spd={chase._speed:0} m/s (fwd={chase._vFwd:0}, heliBlend={chase._heliBlend:0.00})"
+                    : $"spd={(chase != null ? chase._speed : 0f):0} m/s";
                 GUI.Label(new Rect(12f, 12f, 560f, 22f),
                     $"WT MouseAim  off={off:0.0}°  cone={half:0}°  law=EL  [{ctrl}]  {spd}");
                 // Instructor's live stick command (what the mod is telling the plane, before manual override).
                 GUI.Label(new Rect(12f, 30f, 560f, 22f),
-                    $"instructor  pitch={ChaseController.LastPitch:+0.00;-0.00;0.00}  " +
-                    $"yaw={ChaseController.LastYaw:+0.00;-0.00;0.00}  roll={ChaseController.LastRoll:+0.00;-0.00;0.00}");
+                    $"instructor  pitch={(chase != null ? chase.LastPitch : 0f):+0.00;-0.00;0.00}  " +
+                    $"yaw={(chase != null ? chase.LastYaw : 0f):+0.00;-0.00;0.00}  roll={(chase != null ? chase.LastRoll : 0f):+0.00;-0.00;0.00}");
             }
             // Fly Level indicator — distinct cyan so it's obvious the marker is being ignored on purpose.
-            if (ChaseController.FlyLevelActive)
+            if (chase != null && chase.FlyLevelActive)
             {
                 GUI.color = new Color(0.3f, 0.9f, 1f, 0.95f);
                 GUI.Label(new Rect(12f, 48f, 560f, 22f),
@@ -254,10 +357,10 @@ namespace NuclearOptionMouseAim
                         $"ANOMALY #{ChaseController.LastAnomalyIndex}  {ChaseController.LastAnomalyType}");
                 }
                 // Live phase of the instructor's plan (LEVEL/FINE/ALIGN/PULL/TURN/HOLD) — white, under the readout.
-                if (ChaseController.IsFlying && !string.IsNullOrEmpty(ChaseController.LastPhase))
+                if (chase != null && chase.IsFlying && !string.IsNullOrEmpty(chase.LastPhase))
                 {
                     GUI.color = Color.white;
-                    GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {ChaseController.LastPhase}");
+                    GUI.Label(new Rect(12f, 84f, 560f, 22f), $"PHASE: {chase.LastPhase}");
                 }
             }
             GUI.color = prev;
@@ -266,7 +369,7 @@ namespace NuclearOptionMouseAim
             // stick input (PilotPlayerState: pilotStrength < 0.2), so the mod can't fly either. Surface it
             // discreetly in amber, centred near the top, so the loss of control is explained rather than
             // feeling like a mod bug.
-            if (ChaseController.PilotStrength < 0.2f)
+            if (chase != null && chase.PilotStrength < 0.2f)
             {
                 var pc = GUI.color;
                 GUI.color = new Color(1f, 0.55f, 0.1f, 0.9f); // amber/orange warning
@@ -278,6 +381,205 @@ namespace NuclearOptionMouseAim
                 GUI.color = pc;
             }
         }
+
+        // =============================================================================================
+        // HARNESS RUN BOARD (v0.90). An unattended drone batch is 20+ minutes of wall clock whose only
+        // progress signal was `[card]` lines in LogOutput.log — so "is it still going?" and "how long
+        // left?" meant alt-tabbing to a text file. This is that answer on screen, plus the PREFLIGHT of
+        // what WILL fly, which is the more valuable half: every setup mistake this harness can make
+        // (no card ticked, the Drone knobs disagreeing with the card) is invisible until after the
+        // launch, and then costs the whole batch.
+        //
+        // DRAWN PRE-GATE, i.e. before ShowOverlay/Enabled and before the local-aircraft resolve. That
+        // is not laziness about where to put it: the operator watching a batch is usually in no
+        // aircraft at all (ejected, spectating, sitting in the map screen), which is exactly when
+        // every gate below would have returned already.
+        //
+        // Top-LEFT, below y=110: the other pre-gate items are top-CENTRE, and 110 clears the
+        // post-gate debug ladder (rows at y=12..84, 22 high) so the two never overlap when the
+        // operator is flying with ShowDebugHud on.
+        private const float BoardX = 12f, BoardTop = 110f, BoardW = 780f, BoardRow = 18f;
+        // Rows the panel spends on things that are not a lane: the header, plus the "...and N more"
+        // line a truncation would cost. Fed to ScenarioPlayer.BoardRows, which does the fitting.
+        private const int   BoardChrome = 2;
+        // Pixels kept clear at the bottom of the screen so the last row is never flush with the edge.
+        private const float BoardBottomPadPx = 24f;
+
+        // Reused, not allocated per call: OnGUI runs at least twice a frame (layout + repaint).
+        private static readonly List<ScenarioPlayer> _board = new List<ScenarioPlayer>();
+
+        private static void DrawRunBoard()
+        {
+            // The whole cost of this feature when the harness is not in use: one bool read. Deliberately
+            // NOT gated on ShowDebugHud as well — the board is the harness's only progress instrument,
+            // and an operator who ticked DroneEnabled has already said he is running a batch.
+            if (!Cfg.DroneEnabled.Value) return;
+
+            ScenarioPlayer.CollectRunning(_board);
+            if (_board.Count > 0) DrawFlying();
+            else                  DrawPreflight();
+        }
+
+        private static readonly Color BoardGreen = new Color(0.5f, 1f, 0.5f, 0.95f);   // running, matches the card indicator
+        private static readonly Color BoardAmber = new Color(1f, 0.75f, 0.2f, 0.95f);  // warning / idle, matches Notice
+        private static readonly Color BoardDim   = new Color(0.72f, 0.72f, 0.72f, 0.9f);
+
+        // Dim backing panel, sized to the row count — IMGUI text over a bright sky is unreadable
+        // otherwise, and this one is read at a glance from across the room.
+        private static void BoardPanel(int rows)
+        {
+            var prev = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.45f);
+            GUI.DrawTexture(new Rect(BoardX - 6f, BoardTop - 4f, BoardW + 12f, rows * BoardRow + 8f), _px);
+            GUI.color = prev;
+        }
+
+        private static void BoardLine(int row, Color col, string text)
+        {
+            var prev = GUI.color;
+            GUI.color = col;
+            GUI.Label(new Rect(BoardX, BoardTop + row * BoardRow, BoardW, BoardRow + 4f), text);
+            GUI.color = prev;
+        }
+
+        private static void DrawFlying()
+        {
+            // AUTO-GROW TO THE FLEET (v1.0.2). This was a flat cap of 8, so lanes 9..16 of a full
+            // batch — the size CountOf clamps to, and the size the shipped fleet cards fly — lived
+            // permanently under "...and N more" on the only instrument that says whether they are
+            // still flying. The cap is now the SCREEN and nothing else; BoardRows does the arithmetic
+            // and debugtests/test-board-math.py asserts 16 lanes are never truncated on a real one.
+            int n = _board.Count;
+            int shown = ScenarioPlayer.BoardRows(
+                n, Screen.height - BoardTop - BoardBottomPadPx, BoardRow, BoardChrome);
+            BoardPanel(1 + shown + (n > shown ? 1 : 0));
+
+            // Header aggregates over the MAX: the batch is finished when the slowest aircraft is, and
+            // the drones are launched on a stagger, so the leader's ETA would read as "nearly done"
+            // with a full card still to fly on the last lane.
+            int runI = 0, runN = 0; float left = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                var s = _board[i];
+                if (s.RunIndex > runI) runI = s.RunIndex;
+                if (s.RunCount > runN) runN = s.RunCount;
+                if (s.SuiteSecondsLeft > left) left = s.SuiteSecondsLeft;
+            }
+            // BATCH FIRST, CARD SECOND (v1.0.4). `left` is the current fleet's clock only, and on a
+            // queued run that is a small fraction of what the operator is waiting for — reading it as
+            // the whole run is the specific mistake this line exists to stop. Measured current fleet
+            // plus estimated remainder, because the estimate is only ever needed for fleets that have
+            // not flown yet.
+            string batch = TestDrone.BatchCount > 1
+                ? $"   fleet {TestDrone.BatchIndex}/{TestDrone.BatchCount}   "
+                  + $"~{ScenarioPlayer.Clock(left + TestDrone.BatchAheadSeconds())} batch"
+                : "";
+            BoardLine(0, BoardGreen,
+                $"HARNESS  {n} flying   run {runI}/{runN}   {ScenarioPlayer.Clock(left)} left{batch}");
+
+            for (int i = 0; i < shown; i++)
+            {
+                var s = _board[i];
+                // The local player's own aircraft can be flying a card too (he presses the run key
+                // while the drones fly theirs); DroneIdOf returns 0 for anything not in the harness.
+                int d = TestDrone.DroneIdOf(s.AircraftId);
+                BoardLine(1 + i, BoardGreen,
+                    $" {(d > 0 ? "#" + d : "YOU")} {s.PlaneName}   {s.CardName}   "
+                  + $"run {s.RunIndex}/{s.RunCount}  arm {s.ArmLabel}   "
+                  + $"seg {s.SegIndex}/{s.SegCount} '{s.SegTag}'  {ScenarioPlayer.Clock(s.SegSecondsLeft)}   "
+                  + $"card {ScenarioPlayer.Clock(s.CardSecondsLeft)}   {s.RecSamples} samples");
+            }
+            if (n > shown) BoardLine(1 + shown, BoardDim, $" ...and {n - shown} more");
+        }
+
+        // WHAT WILL FLY, before the key is pressed. Every value comes from ScenarioPlayer.Preview()
+        // and TestDrone's own three resolvers — the same pair the launch itself uses — so the board
+        // physically cannot promise something different from what spawns.
+        // Polled, not recomputed per draw: Preview() walks the card library and builds its "who
+        // decided" strings, and OnGUI runs at least twice a frame for a panel whose inputs only
+        // change when the operator ticks a checkbox. Half a second is under human reaction time.
+        private static float _preAt = -999f;
+        private static ScenarioPlayer.Preflight _pre;
+
+        private static void DrawPreflight()
+        {
+            if (Time.unscaledTime - _preAt > 0.5f)
+            {
+                _preAt = Time.unscaledTime;
+                _pre = ScenarioPlayer.Preview(true);   // quiet: this is a repaint, not an operator action
+            }
+            var p = _pre;
+            // CountOf, not Cfg.DroneCount: since v0.91 the card's airframe list decides the fleet size,
+            // so the knob is only one of three possible answers and quoting it would be wrong exactly
+            // when the card is driving — which is the case this panel exists to make visible.
+            string head = $"HARNESS  ready   [{Cfg.DroneSpawnKey.Value}] to launch {TestDrone.CountOf(p)}";
+
+            if (p.Cards == 0)
+            {
+                // THE #1 SETUP MISTAKE, and until now it only surfaced as a log warning AFTER the
+                // launch — by which point N drones are airborne flying a level-hold that measures
+                // nothing. Amber, and it names the fix.
+                BoardPanel(2);
+                BoardLine(0, BoardAmber, head);
+                BoardLine(1, BoardAmber, "  NO CARD SELECTED — the drones would fly the level-hold and measure nothing. "
+                                       + "Tick one in F1 > 'Scenario Cards'.");
+                return;
+            }
+
+            // HOW BIG IS THIS RUN, before the key is pressed (v1.0.4). Read straight off the setting,
+            // because `_batch` is not armed until RequestLaunch — so this is the one panel that can
+            // answer it while the operator can still change his mind.
+            string[] q = TestDrone.BatchPreview(out float qs);
+            BoardPanel(q.Length > 1 ? 5 : 4);
+            BoardLine(0, BoardGreen, head);
+            BoardLine(1, BoardDim,
+                $"  card  {p.Name}{(p.Cards > 1 ? $" (+{p.Cards - 1} more)" : "")}  x{p.Repeat} runs   "
+              + $"{p.AllDuration:0}s each   {ScenarioPlayer.Clock(p.AllDuration * p.Repeat)} per drone");
+            // PER VALUE, not one marker for the line: airframe, altitude and speed fall back
+            // independently, and "the card is driving this run" is only true of the ones marked so.
+            // This distinction is the whole reason the panel is worth drawing before a launch.
+            // ALTITUDE DECKS LAND ON TOP OF THE CARD'S ALTITUDE (v0.99), so the altitude marked
+            // `[from card]` beside them is the MEAN of two decks and no lane flies it. Shown only
+            // when decks are on, through the same DeckText the launch log prints, so the panel cannot
+            // promise a spread the spawn does not use.
+            // v1.0.2: the spread is card-first now, so its marker is RESOLVED rather than hardcoded —
+            // "[from F1]" on a value the card declared is the same lie this panel exists to prevent.
+            // v1.0.4: `DeckSpreadFlown`, not `DeckSpreadM` — a card declaring `startAlt` collapses the
+            // deck (ledger I12), and this line has to show the ring the launch will build, not the one
+            // the knob asked for. Same reason it goes through DeckText at all: it cannot promise a
+            // spread the spawn does not use. Decks off ⇒ empty string ⇒ this line says nothing at all.
+            string deck = TestDrone.DeckText(TestDrone.AltOf(p), TestDrone.DeckSpreadFlown(p));
+            if (deck.Length > 0)
+                deck = "   " + deck + " " + Src(ScenarioPlayer.DeclaredText(p.Config, "Drone/DroneAltDeckM") != null);
+            BoardLine(2, BoardDim,
+                $"  plant {TestDrone.AirframeOf(p)} {Src(!string.IsNullOrEmpty(p.Airframe))}   "
+              // Card.Declared, not `> 0f` (v1.0.2): a card declaring sea level means it, and the
+              // board saying [from F1] about a value the card set is the exact confusion this
+              // panel exists to remove. Same rule as AltOf itself — see ScenarioPlayer.Card.Unset.
+              + $"{TestDrone.AltOf(p):0} m {Src(ScenarioPlayer.Card.Declared(p.StartAlt))}{deck}   "
+              // SpeedText, not a number: a v0.93 corner-relative card has a DIFFERENT entry speed per
+              // lane, so it reads "1.00x corner (per airframe)". Printing one number here would be a
+              // promise the spawn does not keep — on a panel whose whole job is that it cannot be.
+              + $"{TestDrone.SpeedText(p)} {Src(TestDrone.SpeedFromCard(p))}   "
+              + $"x{TestDrone.CountOf(p)} drones ({p.CountSrc})");
+            BoardLine(3, BoardDim, string.IsNullOrEmpty(p.ArmKnob)
+                ? "  A/B   none — one arm; set a card's armToggle or Scenario/ScenarioArmToggle to interleave"
+                // "per aircraft" earns its width: until v0.94 a multi-drone launch stood the schedule
+                // down, so an operator who learned that rule still believes he must fly A/Bs one at a
+                // time. This line is where he finds out he no longer does.
+                : $"  A/B   {p.ArmKnob}   ABBA per aircraft, by run index   (from {p.ArmSrc})");
+            // AMBER, and it names entry 1: with a queue armed the four rows above preview
+            // Scenario/ScenarioCardSet, which RequestLaunch is about to OVERWRITE with the queue's
+            // first entry — so on a queued run those rows describe a card that may not be the one
+            // that flies. Naming it here is the cheap half of the fix; the rows correct themselves a
+            // second after launch, once the entry is armed.
+            if (q.Length > 1)
+                BoardLine(4, BoardAmber,
+                    $"  queue {q.Length} fleets   ~{ScenarioPlayer.Clock(qs)} per drone total   "
+                  + $"entry 1 '{q[0]}' flies first — the rows above preview ScenarioCardSet, which it replaces");
+        }
+
+        private static string Src(bool fromCard) => fromCard ? "[from card]" : "[from F1]";
 
         // --- IMGUI primitives (origin top-left, y-down) ---
 

@@ -1,0 +1,28 @@
+{
+  "name": "place-noop",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Darkreach, EW1",
+  "count": 2,
+  "note": "LEDGER #51, THE SEPARATING EXPERIMENT -- not an alpha card and not a flight-quality card. Under v0.96+ every Darkreach lane scheduled 5 or more replicates died: 6 at replicate 5, 1 at replicate 4, none at 1-3, no survivors past 5, across 4 mod versions, 6 cards and 2 lane distances (geometric-hazard likelihood ~3e-8). The failure indexes on PLACEMENT COUNT and on nothing else measured -- invariant to flight seconds per replicate (32 s vs 126 s in one session), to snapback distance (5.0 vs 25.4 km), to cumulative snapback (13.8 vs 75.9 km) and to lane distance (49.5 vs 62.0 km). But placement count is COLLINEAR with card-run count in every batch ever flown, and this card is the only thing that breaks the collinearity: 12 placements with essentially no flight exposure between them. READOUT IS THE ABORT, NOT A METRIC. The single segment is tagged 'arm' and is excluded from scoring on purpose -- what is being measured is which replicate index the run stops at, which lands in the CSV's '# stop' line and in '[drone]'/'[card]' in LogOutput.log. DO NOT SCORE IT ON dmgFrac: the abort check runs BEFORE the row is written, so an aborted capture reads dmgFrac 0.0 by construction. DIES AT PLACEMENT 4-5 => placement is causal and flight exposure is irrelevant. RUNS 12 CLEAN => placement count is a proxy and flight exposure is required, which sends the investigation back to the flight side. EW1 is the second lane because it is the only other airframe that has ever shed a part, and it shares the one surviving correlate (maxPitchAngularVel 0.3 with maxRollAngularVel 3, held by exactly these two). Pair it with place-deflect, which is this card plus a real deflection at the same placement count.",
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 3.0,
+      "az": 0.0,
+      "el": 0.0
+    }
+  ],
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 12,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.40" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ]
+}

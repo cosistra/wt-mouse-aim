@@ -1,0 +1,62 @@
+{
+  "name": "rotor-tilt-hold-lo",
+  "cls": "Helo,Tiltwing,VTOL",
+  "step": 0.02,
+  "airframe": "QuadVTOL1",
+  "note": "FAMILY D2, THE O13 PRE-FIX BASELINE. FLY THIS BEFORE THE O13 FIX SHIPS. That is not a preference, it is the entire point: the confirming test for the tiltwing-blend fix is a BEFORE/AFTER on one condition, and shipping the fix first destroys the before. There is no way to reconstruct it from the corpus - rotor-transition's R41/R42 captures are a decelerating sweep at MinThrottle, not a held condition, and they stalled at 60 m/s. THE DEFECT. ChaseController's tiltwing branch reads the game's tilt command and treats it as a HOVER FRACTION with the wrong sense. The rotorcraft (_sds) branch carries a '1f -' that the tiltwing branch does not, and the game pins the hover end of its tilt range at 0.18 rather than 0. So tiltFrac reads high in WING-BORNE cruise, where it must read ~0, and because _heliBlend = MAX(speedRamp, tiltFrac) it drags the blend up with it - deleting the bank-to-turn demand (tBankE *= (1 - heliBlend)) and boosting yaw by HeliYawScale in exactly the regime where the aircraft is a wing. R42 measured tiltFrac FALLING as the aircraft decelerated toward the hover (0.620 at 100-110 m/s down to 0.182 at 60-70), which is backwards, and LAW-LEDGER.md X30 records that a plain sign flip does not fit either - flipped, it reads 0.380 at 108 m/s where it must be ~0. The 0.18 pin is the missing piece. PASS / FAIL, AND THE SENSE IS DELIBERATELY INVERTED FROM THE USUAL. TODAY, PRE-FIX, heliBlend must read >= 0.8 in the most wing-borne condition this airframe has. That is the inversion proving itself at its worst case and it is what this card is here to RECORD. AFTER the fix the same card must read <= 0.2. A pre-fix reading already below 0.8 means the defect is milder than X30 implies and the fix's target moves; a pre-fix reading near 1.0 means the bank channel is entirely deleted in cruise. Either way the number is the baseline and cannot be re-taken later. PRECONDITION, CHECK IT FIRST: the spawn's '[helofbw]' line must read tiltwing=1. If TiltWingController did not resolve, the tilt term never ran, heliBlend is the speed ramp by construction and every number below is meaningless. R42 confirmed tiltwing=1 on this airframe. ENTRY 120 m/s at 3000 m, held rather than swept - the opposite of rotor-transition, which is why this is a separate card and not an edit to that one. 120 is well above the shipped HeliForwardSpeed 60, so speedRamp is identically 0.000 and heliBlend IS tiltFrac: a direct readout with no max() hiding anything. 60 s at az 0 establishes the boresight baseline; 60 s at az 8 excites the turn channel inside the measured 11 deg pedal-saturation knee, so the bank-vs-yaw allocation is visible as well as the blend value. count 2 = TWO QuadVTOL1 LANES wrapping the one-key list, at zero wall-clock cost. Same reasoning as rotor-transition: this card's whole question lives on one airframe and a lost lane ('aircraft gone' is fatal and takes the lane's remaining replicates) would be the whole baseline gone in an unattended run. SCORING NOTE: the fine/az tags here score as fine_track and az_step, which DO call wobble_scan - unlike rotor-transition's 'transition' tag, which computes only altExcursionM plus the generic block. That is a deliberate improvement on the older card, not an accident of naming. THIS ARM: THROTTLE 0.25, THE CONTROL, AND IT EXISTS TO BREAK A CONFOUND IN THE OLDER CARD. The game's tilt command is THROTTLE-DRIVEN (decompile :70342-70343), and rotor-transition pinned throttle at 0.25 (MinThrottle) while sweeping speed - so its measured tiltFrac ramp is a function of speed AND throttle at once and neither R41 nor R42 can say which input moved it. This card is byte-identical to 'rotor-tilt-hold' except for the throttle pin, and both hold 120 m/s, so the pair separates the two inputs directly: tiltFrac DIFFERS between the arms at matched speed -> the tilt command follows THROTTLE and rotor-transition's ramp is partly a throttle artefact; tiltFrac MATCHES -> it follows speed or wing angle and rotor-transition's ramp is real. 0.25 IS THE FLOOR, not a preference: ScenarioPlayer.MinThrottle is 0.25 and EntryThrottle SNAPS anything lower back to the 0.70 DEFAULT, so a card asking for 0.10 would fly at 0.70 - the opposite of what it asked. Expect this arm to decelerate and descend; 3000 m leaves 2500 m of margin over the 500 m FloorAltM and the card is only 126 s. If it drops below HeliForwardSpeed = 60 the speed ramp stops being 0 and heliBlend stops being a direct tiltFrac readout - so read spd per segment and discard any segment whose vFwd went under 60. R44 VERDICT (2026-08-05): VALID AS A BLEND READOUT; THE DESIGNED CONTROL PARTLY FAILED. 10/10 captures. What worked: az8thlo heliBlend = 0.1820 +/- 0.0002 (n=10) and fineTHlo 0.2350 +/- 0.0020, at 67-72 and 71-98 m/s. vFwd min was 65.1, never below HeliForwardSpeed = 60, so the note's discard rule never fired and speedRamp stayed identically 0 - heliBlend IS tiltFrac here too. Paired with the hi arm's 1.0000 that measures BOTH ENDPOINTS of the game's customAxis1 = Lerp(0.18, 1, tiltAtSpeed) from flight for the first time, and the 0.182 lands on the game's hover pin of 0.18 to within 0.002, matching R42's plateau. WHAT FAILED: the throttle/speed confound this card exists to break is NARROWED, NOT BROKEN, because neither arm held 120 m/s - thr 1.00 accelerated to 152 and thr 0.25 decelerated to 70, so the two arms never shared a speed. The only matched-speed contrast is the 90-100 m/s overlap both arms pass through in opposite directions: 0.730 at thr 1.00 vs 0.516 at thr 0.25 (n=242 / 336 rows), which points at throttle mattering too but is transient, rate-limited data on both sides and is NOT a verdict. To actually break the confound the pair needs a speed-referenced entry, not a throttle pin. POST-FIX PREDICTION, RECORDED IN ADVANCE: this arm FLIPS to ~0.998 (InverseLerp(1, 0.18, 0.182)) and will read heliBlend ~1.0 at 70 m/s. That is CORRECT, not a regression - the game has the wings at their hover pin there - and it is written down here so nobody reads it as a new bug. See LAW-LEDGER.md O13.",
+  "startSpeed": 120,
+  "startAlt": 3000,
+  "count": 8,
+  "repeat": 5,
+  "armToggle": "none",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.25"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "0"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    },
+    {
+      "key": "Control/HeliForwardSpeed",
+      "value": "60"
+    },
+    {
+      "key": "Control/HeliHoverSpeed",
+      "value": "20"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 0
+    },
+    {
+      "tag": "fineTHlo",
+      "dur": 60,
+      "az": 0,
+      "el": 0
+    },
+    {
+      "tag": "az8thlo",
+      "dur": 60,
+      "az": 8,
+      "el": 0
+    }
+  ]
+}

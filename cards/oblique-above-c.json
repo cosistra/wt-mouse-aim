@@ -1,0 +1,26 @@
+{
+  "name": "oblique-above-c",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "note": "THE THIRD ARM OF THE BELOWNESS AXIS. oblique-6-c is the same 6 deg diamond centred ON the horizon and oblique-below-c is it centred 20 deg BELOW; this is it centred 20 deg ABOVE, so the axis is a 3-point line (-20, 0, +20) in the ONE quantity the v0.85 fix keys on - alignFracH, horizon-referenced belowness - instead of a pair, and a monotonic trend can be told from a below-only anomaly. It is an OFFSET of oblique-below-c's diamond, not a negation of its elevations: negating el would also flip the diamond, so the arm would start at the BOTTOM and the step tagged obDR (down-right) would move up. The relative step sequence is byte-identical to oblique-6-c and oblique-below-c - only the centre moves, which is the whole point of an axis. Entry 3000 m, not 6000: below-c descends ~3.3 km from 6000 (mean ~4350 m) and this one climbs, so 3000 puts the two at a comparable MEAN altitude and therefore comparable mean q. Read that assumption off the capture rather than trusting it - the climb will fall short of the dive's 3.3 km because thrust is finite while gravity is not, so alt and spd are the two columns to check before comparing the arms, and the energy asymmetry (this card decelerates where below-c accelerates) is inherent to the axis, not a defect. CORNER-SPEED card like the rest of the -c family: 0.95x each lane airframe's OWN corner speed, which is what lets all ten fixed-wing keys fly it (at a flat 250 m/s CAS1 and COIN are refused pre-spawn, above 0.95x Vmax); 0.95 rather than 1.00 because CAS1's published cornerSpeed (200) is itself above 0.95x its Vmax (195.3). startSpeed 250 is the fail-soft fallback ONLY, degrading to the absolute oblique family's known-good condition if the envelope cannot be read. PASS: rollYawOpposedPct and terminalOffDeg on the above-nose segments at or below oblique-6-c's, and the mirror pairs no further apart - i.e. aboveness costs nothing and the 42.0% cross-fighting on elDn is a property of being BELOW the nose rather than of being off the horizon in either direction. FAIL: this card is as bad as oblique-below-c, which says the defect follows |elevation| and the roll-invariant suppression is aimed at half of it. AIRFRAME: all ten fixed-wing keys, each at its own 0.95x corner. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - design intent: the card exists to match oblique-below-c's MEAN altitude for a comparable mean q, and below-c flew deck 0 (R29) — a 3000 m spread would put this card's lower deck at 1500 m and break that match.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 3000,
+  "repeat": 8,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.70" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
+  "segments": [
+    { "tag": "arm",       "dur": 6, "az": 0,     "el": 24.24 },
+    { "tag": "obDR6high", "dur": 8, "az": 4.24,  "el": 20 },
+    { "tag": "obDL6high", "dur": 8, "az": 0,     "el": 15.76 },
+    { "tag": "obUL6high", "dur": 8, "az": -4.24, "el": 20 },
+    { "tag": "obUR6high", "dur": 8, "az": 0,     "el": 24.24 }
+  ]
+}

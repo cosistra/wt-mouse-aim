@@ -1,0 +1,23 @@
+{
+  "name": "stol-sweep",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1",
+  "note": "The sustained shape at low q, and the BELOW-the-clamp twin of stol-steps. Distinct tag from turn360 on purpose: compare-runs.py pools by tag alone. ENTRY REWRITTEN 2026-08-02 - IT NO LONGER FLIES 90 m/s AND CANNOT BE COMPARED WITH ANY CAPTURE BEFORE THIS EDIT. The 90 m/s absolute entry FAILED preflight on two counts at once: 0.56x Multirole1's FBW corner of 160 (under the 0.75x breakpoint where targetPitchAngVel's max(V, 0.75*Vc) goes flat, decompile :65032, with nothing holding the speed and MinThrottle 0.25 as the floor), and under 1.10x the DENSITY-CORRECTED stall at its own 6000 m (Multirole1: 66.7 / sqrt(0.5385) = 90.9 m/s TAS, x1.10 = 100.0). R39-stol measured the first one at 340-381 m/s against a declared 90. Now startSpeedCorner 0.80, the same multiple stol-steps uses, so the two cards differ only in geometry and altitude: above the 0.75x authority knee on every lane, and above 1.10x the density-corrected stall at 6000 m on all nine (the tightest is SmallFighter1 at 124 against 112.4). DELIBERATELY BELOW THE qSched CLAMP, WHICH IS THE OPPOSITE CHOICE FROM ITS SIBLING AND IS THE POINT. qRatio = 0.80^2 x rho_ratio(6000) = 0.64 x 0.5385 = 0.345 at entry, only 15% above the Clamp(qRatio, 0.3, 1) floor, and a sustained turn bleeds speed, so this card is expected to CROSS onto the floor mid-segment. stol-steps holds 0.428 uniformly above it. Read qSchedMin per segment: the pair is what separates 'the law behaves differently at low q' from 'a hardcoded 0.3 took over', which no single card can do. DARKREACH IS NOT ON THE ROSTER and cannot be: its FBW corner (100) is only 1.50x its stall (66.7), so 0.80x corner = 80 m/s is below 1.10x its density-corrected stall at any altitude above ~300 m. KNOWN LIMIT, WORSE AT THIS ENTRY THAN IT WAS AT 90 m/s, AND NOT FIXABLE FROM A CARD: SustainableTurnRate is clamped to 3..30 deg/s, and the sustainable rate g*sqrt(n^2-1)/V RISES as V falls, so a 9-g lane at 0.80x corner wants ~39 deg/s and gets 30. R39-stol saw the clip on 4 of 10 lanes; expect most of nine here. The 'same fraction of structural g on every airframe' premise is therefore FALSE on every clipped lane - grep 'SWEEP RATE CLIPPED' in LogOutput.log and read the derived rate off the '[card] suite start' line before making ANY cross-airframe claim from this card. It is structural: no low-q entry avoids it, because the clip is a property of deriveAzRate at low speed. What this card still answers cleanly is (a) does the 6000 m fix stop the altitude-floor aborts - PASS is 36/36 captures with 0 aborts against 13/40 and 9 floor aborts last time - and (b) the qSched crossing. ALTITUDE 6000 m, sized from measurement not rounded up: the worst measured mean sink was 1963 m / 19 s = 103 m/s and every one of those captures was TRUNCATED by the floor, so the full 36 s costs at least 3719 m; 6000 clears that with 1781 m to spare, and R27's sweep-lowq is the identical 36 s deriveAzRate shape at 6000 m with 0 aborts in 32. The new entry is far slower than the 340-381 m/s that produced those sinks, so the margin is larger still. ScenarioThrottle stays pinned at 0.25 - the floor, since EntryThrottle snaps anything lower back to the 0.70 DEFAULT. Set Drone/DroneAltDeckM = 0: at 3000 the upper deck is 7500 m and the density-corrected stall margin goes negative on the slower lanes. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: R41 (v1.0.0) flew this card's 9 lanes at ONE spawn altitude (6000 m, spread 0), not the 3000 m shipped default.",
+  "startSpeed": 120,
+  "startSpeedCorner": 0.80,
+  "startAlt": 6000,
+  "repeat": 4,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.25" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
+  "segments": [
+    { "tag": "arm",         "dur": 6,  "az": 0, "el": 0 },
+    { "tag": "turn360stol", "dur": 30, "az": 0, "el": 0, "deriveAzRate": true }
+  ]
+}

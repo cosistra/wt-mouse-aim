@@ -9,6 +9,8 @@ edits. This checks the parts that are mechanically checkable:
   3. the node index names no type that has disappeared
   4. every [HarmonyPatch(typeof(X), "M")] target is listed in the game-types table
   5. the <!-- ARCH-VERSION --> stamp matches PluginVersion in WTMouseAimPlugin.cs
+  6. every segment tag ScenarioPlayer.cs can emit resolves to a real metric type in scorecard.py
+  7. a handful of SOURCE INVARIANTS that compile fine when broken (see source_invariants)
 
 It CANNOT check that the prose and arrows are still true. A reordered Apply stage or a law that
 now does something different passes clean here and still needs a human/agent to re-read the L1
@@ -84,9 +86,552 @@ def plugin_version(src: str):
     return m.group(1) if m else None
 
 
+def _literal_commas(block: str) -> int:
+    """Commas in the LITERAL text of a C# string-concatenation block, ignoring $"{...}" holes.
+
+    Both the recorder's Header const and its Sample() row are `$"a,b," + $"c,d"` chains, so the
+    field count of each is (commas in the literal text) + 1. Interpolation holes are dropped first
+    because a hole can contain commas-free expressions but never a field separator.
+    """
+    block = re.sub(r"//[^\n]*", "", block)              # trailing comments carry commas of their own
+    block = re.sub(r"\{[^{}]*\}", "", block)            # $"{x:0.000}" -> ""
+    return sum(s.count(",") for s in re.findall(r'"((?:\\.|[^"\\])*)"', block))
+
+
+def recorder_columns(src: str):
+    """(header_count, row_count) for ManeuverRecorder, or (None, None) if either can't be parsed."""
+    # STRIP COMMENTS FIRST, because both patterns below terminate on a `;` at end of line and the
+    # column blocks are interleaved with paragraphs of prose. A comment sentence ending in a
+    # semicolon used to truncate the capture mid-block and report a plausible undercount — v0.97
+    # lost two columns that way. `_literal_commas` also strips comments; that stays, because it is
+    # called on other blocks too. No string literal in either block contains `//`.
+    src = re.sub(r"//[^\n]*", "", src)
+    h = re.search(r"private const string Header\s*=(.*?);\s*\n", src, flags=re.S)
+    r = re.search(r"_w\.WriteLine\(\s*\n(.*?)\);\s*\n", src, flags=re.S)
+    if not h or not r:
+        return None, None
+    return _literal_commas(h.group(1)) + 1, _literal_commas(r.group(1)) + 1
+
+
 def arch_version(src: str):
     m = re.search(r"<!--\s*ARCH-VERSION:\s*([^\s>]+)\s*-->", src)
     return m.group(1) if m else None
+
+
+# The drone harness (v0.87) routes uncrewed aircraft through the SAME ChaseController.Apply the
+# human flies. What keeps the human's flight path out of it is one per-instance flag, `_uncrewed`,
+# which gates the three things in Apply that are one-per-process and all his: the AimRig marker, the
+# Rewired player-0 stick, and the FlightHud crosshair. That guarantee is only as good as its reach:
+#   * ONE writer of the flag — FlyUncrewed. A second assignment anywhere (a "reset", a convenience
+#     setter on the player's path) turns a compile-time-provable property into a runtime argument.
+#   * ONE file calling FlyUncrewed — TestDrone.cs, whose dictionary an aircraft can only enter
+#     through Spawn, which asserts `ac.Player == null`.
+# Neither is visible to the type system and neither fails to compile, so check it here.
+UNCREWED_FLAG = "_uncrewed"
+UNCREWED_ENTRY = "FlyUncrewed"
+UNCREWED_CALLERS = {"TestDrone.cs"}   # files allowed to call the uncrewed entry point
+
+
+def uncrewed_isolation(sources: dict) -> list:
+    """Problems with the crewed/uncrewed separation. `sources` maps filename -> C# source."""
+    problems, writers, callers = [], 0, set()
+    for name, src in sources.items():
+        clean = strip_comments_and_strings(src)
+        # assignments only: `_uncrewed = ...`, never `!_uncrewed` / `_uncrewed ?` reads
+        writers += len(re.findall(rf"\b{UNCREWED_FLAG}\s*=[^=]", clean))
+        # a call, not the declaration — the declaring file has a return type in front of the name
+        if re.search(rf"\b{UNCREWED_ENTRY}\s*\(", clean) and not re.search(
+                rf"\b\w+\s+{UNCREWED_ENTRY}\s*\(", clean):
+            callers.add(name)
+    if writers != 1:
+        problems.append(
+            f"`{UNCREWED_FLAG}` is assigned {writers} time(s); it must be exactly 1 (in "
+            f"{UNCREWED_ENTRY}). More than one writer means the crewed path can reach the uncrewed "
+            f"branches of ChaseController.Apply — the human's stick would fly a drone, or a drone "
+            f"would drag the human's aim marker."
+        )
+    stray = callers - UNCREWED_CALLERS
+    if stray:
+        problems.append(
+            f"{UNCREWED_ENTRY} is called from {sorted(stray)}; only {sorted(UNCREWED_CALLERS)} may "
+            f"call it (an aircraft reaches it only via TestDrone's dictionary, which Spawn gates on "
+            f"ac.Player == null)."
+        )
+    return problems
+
+
+# =====================================================================================================
+# SEGMENT TAGS: ScenarioPlayer.cs -> scorecard.py's TAG_TYPE_RULES
+#
+# The tag vocabulary lives in TWO places with no compile-time link — the built-in cards here in C#
+# and the shipped JSON in cards/ — while the tag -> metric table lives in scorecard.py. That pair has
+# already drifted once catastrophically (v0.71: 19 of 21 segments scored "unknown", every step-
+# response / fine-tracking / sustained-turn metric silently uncomputed, no output at all).
+# `scorecard.py --selftest` closed the DISK half of the gap; it parses cards/*.json and asserts each
+# tag resolves. It cannot see a tag that exists only in C#, and two of those were broken when this
+# check was written: StopRecord's `rec` and Validate's `seg<i>` fallback.
+# =====================================================================================================
+
+# The `private static Seg X(string tag, ...)` factories in ScenarioPlayer.cs. A THIRD one would carry
+# tags this scan cannot see, so the set is asserted rather than assumed.
+SEG_FACTORIES = ("Hold", "Walk")
+
+# Both forms accept an optional trailing `+`, because two real sites build the tag by concatenation:
+# `s.tag = "seg" + i` (Validate's fallback) and `Hold("micro" + (i + 1), ...)`. In both the suffix is
+# a number, so the literal is probed with a "1" appended — which is what makes `seg\d+` / `micro\d+`
+# the thing scorecard has to match, not the bare prefix.
+_TAG_SITES = (
+    re.compile(r'\btag\s*=\s*"([^"]*)"(\s*\+)?'),                          # object initialiser
+    re.compile(r"\b(?:" + "|".join(SEG_FACTORIES) + r')\(\s*"([^"]*)"(\s*\+)?'),
+)
+
+
+def strip_comments(src: str) -> str:
+    """Comments only — strings LEFT INTACT.
+
+    Deliberately not strip_comments_and_strings(): that one pairs quotes left to right, and
+    ScenarioPlayer.cs contains a string literal nested inside an interpolation hole (Abort's
+    `{... ? seg.tag : "?"}`), after which its brace depth is wrong. Every check below either needs
+    the string literals (the tag scan) or only needs to find a method's closing brace, so none of
+    them can afford that. See the same warning in TestDrone.cs's log lines.
+    """
+    src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
+    return re.sub(r"//[^\n]*", "", src)
+
+
+def method_body(src: str, sig_rx: str):
+    """A method's body text, or None. `src` must be comment-stripped (see strip_comments).
+
+    Matched from the signature to the first close-brace at METHOD indent (8 spaces = a member of a
+    class inside the namespace), which is the whole repo's layout. Nested blocks sit deeper, so the
+    first such brace is the method's own.
+    """
+    m = re.search(sig_rx + r"\s*\{(.*?)\n        \}", src, flags=re.S)
+    return m.group(1) if m else None
+
+
+def segment_tags(src: str):
+    """Every segTag ScenarioPlayer.cs's built-in cards / recorder can stamp into a capture."""
+    src = strip_comments(src)
+    tags = set()
+    for rx in _TAG_SITES:
+        for lit, concat in rx.findall(src):
+            if lit:                       # `public string tag = "";` is the field default, not a tag
+                tags.add(lit + "1" if concat else lit)
+    return sorted(tags)
+
+
+def _infer_type():
+    """scorecard.py's infer_type, imported (hyphenated filenames can't be `import`ed). ~25 ms."""
+    import importlib.util
+    p = Path(__file__).resolve().parent / "scorecard.py"
+    if not p.exists():
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("_scorecard_for_archcheck", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.infer_type
+    except Exception:                     # a broken scorecard is its own problem; report, don't crash
+        return None
+
+
+def segment_tag_problems(scen_src: str) -> list:
+    out = []
+    if not scen_src:
+        return out
+    found = sorted(set(re.findall(r"\bstatic\s+Seg\s+(\w+)\s*\(", strip_comments(scen_src))))
+    if found != sorted(SEG_FACTORIES):
+        out.append(
+            f"ScenarioPlayer.cs's Seg factories are {found}, expected {sorted(SEG_FACTORIES)} — the "
+            f"tag scan below only reads {sorted(SEG_FACTORIES)}(\"tag\", ...), so a new factory's "
+            f"tags would be invisible to it. Add it to SEG_FACTORIES."
+        )
+    infer = _infer_type()
+    if infer is None:
+        out.append("could not import debugtests/scorecard.py — segment tags went unchecked")
+        return out
+    for tag in segment_tags(scen_src):
+        if infer(tag) == "unknown":
+            out.append(
+                f"segment tag '{tag}' (ScenarioPlayer.cs) resolves to \"unknown\" in scorecard.py's "
+                f"TAG_TYPE_RULES, so every capture carrying it scores with the generic AoA/G metrics "
+                f"only — no step response, no tracking, no turn metrics. Adding or renaming a card "
+                f"segment means updating BOTH, in the same change."
+            )
+    return out
+
+
+# =====================================================================================================
+# SOURCE INVARIANTS.
+#
+# Every rule here is one this repo has already been burned by, and every one of them COMPILES FINE
+# when broken: the mod flies, the batch completes, every capture scores, and the answer is wrong.
+# That is why they are greps in the Stop hook rather than review notes. Each message names the
+# invariant and the measurement that forced it.
+#
+# ponytail: greps, not a parser. Coarse where coarseness is safe (rule 3 is per FILE, not per method)
+# — the point is to fail loudly on the shape of the regression, not to model C#.
+# =====================================================================================================
+
+# A Transform write, in any of the spellings that reach one. Rigidbody writes (rb.position,
+# pr.rotation) deliberately do NOT match — the whole point of rule 3b is that the two must not be
+# mixed. .Repair() is in here because it is a transform write behind a method name.
+XFORM_WRITE = re.compile(
+    r"\b\w*(?:[Xx]form|[Tt]ransform)\s*\.\s*(?:position|rotation|eulerAngles)\s*="
+    r"|\.\s*(?:localPosition|localRotation)\s*="
+    r"|\.\s*SetPositionAndRotation\s*\("
+    r"|\.\s*Repair\s*\("
+)
+
+
+def source_invariants(sources: dict) -> list:
+    p = []
+    scen = strip_comments(sources.get("ScenarioPlayer.cs", ""))
+    drone = strip_comments(sources.get("TestDrone.cs", ""))
+    plug = strip_comments(sources.get("WTMouseAimPlugin.cs", ""))
+
+    # --- 1. `frameMs` is a FRAME time only if it is sampled per frame -------------------------
+    # Time.unscaledDeltaTime read from FixedUpdate returns fixedUnscaledDeltaTime, a CONSTANT. That
+    # is what v0.86..v0.92 shipped: R27's frameMs read exactly 16.70 ms on all 223,899 rows of a
+    # 352-capture batch, zero variance, and missed a 119 ms hitch the log caught while four recorders
+    # were sampling through it. Moving the call "for tidiness" restores the bug silently.
+    upd, fx = method_body(plug, r"private void Update\(\)"), method_body(plug, r"private void FixedUpdate\(\)")
+    if upd is None or fx is None:
+        p.append("WTMouseAimPlugin.Update()/FixedUpdate() not found — did the MonoBehaviour change shape?")
+    else:
+        if "SampleFrameTime" not in upd:
+            p.append(
+                "TestDrone.SampleFrameTime() is not called from WTMouseAimPlugin.Update(). It MUST be: "
+                "Time.unscaledDeltaTime is the rendered-frame delta only in a per-frame callback, and "
+                "the recorder's frameMs column is otherwise a constant (v0.86-v0.92, R27)."
+            )
+        if "SampleFrameTime" in fx:
+            p.append(
+                "TestDrone.SampleFrameTime() is called from WTMouseAimPlugin.FixedUpdate(), where "
+                "Time.unscaledDeltaTime returns the CONSTANT fixedUnscaledDeltaTime — this is exactly "
+                "the v0.92.1 bug (frameMs identical on all 223,899 rows of R27)."
+            )
+
+    # --- 2. one control-law step per FIXED STEP, not per PILOT --------------------------------
+    # Aircraft.pilots is an array and every Pilot fires the postfix, so a two-seater ran OnPilotStep
+    # twice per fixed step: R26 flew a 30 s segment in 14.95 s on `trainer`/`FastBomber1`, and the
+    # control law's integrators/rate filters double-stepped inside one physics step. The guard must
+    # sit AFTER the dead/ejected despawn, or a killed crewman stops despawning the drone.
+    ops = method_body(drone, r"internal static void OnPilotStep\(Pilot p\)")
+    if ops is None:
+        p.append("TestDrone.OnPilotStep(Pilot) not found — has the drone seam changed shape?")
+    else:
+        i_dead, i_step = ops.find("p.dead"), ops.find("d.LastStep == Time.fixedTime")
+        if i_step < 0:
+            p.append(
+                "TestDrone.OnPilotStep has no `d.LastStep == Time.fixedTime` guard. Without it a "
+                "TWO-SEAT airframe runs the card clock and the control law twice per fixed step "
+                "(R26: a 30 s segment flown in 14.95 s, finite differences reading zero)."
+            )
+        elif i_dead < 0:
+            p.append("TestDrone.OnPilotStep no longer checks p.dead/p.ejected — a shot-down drone never despawns.")
+        elif i_dead > i_step:
+            p.append(
+                "TestDrone.OnPilotStep's per-fixed-step guard sits BEFORE the p.dead/p.ejected "
+                "despawn. It must sit after: the guard returns early on the second seat, so a drone "
+                "whose front-seater is killed would never reach the despawn (v0.90.1)."
+            )
+
+    # --- 3. the safe-teleport PAIR ------------------------------------------------------------
+    # ResetGLoadTrackers (zero velocityPrev, or the game reads the teleport as G) + MoveAssembly
+    # (move every part rigidbody, or the FixedJoints stretch and PhysX returns ~err/dt of velocity).
+    # Both halves were learned by destroying the airframe; shipping one is shipping the crash.
+    for name, src in sources.items():
+        clean = strip_comments(src)
+        if re.search(r"(?<!void )\bMoveAssembly\s*\(", clean) and "ResetGLoadTrackers" not in clean:
+            p.append(
+                f"{name} calls MoveAssembly without ResetGLoadTrackers. They are ONE primitive: the "
+                f"velocity write is read as a G spike unless Pilot.velocityPrev is zeroed first, and "
+                f"both halves were learned by destroying the airframe (see ScenarioPlayer.cs)."
+            )
+
+    # ...and MoveAssembly must be a RIGID TRANSFORM AND NOTHING ELSE (v0.97.2). This check is now an
+    # ANTI-invariant, which is unusual enough to explain: it exists to stop the same fix being tried a
+    # third time, because both previous attempts compiled, passed every offline gate, and looked
+    # obviously correct right up until a batch was flown.
+    #
+    # v0.96.1's mod-side audit was a TAUTOLOGY — with pivot == rb.position at both call sites it
+    # rebuilt the same expression the move loop had just written, over the same list with the same
+    # skip, so it could not fire (0 [place] lines over R35's 186 placements).
+    #
+    # v0.97.0 replaced it with the game's own AeroPart.Repair, on the reasoning that Repair writes
+    # exactly the quantity CheckAttachment compares. The reasoning was right and the result destroyed
+    # the aircraft: R36 lost 32 of 32 placements, 100%, every airframe.
+    #
+    # WHY, precisely — because the ban below is drawn around the mechanism, not around Repair.
+    # Rigidbody.position writes the PhysX pose and leaves the Transform holding its OLD value until
+    # the next simulation step, and Physics.SyncTransforms copies Transform -> PhysX, never the
+    # reverse. So when the Repair loop ran, every part transform still held the PRE-teleport pose.
+    # Repair read one (attachInfo.parentPart.xform) and wrote another (xform.position/rotation) —
+    # both pre-teleport, so its arithmetic was near-correct and beside the point. The write DIRTIES
+    # the transform, and since AeroPart.CreateRB (:74418) unparents every part it bodies, a dirty
+    # transform plus a sync IS a body teleport: the parts went back to the old lane. Aircraft.rb was
+    # untouched (the root part has attachInfo == null, so Repair no-ops on it) and stayed at the
+    # anchor, so Physics.Simulate ran with the root 13.8-41 km from its own parts. Deleting only the
+    # second sync would NOT have saved it — the physics step syncs dirty transforms before simulating
+    # regardless. The lethal act is writing a Transform in here at all. Repair never threw, so the
+    # try/catch logged nothing.
+    #
+    # The same log holds the natural experiment: R36's 32 "snapped back 0 m" placements — still a
+    # full MoveAssembly call, Repair loop included — were 32/32 CLEAN; its 32 placements of 13.8-41 km
+    # were 32/32 FATAL. The fault scales with the size of the MOVE and with nothing else. (Do not
+    # read the 10602-172586 m/s spike spread as err/dt: it is saturated by breakForce and solver
+    # clamps. 20415 m at the rig's measured 19x predicts ~388000 m/s and read 60147.)
+    #
+    # The underlying problem (ledger #51) stays OPEN, instrumented via dmgFrac rather than fixed — and
+    # its premise is now itself in doubt, since MoveAssembly is an exact rigid transform whose float32
+    # grain at 60-100 km is ~0.004 m, ~125x under CheckAttachment's 0.5 m. So: no Transform write, and
+    # exactly one SyncTransforms, last.
+    mv = method_body(scen, r"internal static void MoveAssembly\([^)]*\)")
+    if mv is None:
+        p.append("ScenarioPlayer.MoveAssembly not found — has the safe-teleport primitive moved?")
+    else:
+        i_root = mv.find("rb.position")
+        syncs = [m.start() for m in re.finditer(r"Physics\.SyncTransforms", mv)]
+        xw = XFORM_WRITE.search(mv)
+        if xw:
+            p.append(
+                "ScenarioPlayer.MoveAssembly writes a Transform (%r). v0.97.0 shipped one instance of "
+                "this — a Repair() loop — and R36 lost 32 of 32 placements, 100%%, every airframe. "
+                "rb.position writes the PhysX pose and leaves the Transform stale, and "
+                "Physics.SyncTransforms only ever copies Transform -> PhysX, so a Transform write in "
+                "here commits a PRE-teleport pose for bodied parts (scene roots — CreateRB unparents "
+                "them) while the untouched root stays at the anchor: joints stretched by the full "
+                "13.8-41 km, pilot killed by G damage, nothing thrown. Mixing transform writes into a "
+                "function that moves BODIES is the defect; Repair was one case of it. Either move "
+                "EVERYTHING by transform (parts and root, then one sync, and no rb.position at all) "
+                "or leave #51 instrumented. Do not restore v0.96.1's audit either — it was a "
+                "tautology." % xw.group(0).strip()
+            )
+        elif len(syncs) != 1:
+            p.append(
+                "ScenarioPlayer.MoveAssembly should call Physics.SyncTransforms exactly once, as its "
+                "LAST statement (found %d). Everything above it writes BODY poses; that one call is "
+                "what reaches PhysX before the next Physics.Simulate." % len(syncs)
+            )
+        elif not (0 <= i_root < syncs[0]):
+            p.append(
+                "ScenarioPlayer.MoveAssembly syncs before the root rb.position write, so the root's "
+                "new pose never reaches PhysX this step."
+            )
+
+    # --- 4. card setup order in Tick ----------------------------------------------------------
+    # ApplyOverrides -> ApplyArm -> StartCard, and RestoreOverrides AFTER _rec.Stop. Arm second so
+    # the sweep beats a card that pins its own swept knob; both before the recorder opens (and the
+    # restore after it closes) because SettingChanged stamps a '# cfg' line into every OPEN capture —
+    # a card's own setup landing in its own CSV reads as the law changing mid-run.
+    tick = method_body(scen, r"public void Tick\(Aircraft ac\)")
+    if tick is None:
+        p.append("ScenarioPlayer.Tick(Aircraft) not found.")
+    else:
+        want = ("ApplyOverrides(", "ApplyArm(", "StartCard(")
+        at = [tick.find(s) for s in want]
+        if min(at) < 0:
+            p.append(f"ScenarioPlayer.Tick no longer calls all of {want} — the card setup path moved.")
+        elif at != sorted(at):
+            p.append(
+                f"ScenarioPlayer.Tick calls the card setup out of order (found {want} at {at}). It "
+                f"must be ApplyOverrides -> ApplyArm -> StartCard: arm-after-overrides makes the "
+                f"swept arm win, and both-before-the-recorder keeps a card's own setup out of its "
+                f"own capture's '# cfg' lines."
+            )
+    for meth, rx in (("Finish", r"private void Finish\(string reason\)"),
+                     ("NextCard", r"private void NextCard\(\)")):
+        b = method_body(scen, rx)
+        if b is None:
+            p.append(f"ScenarioPlayer.{meth} not found.")
+            continue
+        i_stop, i_restore = b.find("_rec.Stop"), b.find("RestoreOverrides()")
+        if i_stop < 0 or i_restore < 0:
+            p.append(f"ScenarioPlayer.{meth} no longer both stops the recorder and restores the card's overrides.")
+        elif i_restore < i_stop:
+            p.append(
+                f"ScenarioPlayer.{meth} restores the card's config overrides BEFORE _rec.Stop. "
+                f"Restoring fires SettingChanged, which stamps a '# cfg' line into the still-open "
+                f"capture — reading as the law changing during the run it just finished."
+            )
+
+    # --- 5. every entry-speed read routes through the ONE resolver ----------------------------
+    # v0.93: a card may declare its entry speed as a multiple of the lane airframe's corner speed.
+    # Converting only the spawn is the failure this design exists to prevent — the aircraft would be
+    # placed at 180 m/s while the gate still demanded the card's raw 250 and refused the run forever.
+    for name in ("ScenarioPlayer.cs", "TestDrone.cs"):
+        for i, line in enumerate(strip_comments(sources.get(name, "")).splitlines(), 1):
+            if not re.search(r"\.startSpeed\b", line):
+                continue
+            # The resolver itself, and Preview's deliberate carry of the (speed, corner) PAIR — it is
+            # answered with no aircraft in hand, so there is no lane to resolve against yet.
+            if "ResolveStartSpeed(" in line or ".StartSpeed =" in line:
+                continue
+            p.append(
+                f"{name}:{i} reads Card.startSpeed directly ({line.strip()}). Every playback-path "
+                f"read must go through ScenarioPlayer.ResolveStartSpeed / EffectiveStartSpeed, or a "
+                f"startSpeedCorner card is checked at one speed and placed at another (v0.93)."
+            )
+
+    # --- 6. both removal paths drop every per-aircraft registry -------------------------------
+    # ForgetState exists so the next registry added cannot be forgotten on one of the two paths;
+    # missing it leaves a StreamWriter alive past its aircraft and a capture with no '# stop' line,
+    # which reads as a clean run.
+    for meth, rx in (("Despawn", r"public static void Despawn\(Drone d[^)]*\)"),
+                     ("PruneDead", r"private static void PruneDead\(\)")):
+        b = method_body(drone, rx)
+        if b is None:
+            p.append(f"TestDrone.{meth} not found.")
+        elif "ForgetState(" not in b:
+            p.append(
+                f"TestDrone.{meth} does not call ForgetState. BOTH removal paths must: a despawned "
+                f"drone otherwise leaves its recorder open (a capture with no '# stop' line reads as "
+                f"a clean run) and its arm assignment behind for a recycled instance id."
+            )
+
+    # --- 7. the crewed/uncrewed proof's root ---------------------------------------------------
+    # The whole uncrewed-isolation argument above is "an aircraft can only enter TestDrone's
+    # dictionary through Spawn, which asserts ac.Player == null". Delete the assert and the postfix
+    # can write ControlInputs for an aircraft somebody is sitting in.
+    spawn = method_body(drone, r"public static Drone Spawn\([^)]*\)")
+    if spawn is None:
+        p.append("TestDrone.Spawn not found.")
+    elif "ac.Player != null" not in spawn:
+        p.append(
+            "TestDrone.Spawn no longer verifies `ac.Player == null` before registering. That check is "
+            "the root of the crewed/uncrewed separation — the postfix writes ControlInputs for "
+            "everything in the dictionary, so a player aircraft in it means the harness flies the human."
+        )
+
+    # --- 8. the batch queue only advances into an EMPTY sky (v0.98) ----------------------------
+    # AdvanceBatch launches a whole fleet. Its one safety property is that it cannot run while the
+    # previous fleet is alive or still staggering in, and that property lives entirely in WHERE it is
+    # called: the `else` arm of `if (_live.Count > 0) PruneDead();`, additionally gated on
+    # `_pending == 0`. Hoist the call out of the else — an easy-looking tidy-up, since the line reads
+    # fine on its own — and a queued fleet spawns on top of the one still flying: N more drones in
+    # lanes already occupied, the previous batch's captures still open, and every metric pooled across
+    # two different experiments. Nothing would throw and nothing in the log would say so.
+    tick = method_body(drone, r"public static void FixedTick\(\)")
+    if tick is None:
+        p.append("TestDrone.FixedTick() not found — has the harness fixed-step entry point moved?")
+    elif "AdvanceBatch(" in tick:
+        # The call must sit in an `else` that is guarded by the live-count test, and must itself test
+        # _pending. Checked on the flattened body so line breaks inside the condition do not matter.
+        flat = " ".join(tick.split())
+        if not re.search(r"if\s*\(\s*_live\.Count\s*>\s*0\s*\)[^;]*;\s*else\s+if\s*\([^)]*_pending\s*==\s*0[^)]*\)\s*AdvanceBatch\(", flat):
+            p.append(
+                "TestDrone.FixedTick calls AdvanceBatch outside the sky-empty interlock. It must stay "
+                "in the `else` arm of `if (_live.Count > 0) PruneDead();` AND test `_pending == 0` in "
+                "the same condition — those two counters ARE the interlock. Called anywhere else it "
+                "launches a queued fleet into lanes the previous fleet is still flying, silently."
+            )
+
+    # --- 9. a card's config pins are REFCOUNTED, and the count cannot be dropped or double-released -
+    # `Cfg` entries are one per process; ScenarioPlayer is one per aircraft. A 16-lane fleet therefore
+    # pins the same entries sixteen times, and before v0.99.1 the FIRST lane to finish its card
+    # restored them while the other fifteen were still flying under them (1469 rows across 61 of 512
+    # legs at the wrong ScenarioThrottle, stepping in the launch stagger). The fix is PinShared /
+    # UnpinShared around one static table, and it has exactly three ways to rot back — all of which
+    # compile, and none of which shows up as anything but a wrong number in a capture:
+    #   (a) someone writes `e.BoxedValue = v` in ApplyOverrides/RestoreOverrides again, bypassing the
+    #       count entirely — which is the original defect, restored;
+    #   (b) ApplyOverrides loses its `_ovEntries != null` re-entry guard and increments twice per card
+    #       (the placement re-enters that path a tick later), so the pins never come off at all;
+    #   (c) RestoreOverrides loses its `_ovEntries == null` guard, or stops nulling the list, and
+    #       decrements a count another aircraft is still holding — un-pinning it mid-flight.
+    ov_apply = method_body(scen, r"private void ApplyOverrides\(Card c\)")
+    ov_rest = method_body(scen, r"private void RestoreOverrides\(\)")
+    if ov_apply is None or ov_rest is None:
+        p.append("ScenarioPlayer.ApplyOverrides/RestoreOverrides not found — has the card-pin path moved?")
+    else:
+        for meth, body, want in (("ApplyOverrides", ov_apply, "PinShared("),
+                                 ("RestoreOverrides", ov_rest, "UnpinShared(")):
+            if want not in body:
+                p.append(
+                    f"ScenarioPlayer.{meth} does not go through {want.rstrip('(')}. A card's pins are "
+                    f"process-global Cfg entries and the fleet flying them is not: writing/restoring "
+                    f"them per aircraft is the v0.99.1 defect (the first lane to finish un-pinned the "
+                    f"knob under the other fifteen)."
+                )
+            if re.search(r"\.BoxedValue\s*=", body):
+                p.append(
+                    f"ScenarioPlayer.{meth} assigns .BoxedValue directly. Only PinShared/UnpinShared "
+                    f"may touch a pinned entry's value — they are what hold the refcount, and a write "
+                    f"beside them restores the concurrent-fleet corruption exactly."
+                )
+        if "if (_ovEntries != null) return;" not in ov_apply:
+            p.append(
+                "ScenarioPlayer.ApplyOverrides lost its `_ovEntries != null` re-entry guard. The "
+                "placement re-enters that path a tick later, so without it one card ACQUIRES each pin "
+                "twice and releases it once — the refcount never reaches zero and the knob stays "
+                "pinned for the rest of the session."
+            )
+        if "if (_ovEntries == null) return;" not in ov_rest or "_ovEntries = null" not in ov_rest:
+            p.append(
+                "ScenarioPlayer.RestoreOverrides must both early-return on `_ovEntries == null` and "
+                "null it after releasing. Those two lines are what make a double release a no-op; "
+                "without them a second call decrements a refcount another AIRCRAFT is still holding "
+                "and un-pins the knob out from under a flying card."
+            )
+    # ...and the abort path has to reach that release. Forget(int) is the teardown a drone that dies
+    # mid-card takes, and it only releases because it Aborts BEFORE dropping the registry entry.
+    fgt = method_body(scen, r"internal static void Forget\(int aircraftId\)")
+    if fgt is None:
+        p.append("ScenarioPlayer.Forget(int) not found.")
+    else:
+        i_ab, i_rm = fgt.find("Abort("), fgt.find("_byAc.Remove")
+        if i_ab < 0 or i_rm < 0 or i_ab > i_rm:
+            p.append(
+                "ScenarioPlayer.Forget(int) must Abort BEFORE removing the registry entry. That abort "
+                "is the only thing that closes a dead drone's capture and releases the card pins it "
+                "was holding; dropping the entry first leaks a refcount nothing can ever decrement."
+            )
+
+    # --- 10. an abort ends the REPLICATE; the next one must start from a fresh-lane state -----------
+    # `Finish` nulls `_queue`, and `_queue` IS the replicate expansion — so until v0.99.1 one abort
+    # discarded every remaining replicate for that lane (STOL batch: 40 captures expected, 13 written,
+    # nine lanes lost three replicates each to one altitude-floor abort on replicate 1). The recovery
+    # routes through `NextCard`, which means every piece of per-card state `Finish` resets must be
+    # reset there too — a field added to one and not the other is ledger #12 again (a per-replicate
+    # reset that did not happen), and it does not fail to compile, it just carries the aborted
+    # replicate's state into the next one.
+    #
+    # The allowlist is the per-RUN state, which NextCard must NOT touch: the queue and its cursor, the
+    # A/B schedule the run is halfway through, the anchor every replicate snaps back to, and the abort
+    # tally the run reports at the end.
+    # `_owed` (v1.0.2) is per RUN in the strongest sense: it is the run's OUTCOME, computed from the
+    # queue on the way out and read back by TestDrone.LaneLost after the teardown. NextCard must not
+    # touch it — a recoverable abort hands over to NextCard and the lane is still flying, so clearing
+    # it there would be right by accident and wrong the moment a fatal abort routed through it.
+    per_run = {"_card", "_queue", "_qi", "_armEntry", "_armIdx", "_anchorSet", "_aborted", "_owed"}
+    fin = method_body(scen, r"private void Finish\(string reason\)")
+    nxt = method_body(scen, r"private void NextCard\(\)")
+    if fin is None or nxt is None:
+        p.append("ScenarioPlayer.Finish/NextCard not found — has the card teardown moved?")
+    else:
+        assign = re.compile(r"(_\w+)\s*=(?!=)")
+        missing = sorted({m for m in assign.findall(fin)} - {m for m in assign.findall(nxt)} - per_run)
+        if missing:
+            p.append(
+                "ScenarioPlayer.Finish resets %s and NextCard does not. Since v0.99.1 a non-fatal "
+                "abort ends the REPLICATE and hands over to NextCard, so anything Finish clears and "
+                "NextCard does not is state the aborted replicate leaks into the next one — the shape "
+                "of ledger #12. Reset it in NextCard, or add it to this rule's per-run allowlist with "
+                "a reason (the queue cursor, the A/B schedule and the run anchor are all per RUN)."
+                % ", ".join(missing)
+            )
+    # ...and the recovery only exists if Abort can still be told which kind it is. Checked on the
+    # SIGNATURE, not the body: a body that merely mentions `fatal` proves nothing about the callers.
+    if scen and not re.search(r"public void Abort\(string reason,\s*bool fatal", scen):
+        p.append(
+            "ScenarioPlayer.Abort no longer takes the `fatal` flag, so every abort ends the LANE — "
+            "Finish nulls _queue and _queue IS the replicate expansion. That is how the STOL batch "
+            "wrote 13 of an expected 40 captures: nine lanes lost three replicates each to one "
+            "altitude-floor abort on replicate 1."
+        )
+    return p
 
 
 def check(fix_version: bool) -> int:
@@ -121,9 +666,10 @@ def check(fix_version: bool) -> int:
             )
 
     # --- files + types in the node index ------------------------------------------------
-    all_types, patch_targets = set(), []
+    all_types, patch_targets, sources = set(), [], {}
     for p in cs_files:
         src = p.read_text(encoding="utf-8")
+        sources[p.name] = src
         if f"`{p.name}`" not in arch:
             problems.append(f"{p.name} is not named in ARCHITECTURE.md (add a node-index row)")
         for t in top_level_types(src):
@@ -141,6 +687,40 @@ def check(fix_version: bool) -> int:
                 f"Harmony patch {typ}.{member} is not listed in the "
                 f"'Game types we patch or read' table"
             )
+
+    # --- crewed / uncrewed separation (v0.87) -------------------------------------------
+    problems += uncrewed_isolation(sources)
+
+    # --- segment tag vocabulary + the source invariants ---------------------------------
+    problems += segment_tag_problems(sources.get("ScenarioPlayer.cs", ""))
+    problems += source_invariants(sources)
+
+    # --- recorder CSV contract ----------------------------------------------------------
+    # The header string and the Sample() row are two hand-maintained lists that MUST stay in
+    # lockstep; nothing in C# links them, and a mismatch does not fail to compile — it produces
+    # a capture whose columns are silently shifted from the names above them, which every offline
+    # tool then reads as real data. Cheap to check mechanically, so check it.
+    rec_cs = REPO / "Recording.cs"
+    ncols = None
+    if rec_cs.exists():
+        nh, nr = recorder_columns(rec_cs.read_text(encoding="utf-8"))
+        if nh is None:
+            problems.append("could not parse ManeuverRecorder's Header / Sample row (did the shape change?)")
+        elif nh != nr:
+            problems.append(
+                f"Recording.cs: the CSV header has {nh} columns but the Sample() row writes {nr} "
+                f"— they must stay in lockstep, and new columns append at the END"
+            )
+        else:
+            ncols = nh
+            # CLAUDE.md documents the count; keep that honest too, it is what an agent reads first.
+            claude = REPO / "CLAUDE.md"
+            if claude.exists():
+                m = re.search(r"\((\d+) CSV columns", claude.read_text(encoding="utf-8"))
+                if m and int(m.group(1)) != ncols:
+                    problems.append(
+                        f"CLAUDE.md says '{m.group(1)} CSV columns' but Recording.cs writes {ncols}"
+                    )
 
     # --- stale node-index rows ----------------------------------------------------------
     # Types the index claims exist. Parsed from the type(s) COLUMN only — scraping the whole
@@ -167,7 +747,8 @@ def check(fix_version: bool) -> int:
 
     print(
         f"ok  ARCHITECTURE.md matches the code "
-        f"({len(cs_files)} files, {len(all_types)} types, {len(patch_targets)} Harmony patches, v{ver})"
+        f"({len(cs_files)} files, {len(all_types)} types, {len(patch_targets)} Harmony patches, v{ver}"
+        + (f", {ncols} CSV columns)" if ncols else ")")
     )
     return 0
 
@@ -240,6 +821,304 @@ def selftest() -> int:
     assert harmony_targets(src) == [("Foo", "Bar")]
     assert plugin_version('public const string PluginVersion = "0.58.0";') == "0.58.0"
     assert arch_version("<!-- ARCH-VERSION: 0.58.0 -->") == "0.58.0"
+
+    # Recorder header/row lockstep. The fake below mirrors the real shape: a concatenated header
+    # with an interleaved comment, and a row whose interpolation holes contain format specifiers,
+    # a ternary and a subtraction — none of which may be miscounted as a field separator.
+    rec = '''
+        private const string Header =
+            "t,off,azErr," +
+            // a comment, with a comma in it
+            "phase,flyLevel," +
+            "frameMs";
+
+        public void Sample(float t, bool flyLevel, float segStart)
+        {
+            _w.WriteLine(
+                $"{t:0.000},{off:0.00},{azErr:0.00}," +
+                $"{phase},{(flyLevel ? 1 : 0)}," +
+                $"{(now - segStart) * 1000f:0.0}");
+        }
+    '''
+    assert recorder_columns(rec) == (6, 6), recorder_columns(rec)
+    # ...and it must FAIL when they drift, which is the only thing this check is for.
+    assert recorder_columns(rec.replace('"frameMs"', '"frameMs,extra"')) == (7, 6)
+    assert recorder_columns("no recorder here") == (None, None)
+    # A COMMENT SENTENCE ENDING IN A SEMICOLON must not truncate the header capture. Both patterns
+    # terminate on `;` at end of line, and the column blocks are interleaved with paragraphs of
+    # prose, so before v0.97 this silently reported an UNDERCOUNT — a plausible wrong number from
+    # the one gate whose whole job is catching a column-count drift. Two real columns went missing.
+    assert recorder_columns(rec.replace(
+        '            "frameMs";',
+        '            // the datum moved; the lane did not;\n            "frameMs";')) == (6, 6)
+
+    # Crewed/uncrewed separation. The good shape passes; each way of breaking it is caught.
+    ok = {
+        "ChaseController.cs": """
+            private bool _uncrewed;
+            internal bool FlyUncrewed(Aircraft ac, Vector3 aimDir) { _uncrewed = true; return true; }
+            void Apply() { if (Cfg.ManualOverride.Value && !_uncrewed) { } }
+        """,
+        "TestDrone.cs": "bool ChaseCard(Drone d) { return ChaseController.For(ac).FlyUncrewed(ac, v); }",
+    }
+    assert uncrewed_isolation(ok) == [], uncrewed_isolation(ok)
+    # a second writer (the flag stops being provable from the call graph)
+    bad = dict(ok, **{"ChaseController.cs": ok["ChaseController.cs"] + "\nvoid R() { _uncrewed = false; }"})
+    assert len(uncrewed_isolation(bad)) == 1
+    # the player's seam calling the uncrewed entry point
+    bad = dict(ok, **{"ScenarioPlayer.cs": "void T() { ChaseController.For(ac).FlyUncrewed(ac, v); }"})
+    assert len(uncrewed_isolation(bad)) == 1
+    # a comment mentioning either is not a call and not a write
+    ok2 = dict(ok, **{"Cfg.cs": "// FlyUncrewed sets _uncrewed = true; see ChaseController"})
+    assert uncrewed_isolation(ok2) == [], uncrewed_isolation(ok2)
+
+    # Segment-tag scan. Every real shape: the object initialiser, the two Seg factories, and the two
+    # CONCATENATED sites (Validate's `"seg" + i` and FixedWingSegs' `"micro" + (i + 1)`) whose literal
+    # is a prefix — probed with a "1" so it lands on scorecard's seg\d+ / micro\d+ rules rather than
+    # on the bare prefix, which matches nothing.
+    tagsrc = '''
+        public string tag = "";                       // the field default, not a tag
+        // tag = "commented"
+        var t = new Seg { tag = "rec", dur = 1f };
+        s.tag = "seg" + i;
+        s.Add(Hold("arm", 4f, az0, 0f));
+        s.Add(Hold("micro" + (i + 1), 2f, cur, 0f));
+        s.Add(Walk("fine", 20f, cur, 0f, 0.3f, 1337));
+    '''
+    assert segment_tags(tagsrc) == ["arm", "fine", "micro1", "rec", "seg1"], segment_tags(tagsrc)
+
+    # method_body: the first close-brace at METHOD indent ends it, nested blocks do not.
+    mb = '''
+        private void Finish(string reason)
+        {
+            _rec.Stop(reason);
+            if (x) { RestoreOverrides(); }
+        }
+
+        private void Other() { }
+    '''
+    b = method_body(mb, r"private void Finish\(string reason\)")
+    assert b is not None and "RestoreOverrides" in b and "Other" not in b, b
+    assert method_body(mb, r"private void Nope\(\)") is None
+
+    # source_invariants: the good shape passes, and each documented regression is caught. Only the
+    # files each rule reads are supplied; a missing file makes its rules no-ops, never crashes.
+    good = {
+        "WTMouseAimPlugin.cs": '''
+        private void Update()
+        {
+            TestDrone.SampleFrameTime();
+        }
+
+        private void FixedUpdate()
+        {
+            TestDrone.FixedTick();
+        }
+    ''',
+        "TestDrone.cs": '''
+        internal static void OnPilotStep(Pilot p)
+        {
+            if (p.dead || p.ejected) { Despawn(d, "x"); return; }
+            if (d.LastStep == Time.fixedTime) return;
+        }
+
+        public static void Despawn(Drone d, string reason = "requested")
+        {
+            ForgetState(d.AircraftId);
+        }
+
+        private static void PruneDead()
+        {
+            ForgetState(d.AircraftId);
+        }
+
+        public static Drone Spawn(string jsonKey, Vector3 p)
+        {
+            if (ac.Player != null) return null;
+        }
+
+        public static void FixedTick()
+        {
+            if (_pending > 0) LaunchDue();
+            if (_live.Count > 0) PruneDead();
+            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();
+        }
+    ''',
+        "ScenarioPlayer.cs": '''
+        public void Tick(Aircraft ac)
+        {
+            ApplyOverrides(_card);
+            ApplyArm();
+            StartCard(ac);
+        }
+
+        internal static void MoveAssembly(Aircraft ac, Rigidbody rb, Quaternion dRot, Vector3 pivot,
+                                          Vector3 dPos, Quaternion rot1, Vector3 vel)
+        {
+            ResetGLoadTrackers(ac);
+            rb.position = pivot + dPos;
+            Physics.SyncTransforms();
+        }
+
+        private void ApplyOverrides(Card c)
+        {
+            if (_ovEntries != null) return;
+            if (!PinShared(e, v, o.value, c.name)) continue;
+        }
+
+        private void RestoreOverrides()
+        {
+            if (_ovEntries == null) return;
+            for (int i = 0; i < _ovEntries.Length; i++) UnpinShared(_ovEntries[i]);
+            _ovEntries = null; _ovNote = "";
+        }
+
+        internal static void Forget(int aircraftId)
+        {
+            s.Abort("aircraft gone");
+            _byAc.Remove(aircraftId);
+        }
+
+        public void Abort(string reason, bool fatal = true)
+        {
+            if (fatal) { Finish("abort: " + reason); return; }
+            _rec.Stop("abort: " + reason);
+            NextCard();
+        }
+
+        private void Finish(string reason)
+        {
+            _rec.Stop(reason);
+            RestoreOverrides();
+            _armIdx = -1;
+            _anchorSet = false;
+            _aborted = 0;
+            _card = null; _queue = null; _qi = _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+        }
+
+        private void NextCard()
+        {
+            _rec.Stop("done");
+            RestoreOverrides();
+            _qi++;
+            _card = _queue[_qi]; _si = 0; _tSeg = 0f; _frameSet = false; _placed = false; _lastLogSeg = -1;
+        }
+    ''',
+        "PlayerSpawn.cs": "ResetGLoadTrackers(ac); MoveAssembly(ac, rb, q, v, w);",
+    }
+    assert source_invariants(good) == [], source_invariants(good)
+
+    def broken(name, old, new):
+        d = dict(good)
+        d[name] = d[name].replace(old, new)
+        assert d[name] != good[name], (name, old)          # the substitution itself must have landed
+        return len(source_invariants(d))
+
+    # 1. frameMs sampled from the fixed step again (v0.86-v0.92, R27) — caught twice, once per half:
+    #    missing from Update, and present in FixedUpdate.
+    moved = dict(good, **{"WTMouseAimPlugin.cs": '''
+        private void Update()
+        {
+            AimRig.Update();
+        }
+
+        private void FixedUpdate()
+        {
+            TestDrone.SampleFrameTime();
+            TestDrone.FixedTick();
+        }
+    '''})
+    assert len(source_invariants(moved)) == 2, source_invariants(moved)
+    # 1b. the v0.98 batch interlock: hoisted out of the else, or with the _pending test dropped.
+    #     Both read as harmless tidy-ups and both launch a fleet into an occupied sky.
+    assert broken("TestDrone.cs",
+                  "if (_live.Count > 0) PruneDead();\n            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();",
+                  "if (_live.Count > 0) PruneDead();\n            if (_batch.Length > 1) AdvanceBatch();") == 1
+    assert broken("TestDrone.cs",
+                  "else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();",
+                  "else if (_batch.Length > 1) AdvanceBatch();") == 1
+    # ...and a queue-less build (no AdvanceBatch at all) must stay silent, not fail closed.
+    assert broken("TestDrone.cs",
+                  "            else if (_pending == 0 && _batch.Length > 1) AdvanceBatch();\n", "") == 0
+
+    # 2. the two-seat double-step guard, removed and then moved ahead of the despawn (v0.90.1).
+    assert broken("TestDrone.cs", "if (d.LastStep == Time.fixedTime) return;", "") == 1
+    assert broken("TestDrone.cs",
+                  'if (p.dead || p.ejected) { Despawn(d, "x"); return; }\n            if (d.LastStep == Time.fixedTime) return;',
+                  'if (d.LastStep == Time.fixedTime) return;\n            if (p.dead || p.ejected) { Despawn(d, "x"); return; }') == 1
+    # 3. half the safe-teleport primitive.
+    assert broken("PlayerSpawn.cs", "ResetGLoadTrackers(ac); ", "") == 1
+    # 3b. MoveAssembly is a rigid transform and nothing else (v0.97.2). This is an ANTI-invariant:
+    #     re-adding Repair() must FAIL, because v0.97.0 shipped exactly that and R36 lost 32 of 32
+    #     placements. The ban is on the CLASS, not on Repair — Repair was one spelling of "write a
+    #     Transform in a function that moves bodies" — so the bare xform write and the combined
+    #     setter must fail identically. Both the second sync and a sync before the root write also fail.
+    assert broken("ScenarioPlayer.cs",
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();",
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();\n"
+                  "            p.Repair();\n            Physics.SyncTransforms();") == 1
+    assert broken("ScenarioPlayer.cs", "rb.position = pivot + dPos;",
+                  "rb.position = pivot + dPos;\n            p.xform.position = pivot + dPos;") == 1
+    assert broken("ScenarioPlayer.cs", "rb.position = pivot + dPos;",
+                  "rb.position = pivot + dPos;\n"
+                  "            p.transform.SetPositionAndRotation(pivot + dPos, rot1);") == 1
+    assert broken("ScenarioPlayer.cs",
+                  "            Physics.SyncTransforms();\n",
+                  "            Physics.SyncTransforms();\n            Physics.SyncTransforms();\n") == 1
+    assert broken("ScenarioPlayer.cs",
+                  "rb.position = pivot + dPos;\n            Physics.SyncTransforms();",
+                  "Physics.SyncTransforms();\n            rb.position = pivot + dPos;") == 1
+    # 4. card setup order, both halves.
+    assert broken("ScenarioPlayer.cs", "ApplyOverrides(_card);\n            ApplyArm();",
+                  "ApplyArm();\n            ApplyOverrides(_card);") == 1
+    assert broken("ScenarioPlayer.cs", '_rec.Stop("done");\n            RestoreOverrides();',
+                  'RestoreOverrides();\n            _rec.Stop("done");') == 1
+    # 5. an entry-speed read that skips the resolver.
+    assert broken("ScenarioPlayer.cs", "StartCard(ac);",
+                  "StartCard(ac);\n            float v = c.startSpeed;") == 1
+    # ...and the two deliberate exemptions stay silent: the resolver's own call, and Preview carrying
+    # the (speed, corner) pair for a question asked with no lane in hand.
+    assert broken("ScenarioPlayer.cs", "StartCard(ac);",
+                  "StartCard(ac);\n            float v = ResolveStartSpeed(c.startSpeed, c.startSpeedCorner, k);"
+                  "\n            p.StartSpeed = c.startSpeed;") == 0
+    # 6. one removal path forgetting the registries.
+    assert broken("TestDrone.cs", "        {\n            ForgetState(d.AircraftId);\n        }\n\n        private static void PruneDead()",
+                  "        {\n            _live.Remove(d);\n        }\n\n        private static void PruneDead()") == 1
+    # 7. the assert the whole crewed/uncrewed proof rests on.
+    assert broken("TestDrone.cs", "if (ac.Player != null) return null;", "") == 1
+
+    # 9. the card-pin refcount (v0.99.1). Each of these is the concurrent-fleet corruption restored:
+    #    a direct write beside the helpers, a lost re-entry guard (acquire twice, release once), and a
+    #    lost idempotence guard (release a count another aircraft still holds).
+    assert broken("ScenarioPlayer.cs", "if (!PinShared(e, v, o.value, c.name)) continue;",
+                  "e.BoxedValue = v;") == 2          # no PinShared AND a direct write
+    assert broken("ScenarioPlayer.cs", "            if (_ovEntries != null) return;\n", "") == 1
+    assert broken("ScenarioPlayer.cs", "            if (_ovEntries == null) return;\n", "") == 1
+    assert broken("ScenarioPlayer.cs", "_ovEntries = null; _ovNote = \"\";", "_ovNote = \"\";") == 1
+    # ...and the teardown a dead drone takes must Abort before it drops the entry, or the pins it was
+    # holding are leaked to a refcount nothing can decrement.
+    assert broken("ScenarioPlayer.cs",
+                  's.Abort("aircraft gone");\n            _byAc.Remove(aircraftId);',
+                  '_byAc.Remove(aircraftId);\n            s.Abort("aircraft gone");') == 1
+
+    # 10. the per-replicate reset (v0.99.1, ledger #12's shape). An abort now hands over to NextCard,
+    #     so a field Finish clears and NextCard does not is state that leaks into the next replicate.
+    #     `_derivedRate` stands in for "the next field somebody adds to the teardown".
+    assert broken("ScenarioPlayer.cs", "            _aborted = 0;\n",
+                  "            _aborted = 0;\n            _derivedRate = 0f;\n") == 1
+    #     ...and the per-RUN allowlist must stay silent: the anchor and the A/B schedule are reset by
+    #     Finish precisely BECAUSE NextCard must not touch them.
+    assert broken("ScenarioPlayer.cs", "            _anchorSet = false;\n", "") == 0
+    #     Collapsing Abort back to one always-fatal path is the defect itself.
+    assert broken("ScenarioPlayer.cs", "public void Abort(string reason, bool fatal = true)",
+                  "public void Abort(string reason)") == 1
+
+    # The real file, if we are running inside the repo: header and row must agree today.
+    real = REPO / "Recording.cs"
+    if real.exists():
+        nh, nr = recorder_columns(real.read_text(encoding="utf-8"))
+        assert nh is not None, "Recording.cs no longer parses — fix recorder_columns()"
+        assert nh == nr, f"Recording.cs header {nh} != row {nr}"
     print("ok  selftest passed")
     return 0
 

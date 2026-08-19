@@ -75,6 +75,16 @@
         <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
         <Private>false</Private>
       </Reference>
+      <!-- Test-card (de)serialisation in ScenarioPlayer. Newtonsoft, NOT UnityEngine.JsonUtility:
+           JsonUtility silently DROPS the `Seg[] segments` field in both directions — it wrote every
+           recorded card with no segments and read every disk card back as "no segments — skipped",
+           so from v0.71 to v0.90 no card file on disk ever loaded and nobody noticed, because the
+           built-ins are constructed in C# and never touch the serializer (see v0.90.1 in CHANGELOG).
+           Newtonsoft ships with the game too, so this is still no library of our own. -->
+      <Reference Include="Newtonsoft.Json">
+        <HintPath>$(GameManaged)\Newtonsoft.Json.dll</HintPath>
+        <Private>false</Private>
+      </Reference>
       <!-- OnGUI overlay (step 2) -->
       <Reference Include="UnityEngine.IMGUIModule">
         <HintPath>$(GameManaged)\UnityEngine.IMGUIModule.dll</HintPath>

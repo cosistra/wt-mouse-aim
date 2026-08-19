@@ -1,0 +1,40 @@
+{
+  "name": "place-deflect",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Darkreach",
+  "count": 1,
+  "note": "LEDGER #51, THE DEFLECTION ARM of place-noop -- fly it in the same session, second. Byte-identical entry condition, replicate count and pinned throttle to place-noop; the ONLY difference is that two real azimuth steps are commanded between placements, so a difference between the two cards is attributable to DEFLECTION at matched placement count and matched (minimal) flight time. That is a cleaner contrast than pairing against oblique-6-dwell-t040, which would confound deflection with 126 s of flight per replicate -- and t040 cannot be used directly anyway, since it declares repeat 4 over a 16-lane fleet and both are read off the card, not off F1. +-25 deg was chosen to exercise the ROLL channel: the one surviving correlate for why this is Darkreach-and-EW1-specific is maxRollAngularVel 3 alongside maxPitchAngularVel 0.3. Same readout as place-noop: the replicate index the run aborts at, off the '# stop' line -- NOT dmgFrac, which is 0.0 on every aborted capture by construction.",
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 1.0,
+      "az": 0.0,
+      "el": 0.0
+    },
+    {
+      "tag": "az25R",
+      "dur": 2.0,
+      "az": 25.0,
+      "el": 0.0
+    },
+    {
+      "tag": "az25L",
+      "dur": 2.0,
+      "az": -25.0,
+      "el": 0.0
+    }
+  ],
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 12,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "0.40" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "3000" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ]
+}

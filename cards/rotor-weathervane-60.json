@@ -1,0 +1,80 @@
+{
+  "name": "rotor-weathervane-60",
+  "cls": "Helo,Tiltwing,VTOL",
+  "step": 0.02,
+  "airframe": "AttackHelo1, UtilityHelo1",
+  "note": "FAMILY D1, THE WEATHERVANE / heliBlend TIE-BREAKER - the highest-value card in this batch, because it is the only one that DISCRIMINATES BETWEEN TWO CANDIDATE FIXES rather than confirming one. WHAT IS BEING DECIDED. LAW-LEDGER.md H7 is AttackHelo1's deterministic 1.5-2.4 deg standing pointing residual (replicate CV +/-1-3%), the corpus's first above-floor rotorcraft pointing measurement. It is now traced to the GAME's own HeloFlyByWire weathervane term, which adds a sideslip bias into the yaw RATE ERROR above yawWeathervaneMinSpeed = 40 m/s (decompile :36028-36034 and :36047-36052). The corpus agrees and cannot arbitrate: every CONVERGED R42 tag sits below 40 m/s (34.96, 18.18, 7.33) and every PARKED tag sits at 41.5-41.8 m/s, so 40 falls inside a 0.3 m/s gap at the bottom of a 20 m/s ramp - the split is real and the sample is a single point. TWO MODELS EXPLAIN IT AND THEY PREDICT OPPOSITE THINGS AT 60 m/s. (1) WEATHERVANE: the residual is the game's sideslip bias, it switches on at 40 m/s, and above it num2 saturates to 1.0, so at 60 m/s the residual should be ~13x the R42 value or the pedal should rail outright. (2) heliBLEND: the residual belongs to the mod's rotorcraft yaw path, which is faded out by heliBlend = clamp01((HeliForwardSpeed - vFwd)/(HeliForwardSpeed - HeliHoverSpeed)); at the shipped 60/20 pins, 60 m/s puts heliBlend at exactly 0, the BANK channel takes the whole turn demand, and the residual should DISAPPEAR. One card, two speeds, opposite predictions, no third outcome that fits both. THE SIGNAL is terminal |off| (and fixedWindowOffDeg) plotted against the capture's own spd column, never against the declared entry speed. 35 m/s arm: both models predict a small residual, 0.00-0.1 deg, and it is the control. 60 m/s arm: weathervane predicts >= 10-30 deg or a railed pedal (read stickRailPctY), heliBlend predicts ~0 with the bank channel carrying the turn (read tBankE and outR going live where they were dead in R42). READ spd FIRST OR READ NOTHING. The entry speed is WRITTEN by ScenarioForceEntry and nothing holds it (AuditHold is an instrument, not a controller), and on a rotorcraft the throttle is COLLECTIVE - it buys climb, not forward speed, which comes from attitude. R42 measured AttackHelo1 drifting 4.5 -> 38 m/s and then parking at 41.5-41.8 under TestDrone's own HoldThrottle 0.60, i.e. 0.60 converges just ABOVE the 40 m/s threshold. The pins below are cut from that one datum and ARE FIRST ESTIMATES: 0.45 to sit clear below 40, 0.85 to sit clear above it. IF THE 35 m/s ARM SPENDS ITS SEGMENTS ABOVE 40, OR THE 60 m/s ARM BELOW 40, THE CARD MEASURED NOTHING - re-cut the pins from the spd column and re-fly. That failure mode is cheap to detect and is the first thing to check. startSpeed IS DECLARED > 0 ON PURPOSE. ScenarioPlayer.OwnInputs early-returns at EntrySpeed <= 0, which is exactly why rotor-bistab could not own its throttle and flew TestDrone's 0.60 for the whole card whatever it pinned. A positive entry speed is the only way a rotorcraft card gets its ScenarioThrottle pin honoured at all. IT ALSO CLOSES O14(c). None of the three R42 rotor cards declared an armToggle, so no 'arm=' appeared on any R42 '# config' line, 'arm=-1' could not appear, and the v1.0.1 warm-up fix (#55b) is code-reviewed rather than measured. This card carries Control/IntegralStallGate, which is a real lever here and not a token: the fine integrator winding on error PERSISTENCE instead of error MAGNITUDE is precisely the mechanism that should or should not erase a DETERMINISTIC STANDING residual. repeat 5 = one anchor (replicate 0, scored by neither arm per ledger X27) plus 2 scored replicates per arm per lane, x10 lanes = 20 per arm. COUNT 10, NOT THE ROSTER'S 2: throughput is count, never repeat - repeat is serial and floored at 4k+1 by X27, count is 5x the n in the SAME 15.5 min. Safe here because the readout is a POINTING residual: pooled over 168 corpus segments, log origDist correlates +0.542 with gJitterG (R35's coupling, reproduced) but -0.146 with terminalOffDeg, so the 3.0 -> 9.7 km ring this buys does not reach the metric this card reads. See cards/README.md 'Sizing a card'. GEOMETRY is rotor-bistab's shape at larger dwell: quiet at boresight, then two azimuth steps of increasing size, each bracketed by a return to boresight so the next step is measured from quiet rather than chained off the previous one. 40 s legs because the readout is a STANDING residual and needs to settle, not a transient. ROSTER: AttackHelo1 is H7's own airframe; UtilityHelo1 is the compound helo and has never been flown by this project at all (AIRFRAMES.md has no measured FBW corner for it). If the residual is the game's weathervane term it must appear on both; if it appears on AttackHelo1 alone it is not the game's shared HeloFlyByWire and both models are wrong. QuadVTOL1 is deliberately absent - it is a tiltwing and belongs to D2. THIS CARD IS WHY NO CODE SHIPS TONIGHT: it decides whether the fix goes into the mod's yaw path (heliBlend model) or into a sideslip compensation against the game's own term (weathervane model), and those are different one-line changes in different files. THIS ARM: 60 m/s, ABOVE yawWeathervaneMinSpeed = 40 AND exactly at the shipped HeliForwardSpeed, where the two models split. WEATHERVANE says num2 saturates to 1.0 and the residual grows to ~13x R42's 1.5-2.4 deg, or the pedal rails (stickRailPctY high). heliBLEND says speedRamp = clamp01((60 - 60)/(60 - 20)) = 0, so heliBlend is 0, the rotorcraft yaw path is fully faded out, bank-to-turn takes over and the residual vanishes. The two are not close and one 5-replicate run separates them. WATCH THE SPEED: 60 is the ramp's own top, so any deceleration puts heliBlend above 0 and blurs the split - if the spd column shows the segments living at 45-55 m/s, the arm is still ABOVE the 40 m/s weathervane threshold (so model 1 is still testable) but heliBlend is no longer 0 (so model 2 is not), and the pin needs raising. This is the arm whose throttle estimate matters. R44 VERDICT (2026-08-05): NO DATA. NOT UNDERPOWERED - ABSENT. RE-FLY THIS CARD; IT IS THE ONE UNFINISHED ITEM IN THE BATCH. The game was closed before the arm finished. It wrote 2 captures - d63 AttackHelo1 76 rows and d64 UtilityHelo1 27 rows, i.e. 1.5 s and 0.5 s of a 186 s card - both replicate 1 with arm = NULL (the X27 anchor, armed as neither arm), both with a NULL stop footer, and both containing ONLY their 6 s arm segment (excluded = 1, no metrics at all by construction) plus one stray unsegmented row. Scored segments: ZERO. Nothing here can be read as a 60 m/s measurement, and the 2.13 deg mean |off| visible in AttackHelo1's arm window is a settling transient with the marker still slewing - do not quote it. WHAT THE RE-FLY NEEDS, and it is not just more captures. (1) RE-CUT THE THROTTLE PIN FROM R44's OBSERVED spd. The 0.85 here is untested, but the sibling card shows 0.45 puts AttackHelo1 at 41 m/s, so 0.85 should clear 60 comfortably; UtilityHelo1 is the problem - it reached 90-120 m/s at 0.45 alone, so at 0.85 it will be far past its Vmax 133.9. Drop it or give it its own pin. (2) THIS CARD'S OWN PREDICTION IS WITHDRAWN AS STATED. 'Weathervane => >= 10-30 deg or a railed pedal at 60 m/s' assumes beta holds constant while num2 ramps to 1.0. beta is not an input: it is the EQUILIBRIUM of the weathervane loop against the airframe's own directional stability, so on an airframe whose fin works at 60+ m/s beta collapses and a saturated num2 buys nothing. R44 shows this directly - UtilityHelo1 at 90-120 m/s with heliBlend 0.0000 has terminalOffDeg 0.212-0.279 deg and never rails. A SMALL RESIDUAL AT 60 m/s IS THEREFORE CONSISTENT WITH BOTH MODELS AND DECIDES NOTHING. Score a reconstructed beta from outY via H7's closed form, not off alone. (3) POWER IS NOT THE PROBLEM: at count 10 / repeat 5 this arm alone yields 20 scored captures per airframe in ~16 min against a residual whose replicate CV is ~1%. The risk is entirely in (1) and (2). (4) The control arm already eliminated heliBlend as the selector over [0.65, 0.75], so the re-fly is a one-sided confirmation now, not a coin flip. See LAW-LEDGER.md H7 and LAW-CHARACTERIZATION.md section 7 rotorcraft (d).",
+  "startSpeed": 60,
+  "startAlt": 2500,
+  "count": 10,
+  "repeat": 5,
+  "armToggle": "Control/IntegralStallGate",
+  "config": [
+    {
+      "key": "Scenario/ScenarioThrottle",
+      "value": "0.85"
+    },
+    {
+      "key": "Scenario/ScenarioEntryFuel",
+      "value": "1.00"
+    },
+    {
+      "key": "Scenario/ScenarioForceEntry",
+      "value": "true"
+    },
+    {
+      "key": "Drone/DroneAltDeckM",
+      "value": "0"
+    },
+    {
+      "key": "Drone/DroneStaggerSec",
+      "value": "3"
+    },
+    {
+      "key": "Control/HeliForwardSpeed",
+      "value": "60"
+    },
+    {
+      "key": "Control/HeliHoverSpeed",
+      "value": "20"
+    }
+  ],
+  "segments": [
+    {
+      "tag": "arm",
+      "dur": 6,
+      "az": 0,
+      "el": 0
+    },
+    {
+      "tag": "fineWV60",
+      "dur": 20,
+      "az": 0,
+      "el": 0
+    },
+    {
+      "tag": "az8wv60",
+      "dur": 40,
+      "az": 8,
+      "el": 0
+    },
+    {
+      "tag": "az8wv60rec",
+      "dur": 40,
+      "az": 0,
+      "el": 0
+    },
+    {
+      "tag": "az12wv60",
+      "dur": 40,
+      "az": 12,
+      "el": 0
+    },
+    {
+      "tag": "az12wv60rec",
+      "dur": 40,
+      "az": 0,
+      "el": 0
+    }
+  ]
+}

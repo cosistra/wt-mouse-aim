@@ -1,0 +1,27 @@
+{
+  "name": "oblique-6-dwell-t100",
+  "cls": "Plane",
+  "step": 0.02,
+  "airframe": "Fighter1, Multirole1, SmallFighter1, trainer, VTOLTrainer1, CAS1, COIN, EW1, FastBomber1, Darkreach",
+  "count": 16,
+  "note": "HIGH-THROTTLE ARM of the q axis. Geometry, entry condition, altitude, lane list and lane count are byte-identical to 'oblique-6-dwell'; the ONLY differences are the pinned ScenarioThrottle (1.00 instead of the 0.70 default) and repeat 4 instead of 8. See 'oblique-6-dwell-t040' for why the axis exists. THE ONE CAVEAT THIS ARM HAS AND THE LOW ARM DOES NOT: at 1.00 the fast lanes can reach the aero ceiling and stop separating. R37 already had Multirole1 at 2.37x corner = 379 m/s on leg 4 at throttle 0.70, against a 416.7 m/s Vmax. Read spd / sc_infoMaxSpeed per lane: a lane above 0.95 of that is riding its own Vmax and its manipulation is COMPRESSED, not absent -- report it, do not drop it. TAGS carry a t10 suffix so no tool can pool them with the 0.70 anchor's legs; the suffix resolves to oblique_step by prefix. CARD-OWNED VALUES (v1.0.3): Drone/DroneAltDeckM = 0 - corpus: this card last flew in R39 (v0.98.1), before Drone/DroneAltDeckM existed (v0.99), so every lane flew one deck.",
+  "startSpeed": 250,
+  "startSpeedCorner": 0.95,
+  "startAlt": 4000,
+  "repeat": 4,
+  "armToggle": "none",
+  "config": [
+    { "key": "Scenario/ScenarioThrottle", "value": "1.00" },
+    { "key": "Scenario/ScenarioEntryFuel", "value": "1.00" },
+    { "key": "Scenario/ScenarioForceEntry", "value": "true" },
+    { "key": "Drone/DroneAltDeckM", "value": "0" },
+    { "key": "Drone/DroneStaggerSec", "value": "3" }
+  ],
+  "segments": [
+    { "tag": "arm",      "dur": 6,  "az": 0,     "el": 4.24 },
+    { "tag": "obDR6t10", "dur": 30, "az": 4.24,  "el": 0    },
+    { "tag": "obDL6t10", "dur": 30, "az": 0,     "el": -4.24 },
+    { "tag": "obUL6t10", "dur": 30, "az": -4.24, "el": 0    },
+    { "tag": "obUR6t10", "dur": 30, "az": 0,     "el": 4.24 }
+  ]
+}
